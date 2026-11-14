@@ -1,0 +1,271 @@
+-- PHASE 2A DESIGN DRAFT: NOT A DEPLOYABLE MIGRATION. Do not place under
+-- supabase/migrations or apply to a live project. All client DML is denied.
+-- gen_random_uuid() is built in on supported PostgreSQL versions.
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete restrict,
+  display_name text not null check (length(btrim(display_name)) between 2 and 100),
+  created_at timestamptz not null default now()
+);
+create table public.leagues (
+  id uuid primary key default gen_random_uuid(), name text not null check(length(btrim(name)) between 2 and 100),
+  budget numeric(12,2) not null default 100000000 check(budget > 0), market_open boolean not null default true,
+  created_at timestamptz not null default now(), archived_at timestamptz
+);
+create table public.league_members (
+  league_id uuid not null references public.leagues(id) on delete restrict,
+  user_id uuid not null references public.profiles(id) on delete restrict,
+  role text not null check(role in ('leader','manager')),
+  status text not null default 'active' check(status in ('active','inactive')),
+  joined_at timestamptz not null default now(), primary key(league_id,user_id)
+);
+create unique index one_active_leader_per_league on public.league_members(league_id) where role='leader' and status='active';
+create index league_members_user_idx on public.league_members(user_id,league_id) where status='active';
+create table public.match_organizers (
+  league_id uuid not null, user_id uuid not null, primary key(league_id,user_id),
+  foreign key(league_id,user_id) references public.league_members(league_id,user_id) on delete restrict
+);
+-- Person identity is league-scoped in this draft; no automatic cross-league identity linking.
+create table public.player_profiles (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  display_name text not null check(length(btrim(display_name)) between 2 and 100), image_path text, image_url text,
+  created_at timestamptz not null default now(), unique(league_id,id)
+);
+create table public.real_football_teams (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  name text not null, active boolean not null default true, unique(league_id,id), unique(league_id,name)
+);
+create table public.real_team_players (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, team_id uuid not null, player_id uuid not null,
+  valid_from timestamptz not null, valid_until timestamptz,
+  check(valid_until is null or valid_until > valid_from), unique(league_id,id),
+  foreign key(league_id,team_id) references public.real_football_teams(league_id,id) on delete restrict,
+  foreign key(league_id,player_id) references public.player_profiles(league_id,id) on delete restrict
+);
+create index real_team_players_lookup on public.real_team_players(league_id,team_id,player_id,valid_from,valid_until);
+create table public.league_players (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, player_id uuid not null,
+  position text not null check(position in ('GK','DEF','MID','FWD')),
+  price numeric(12,2) not null check(price>0), rating smallint not null check(rating between 1 and 99),
+  active boolean not null default true, unique(league_id,id), unique(league_id,player_id),
+  foreign key(league_id,player_id) references public.player_profiles(league_id,id) on delete restrict
+);
+create index league_players_market_idx on public.league_players(league_id,active,position,price);
+create table public.player_suggestions (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  submitted_by uuid not null, name text not null check(length(btrim(name)) between 2 and 100),
+  position text not null check(position in ('GK','DEF','MID','FWD')), image_path text, image_url text, notes text check(length(notes)<=500),
+  status text not null default 'pending' check(status in ('pending','approved','rejected')),
+  league_player_id uuid, created_at timestamptz not null default now(), unique(league_id,id),
+  foreign key(league_id,submitted_by) references public.league_members(league_id,user_id) on delete restrict,
+  foreign key(league_id,league_player_id) references public.league_players(league_id,id) on delete restrict,
+  check((status='approved' and league_player_id is not null) or (status<>'approved' and league_player_id is null)),
+  unique(league_player_id)
+);
+create unique index one_pending_name_per_league on public.player_suggestions(league_id,lower(btrim(name))) where status='pending';
+create table public.player_approval_logs (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, suggestion_id uuid not null,
+  actor_id uuid not null, decision text not null check(decision in ('approved','rejected')), reason text, created_at timestamptz not null default now(),
+  foreign key(league_id,suggestion_id) references public.player_suggestions(league_id,id) on delete restrict,
+  foreign key(league_id,actor_id) references public.league_members(league_id,user_id) on delete restrict,
+  unique(league_id,suggestion_id)
+);
+create table public.seasons (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  name text not null check(length(btrim(name))>0), starts_at timestamptz not null, ends_at timestamptz not null check(ends_at>starts_at),
+  unique(league_id,id), unique(league_id,name)
+);
+create table public.gameweeks (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict, season_id uuid not null,
+  number integer not null check(number>0), deadline timestamptz not null, scoring_rule_set_id uuid,
+  unique(league_id,id), unique(league_id,season_id,number), unique(league_id,id,scoring_rule_set_id),
+  foreign key(league_id,season_id) references public.seasons(league_id,id) on delete restrict
+);
+create table public.fantasy_teams (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, manager_id uuid not null, name text not null,
+  created_at timestamptz not null default now(), unique(league_id,id), unique(league_id,manager_id),
+  foreign key(league_id,manager_id) references public.league_members(league_id,user_id) on delete restrict
+);
+create table public.fantasy_squad_players (
+  league_id uuid not null, fantasy_team_id uuid not null, league_player_id uuid not null, acquired_price numeric(12,2) not null check(acquired_price>0),
+  primary key(fantasy_team_id,league_player_id),
+  foreign key(league_id,fantasy_team_id) references public.fantasy_teams(league_id,id) on delete restrict,
+  foreign key(league_id,league_player_id) references public.league_players(league_id,id) on delete restrict
+);
+create index fantasy_squad_player_ownership on public.fantasy_squad_players(league_id,league_player_id);
+create table public.fantasy_lineups (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, fantasy_team_id uuid not null, gameweek_id uuid not null,
+  version integer not null check(version>0), status text not null check(status in ('draft','confirmed','superseded')),
+  formation text not null default '4-3-3' check(formation in ('4-3-3','4-4-2','3-5-2','3-4-3','4-5-1','5-3-2','5-4-1')),
+  created_at timestamptz not null default now(), unique(league_id,id), unique(fantasy_team_id,gameweek_id,version),
+  foreign key(league_id,fantasy_team_id) references public.fantasy_teams(league_id,id) on delete restrict,
+  foreign key(league_id,gameweek_id) references public.gameweeks(league_id,id) on delete restrict
+);
+create unique index one_confirmed_lineup on public.fantasy_lineups(fantasy_team_id,gameweek_id) where status='confirmed';
+create table public.fantasy_lineup_players (
+  league_id uuid not null, lineup_id uuid not null, league_player_id uuid not null,
+  position_snapshot text not null check(position_snapshot in ('GK','DEF','MID','FWD')), price_snapshot numeric(12,2) check(price_snapshot>0),
+  slot smallint not null check(slot between 1 and 15), captain boolean not null default false, vice_captain boolean not null default false,
+  primary key(lineup_id,league_player_id), unique(lineup_id,slot), check(not (captain and vice_captain)),
+  foreign key(league_id,lineup_id) references public.fantasy_lineups(league_id,id) on delete restrict,
+  foreign key(league_id,league_player_id) references public.league_players(league_id,id) on delete restrict
+);
+create unique index one_lineup_captain on public.fantasy_lineup_players(lineup_id) where captain;
+create unique index one_lineup_vice on public.fantasy_lineup_players(lineup_id) where vice_captain;
+create table public.transfers (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, fantasy_team_id uuid not null, gameweek_id uuid not null,
+  out_player_id uuid, in_player_id uuid not null, out_price numeric(12,2), in_price numeric(12,2) not null,
+  created_at timestamptz not null default now(), actor_id uuid not null, check(out_player_id is distinct from in_player_id),
+  foreign key(league_id,fantasy_team_id) references public.fantasy_teams(league_id,id) on delete restrict,
+  foreign key(league_id,gameweek_id) references public.gameweeks(league_id,id) on delete restrict,
+  foreign key(league_id,out_player_id) references public.league_players(league_id,id) on delete restrict,
+  foreign key(league_id,in_player_id) references public.league_players(league_id,id) on delete restrict,
+  foreign key(league_id,actor_id) references public.league_members(league_id,user_id) on delete restrict
+);
+create index transfers_team_time_idx on public.transfers(fantasy_team_id,created_at desc);
+create table public.real_matches (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, gameweek_id uuid not null,
+  team_a_id uuid not null, team_b_id uuid not null, organizer_id uuid not null,
+  starts_at timestamptz not null, venue text not null, starters_per_side smallint not null check(starters_per_side between 1 and 11),
+  max_substitutes smallint not null check(max_substitutes between 0 and 30),
+  created_at timestamptz not null default now(), check(team_a_id<>team_b_id), unique(league_id,id),
+  foreign key(league_id,gameweek_id) references public.gameweeks(league_id,id) on delete restrict,
+  foreign key(league_id,team_a_id) references public.real_football_teams(league_id,id) on delete restrict,
+  foreign key(league_id,team_b_id) references public.real_football_teams(league_id,id) on delete restrict,
+  foreign key(league_id,organizer_id) references public.league_members(league_id,user_id) on delete restrict
+);
+create index real_matches_gameweek_idx on public.real_matches(league_id,gameweek_id,starts_at);
+create table public.match_revisions (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, version integer not null check(version>0),
+  state text not null default 'draft' check(state in ('draft','submitted','approved','rejected','corrected')),
+  -- Snapshot of date, venue, gameweek, teams and format; workflow must validate and freeze it.
+  match_snapshot jsonb not null default '{}',
+  team_a_score integer check(team_a_score>=0), team_b_score integer check(team_b_score>=0), created_at timestamptz not null default now(),
+  unique(league_id,id), unique(league_id,match_id,id), unique(match_id,version),
+  foreign key(league_id,match_id) references public.real_matches(league_id,id) on delete restrict
+);
+create table public.real_match_lineups (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, revision_id uuid not null, team_id uuid not null,
+  unique(league_id,id), unique(revision_id,team_id), unique(league_id,revision_id,id),
+  foreign key(league_id,match_id,revision_id) references public.match_revisions(league_id,match_id,id) on delete restrict,
+  foreign key(league_id,team_id) references public.real_football_teams(league_id,id) on delete restrict
+);
+create table public.real_match_lineup_players (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, revision_id uuid not null, lineup_id uuid not null, player_id uuid not null,
+  selection text not null check(selection in ('starter','substitute')), actual_position text not null check(actual_position in ('GK','DEF','MID','FWD')),
+  eligibility_kind text not null check(eligibility_kind in ('registered','temporary')), eligibility_evidence jsonb not null,
+  unique(league_id,id), unique(revision_id,player_id), unique(league_id,revision_id,player_id),
+  foreign key(league_id,revision_id,lineup_id) references public.real_match_lineups(league_id,revision_id,id) on delete restrict,
+  foreign key(league_id,player_id) references public.player_profiles(league_id,id) on delete restrict
+);
+create index real_lineup_selection_idx on public.real_match_lineup_players(lineup_id,selection);
+create table public.temporary_participant_authorizations (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, team_id uuid not null, player_id uuid not null,
+  authorized_by uuid not null, reason text not null check(length(btrim(reason))>0), created_at timestamptz not null default now(),
+  unique(match_id,team_id,player_id),
+  foreign key(league_id,match_id) references public.real_matches(league_id,id) on delete restrict,
+  foreign key(league_id,team_id) references public.real_football_teams(league_id,id) on delete restrict,
+  foreign key(league_id,player_id) references public.player_profiles(league_id,id) on delete restrict,
+  foreign key(league_id,authorized_by) references public.league_members(league_id,user_id) on delete restrict
+);
+create table public.match_events (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, revision_id uuid not null, player_id uuid not null,
+  related_player_id uuid, event_type text not null check(length(btrim(event_type)) between 1 and 80),
+  minute integer check(minute>=0), quantity integer not null default 1 check(quantity>0), details jsonb not null default '{}',
+  foreign key(league_id,revision_id,player_id) references public.real_match_lineup_players(league_id,revision_id,player_id) on delete restrict,
+  foreign key(league_id,revision_id,related_player_id) references public.real_match_lineup_players(league_id,revision_id,player_id) on delete restrict,
+  check(related_player_id is null or related_player_id<>player_id)
+);
+create index match_events_revision_idx on public.match_events(league_id,revision_id,player_id);
+create table public.match_submissions (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, revision_id uuid not null,
+  kind text not null check(kind in ('lineup','result')), approved_lineup_approval_id uuid, approved_lineup_decision text, approved_lineup_kind text, submitted_by uuid not null, submitted_at timestamptz not null default now(),
+  unique(league_id,id), unique(league_id,match_id,id,revision_id,kind), unique(revision_id,kind),
+  check((kind='lineup' and approved_lineup_approval_id is null and approved_lineup_decision is null and approved_lineup_kind is null) or (kind='result' and approved_lineup_approval_id is not null and approved_lineup_decision is not null and approved_lineup_kind is not null and approved_lineup_decision='approved' and approved_lineup_kind='lineup')),
+  foreign key(league_id,match_id,revision_id) references public.match_revisions(league_id,match_id,id) on delete restrict,
+  foreign key(league_id,submitted_by) references public.league_members(league_id,user_id) on delete restrict
+);
+create table public.match_approvals (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, submission_id uuid not null, revision_id uuid not null, kind text not null check(kind in ('lineup','result')),
+  decision text not null check(decision in ('approved','rejected')), reviewed_by uuid not null, reason text, reviewed_at timestamptz not null default now(),
+  unique(league_id,id), unique(league_id,id,revision_id,decision,kind), unique(league_id,match_id,id,decision,kind), unique(submission_id),
+  foreign key(league_id,match_id,submission_id,revision_id,kind) references public.match_submissions(league_id,match_id,id,revision_id,kind) on delete restrict,
+  foreign key(league_id,reviewed_by) references public.league_members(league_id,user_id) on delete restrict
+);
+alter table public.match_submissions add constraint result_requires_approved_lineup foreign key(league_id,match_id,approved_lineup_approval_id,approved_lineup_decision,approved_lineup_kind) references public.match_approvals(league_id,match_id,id,decision,kind) on delete restrict;
+create table public.scoring_rule_sets (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  version integer not null check(version>0), state text not null check(state in ('draft','published','retired')),
+  captain_multiplier numeric(5,2) not null default 2 check(captain_multiplier=2), vice_policy jsonb not null default '{}', bench_policy jsonb not null default '{}',
+  published_at timestamptz, unique(league_id,id), unique(league_id,version)
+);
+alter table public.gameweeks add constraint gameweek_scoring_version_fk foreign key(league_id,scoring_rule_set_id) references public.scoring_rule_sets(league_id,id) on delete restrict;
+create table public.scoring_rule_values (
+  league_id uuid not null, rule_set_id uuid not null, event_type text not null, position text not null check(position in ('GK','DEF','MID','FWD')),
+  points numeric(10,2) not null, primary key(rule_set_id,event_type,position),
+  foreign key(league_id,rule_set_id) references public.scoring_rule_sets(league_id,id) on delete restrict
+);
+-- Only a future trusted approval workflow may create official_result pointers.
+create table public.official_match_results (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, match_id uuid not null, revision_id uuid not null, approval_id uuid not null,
+  is_current boolean not null default true, decision text not null default 'approved' check(decision='approved'), kind text not null default 'result' check(kind='result'), unique(league_id,id), unique(league_id,id,revision_id), unique(approval_id),
+  foreign key(league_id,match_id,revision_id) references public.match_revisions(league_id,match_id,id) on delete restrict,
+  foreign key(league_id,approval_id,revision_id,decision,kind) references public.match_approvals(league_id,id,revision_id,decision,kind) on delete restrict
+);
+create unique index one_current_official_result on public.official_match_results(match_id) where is_current;
+create table public.match_player_performances (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, official_result_id uuid not null, revision_id uuid not null,
+  player_id uuid not null, played boolean not null, actual_position text not null check(actual_position in ('GK','DEF','MID','FWD')),
+  unique(league_id,id), unique(official_result_id,player_id),
+  foreign key(league_id,official_result_id,revision_id) references public.official_match_results(league_id,id,revision_id) on delete restrict,
+  foreign key(league_id,revision_id,player_id) references public.real_match_lineup_players(league_id,revision_id,player_id) on delete restrict
+);
+create table public.scoring_runs (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, gameweek_id uuid not null, rule_set_id uuid not null,
+  status text not null check(status in ('pending','complete','superseded','failed')), input_hash text not null, created_at timestamptz not null default now(),
+  unique(league_id,id), unique(gameweek_id,input_hash),
+  foreign key(league_id,gameweek_id,rule_set_id) references public.gameweeks(league_id,id,scoring_rule_set_id) on delete restrict,
+  foreign key(league_id,rule_set_id) references public.scoring_rule_sets(league_id,id) on delete restrict
+);
+create unique index one_complete_scoring_run on public.scoring_runs(gameweek_id) where status='complete';
+create table public.fantasy_score_items (
+  league_id uuid not null, scoring_run_id uuid not null, fantasy_lineup_id uuid not null, performance_id uuid not null,
+  base_points numeric(12,2) not null, multiplier numeric(5,2) not null check(multiplier in (1,2)), points numeric(12,2) not null,
+  primary key(scoring_run_id,fantasy_lineup_id,performance_id), check(points=base_points*multiplier),
+  foreign key(league_id,scoring_run_id) references public.scoring_runs(league_id,id) on delete restrict,
+  foreign key(league_id,fantasy_lineup_id) references public.fantasy_lineups(league_id,id) on delete restrict,
+  foreign key(league_id,performance_id) references public.match_player_performances(league_id,id) on delete restrict
+);
+create table public.fantasy_scores (
+  league_id uuid not null, scoring_run_id uuid not null, fantasy_team_id uuid not null, points numeric(12,2) not null,
+  primary key(scoring_run_id,fantasy_team_id),
+  foreign key(league_id,scoring_run_id) references public.scoring_runs(league_id,id) on delete restrict,
+  foreign key(league_id,fantasy_team_id) references public.fantasy_teams(league_id,id) on delete restrict
+);
+create table public.head_to_head_fixtures (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, gameweek_id uuid not null, home_team_id uuid not null, away_team_id uuid not null,
+  check(home_team_id<>away_team_id), unique(league_id,id),
+  foreign key(league_id,gameweek_id) references public.gameweeks(league_id,id) on delete restrict,
+  foreign key(league_id,home_team_id) references public.fantasy_teams(league_id,id) on delete restrict,
+  foreign key(league_id,away_team_id) references public.fantasy_teams(league_id,id) on delete restrict
+);
+create index h2h_gameweek_idx on public.head_to_head_fixtures(league_id,gameweek_id);
+create table public.league_standings (
+  league_id uuid not null, season_id uuid not null, fantasy_team_id uuid not null, mode text not null check(mode in ('fantasy_total','head_to_head')),
+  fantasy_points numeric(12,2) not null, h2h_points integer, computed_at timestamptz not null default now(),
+  primary key(league_id,season_id,fantasy_team_id,mode), check((mode='fantasy_total' and h2h_points is null) or (mode='head_to_head' and h2h_points is not null)),
+  foreign key(league_id,fantasy_team_id) references public.fantasy_teams(league_id,id) on delete restrict,
+  foreign key(league_id,season_id) references public.seasons(league_id,id) on delete restrict
+);
+create table public.notifications (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null, recipient_id uuid not null, kind text not null,
+  payload jsonb not null default '{}', created_at timestamptz not null default now(), read_at timestamptz,
+  foreign key(league_id,recipient_id) references public.league_members(league_id,user_id) on delete restrict
+);
+create index notifications_recipient_idx on public.notifications(recipient_id,created_at desc);
+create table public.audit_logs (
+  id uuid primary key default gen_random_uuid(), league_id uuid not null references public.leagues(id) on delete restrict,
+  actor_id uuid not null references public.profiles(id) on delete restrict, action text not null, entity_type text not null, entity_id uuid not null,
+  before_data jsonb, after_data jsonb, reason text, created_at timestamptz not null default now(),
+  foreign key(league_id,actor_id) references public.league_members(league_id,user_id) on delete restrict
+);
+create index audit_entity_idx on public.audit_logs(league_id,entity_type,entity_id,created_at desc);

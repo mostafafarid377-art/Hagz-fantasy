@@ -11,7 +11,9 @@
     "preview": "vite preview --host 0.0.0.0",
     "test:e2e:pages": "VITE_BASE_PATH=/Hagz-fantasy/ VITE_ROUTER_MODE=hash npm run build && playwright test -c playwright.pages.config.ts",
     "test:pages:assets": "VITE_BASE_PATH=/Hagz-fantasy/ VITE_ROUTER_MODE=hash npm run build && VITE_BASE_PATH=/Hagz-fantasy/ node scripts/check-pages-build.mjs",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "test:db:design": "node --test supabase/design/tests/design.test.mjs",
+    "types:db:design": "node supabase/design/generate-types.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",
@@ -28,6 +30,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "@playwright/test": "^1.49.1",
     "@types/node": "^26.6.6",
     "@types/react": "^18.3.18",
