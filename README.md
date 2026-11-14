@@ -1,1 +1,41 @@
-# Hagz-fantasy
+# Fantasy Friends — Phase 0
+
+A mobile-first, local demo of private fantasy football for your own football community. **Your friends. Your team. Your league.**
+
+## Run locally
+
+Requires Node.js 20+ and npm.
+
+```sh
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite. Choose **Explore demo** on the landing page; no account or credentials are required. Switch between Manager and League Leader via the icon beside the profile in the top bar, or in **Settings → Demo role**. Switch leagues in the sidebar. The language control is available in the header and settings.
+
+```sh
+npm test                # Vitest business-rule tests
+npm run build           # TypeScript check and production bundle
+npx playwright install   # install browser and OS dependencies if necessary
+npm run test:e2e        # Playwright browser tests
+```
+
+For a preinstalled Chromium executable, optionally set `CHROMIUM_PATH` when running the E2E suite. Playwright also requires the system libraries documented by Playwright (on Linux, `npx playwright install-deps chromium`).
+
+## Project structure
+
+- `src/data` — seed leagues, players, squads and standings
+- `src/types` — domain types
+- `src/services` — squad, permission and suggestion rules, with unit tests
+- `src/hooks` — locally persisted demo state and actions
+- `src/components`, `src/layouts`, `src/pages` — reusable UI and routes
+- `src/translations` — i18next English/Arabic strings and language selection
+- `e2e` — browser journeys
+
+## Demo behavior and limitations
+
+Data is stored in this browser's localStorage, not a database. Reset it in Settings. Roles are a demo UI concept, not security or authentication. Creating/joining leagues, market edits, suggestions and reviews, squad changes, captain choices and market status are local only. A newly created league starts with an empty independent market. Players can be owned by multiple managers; each role has a separate squad. The first 11 roster entries are starters; use the arrows to reorder, and the rest are bench players. The default squad starts in a 4-3-3; formation is not automatically enforced after edits. The squad builder enforces the budget, 15-player limit, per-position limits and duplicate prevention.
+
+Fixtures, standings, match events, fantasy points, activity and notifications are illustrative static data; they do not recalculate for new leagues or squad changes. There is no match scoring engine, result verification, real login, real invitations, payment, API, Supabase or multi-device synchronization. Image URLs are optional external links, not uploaded files. Demo permissions are not a substitute for server authorization. The match dates and season are fictional sample content.
+
+Recommended next phase: design the Supabase schema and row-level security around league membership and multiple ownership; add real authentication and invitations, server-side validation and transactional market workflows, followed by verified match results and a tested points engine. Connect competition views to league-specific live data only after these foundations are in place.
