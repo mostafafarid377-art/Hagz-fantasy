@@ -19,3 +19,12 @@ test('GitHub Pages build loads under a project subdirectory and survives a route
   await expect(page.getByRole('heading', { name: 'Player Market' })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('profile back preserves the originating route in a Pages hash build', async ({page})=>{
+  await page.goto('./#/squad-builder');
+  await page.locator('.pitch-player[aria-label="Player details: Omar Khaled"]').click();
+  await page.getByRole('link',{name:'Full profile'}).click();
+  await expect.poll(()=>new URL(page.url()).hash).toBe('#/players/p1');
+  await page.getByRole('link',{name:'Back',exact:true}).click();
+  await expect.poll(()=>new URL(page.url()).hash).toBe('#/squad-builder');
+});
