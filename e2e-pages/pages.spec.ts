@@ -1,0 +1,21 @@
+import { test, expect } from '@playwright/test';
+
+test('GitHub Pages build loads under a project subdirectory and survives a route refresh', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('response', response => {
+    if (response.status() >= 400 && response.url().startsWith('http://127.0.0.1:4174/')) {
+      errors.push(`${response.status()} ${response.url()}`);
+    }
+  });
+  await page.goto('./');
+  await expect(page.getByRole('link', { name: 'Explore demo' })).toBeVisible();
+  await page.getByRole('link', { name: 'Explore demo' }).click();
+  await expect(page.getByRole('heading', { name: /Welcome back/ })).toBeVisible();
+  await expect.poll(() => new URL(page.url()).hash).toBe('#/dashboard');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /Welcome back/ })).toBeVisible();
+  await page.getByRole('link', { name: 'Player Market', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Player Market' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
