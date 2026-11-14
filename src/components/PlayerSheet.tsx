@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { DetailLink } from './Navigation';
 import { useTranslation } from 'react-i18next';
 import { X, ArrowRightLeft } from 'lucide-react';
 import { Avatar } from './UI';
@@ -28,7 +28,7 @@ export function PlayerSheet({player,players,squad,budget,marketOpen,builder,clos
       {(result?.error||message)&&<p className="error" role="alert">{t(errors[result?.error||message]||message)}</p>}
       <button type="button" className="button sheet-primary" disabled={!result?.squad} onClick={()=>{if(!incoming)return;const error=transfer(player.id,incoming.id);if(error)setMessage(error);else close();}}>{t('Confirm replacement')}</button>
     </section>}
-    <div className="sheet-actions"><Link className="button button-outline" to={`/players/${player.id}`} onClick={close}>{t('Full profile')}</Link>{builder?<button type="button" className="button" onClick={()=>{setReplacing(true);setIncomingId('');}} disabled={replacing}>{t('Select replacement')}</button>:<button type="button" className="button" disabled={!canSwap} onClick={startSwap}><ArrowRightLeft size={16}/>{t('Make substitution')}</button>}</div>
+    <div className="sheet-actions"><DetailLink className="button button-outline" to={`/players/${player.id}`} onClick={close}>{t('Full profile')}</DetailLink>{builder?<button type="button" className="button" onClick={()=>{setReplacing(true);setIncomingId('');}} disabled={replacing}>{t('Select replacement')}</button>:<button type="button" className="button" disabled={!canSwap} onClick={startSwap}><ArrowRightLeft size={16}/>{t('Make substitution')}</button>}</div>
     {!builder&&!canSwap&&<p className="sheet-note">{t('No eligible swap preserves or improves your formation.')}</p>}
   </dialog>;
 }
