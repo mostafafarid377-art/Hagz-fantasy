@@ -52,6 +52,26 @@ export function validateSquad(squad: Squad, players: Player[], budget = 100): Sq
   if (squad.captainId && squad.captainId === squad.viceCaptainId) issues.push('captainsSame');
   return issues;
 }
+// A guided substitution cannot make the chosen formation less accurate. This
+// allows same-position swaps in a valid lineup and corrective swaps in a draft.
+export function substitutionTargets(squad: Squad, players: Player[], sourceId: string): string[] {
+  const source = squad.playerIds.indexOf(sourceId);
+  if (source < 0) return [];
+  const scoped = players.filter(p => p.leagueId === squad.leagueId);
+  const desired = formations[squad.formation || defaultFormation] || formations[defaultFormation];
+  const difference = (ids:string[]) => {
+    const actual=squadSummary(ids.slice(0,11),scoped).counts;
+    return positions.reduce((total,pos)=>total+Math.abs(actual[pos]-desired[pos]),0);
+  };
+  const before=difference(squad.playerIds);
+  const original = scoped.find(p=>p.id===sourceId);
+  if (!original) return [];
+  return squad.playerIds.filter((id,index)=>{
+    if ((source<11)===(index<11) || !scoped.some(p=>p.id===id)) return false;
+    const next=[...squad.playerIds];[next[source],next[index]]=[next[index],next[source]];
+    return scoped.find(p=>p.id===id)?.position===original.position || difference(next)<before;
+  });
+}
 export function transferPlayer(squad: Squad, outId: string, inId: string, players: Player[], budget: number, marketOpen = true): { squad?: Squad; error?: string } {
   if (!marketOpen) return { error: 'marketClosed' };
   const outgoing = players.find(p => p.id === outId && p.leagueId === squad.leagueId);

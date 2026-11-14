@@ -1,9 +1,11 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type SetStateAction } from 'react';
 import { initialState } from '../data/demo';
+import { saveLocalImage, commitLocalImage, discardDraftImage, deleteLocalImage, isLocalImage } from '../services/image';
 import { canAddPlayer, defaultFormation, formations, reviewSuggestion, saveMarketPlayer, setMarketStatus, submitSuggestion, transferPlayer, validateSquad } from '../services/rules';
 import type { DemoState, Player, Position, Squad, Suggestion } from '../types';
 const KEY = 'fantasy-friends-demo-v1';
 function persistDemo(next: DemoState): boolean { try { localStorage.setItem(KEY, JSON.stringify(next)); return true; } catch { return false; } }
+function cleanupImages(previous: DemoState, next: DemoState) { const used = new Set([...next.players, ...next.suggestions].map(item => item.image)); const old = new Set([...previous.players, ...previous.suggestions].map(item => item.image)); for (const ref of old) if (ref && isLocalImage(ref) && !used.has(ref)) void deleteLocalImage(ref); }
 function load(): DemoState {
   try {
     const raw = localStorage.getItem(KEY);
@@ -21,6 +23,29 @@ function useDemoStore() {
     reactSetState(next);
   };
   useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* Demo remains usable without storage. */ } }, [state]);
+  // Migrate pre-IndexedDB demo photos without dropping them if storage is unavailable.
+  useEffect(() => {
+    let active = true;
+    const legacy = [...new Set([...current.current.players, ...current.current.suggestions].map(item => item.image).filter((image): image is string => !!image && image.startsWith('data:image/')))];
+    void (async () => {
+      for (const old of legacy) {
+        let ref: string | undefined;
+        try {
+          const blob = await (await fetch(old)).blob();
+          ref = await saveLocalImage(blob);
+          if (!active) { await discardDraftImage(ref); continue; }
+          const s = current.current;
+          const contains = [...s.players, ...s.suggestions].some(item => item.image === old);
+          if (!contains) { await discardDraftImage(ref); continue; }
+          const next = { ...s, players: s.players.map(p => p.image === old ? {...p, image: ref} : p), suggestions: s.suggestions.map(p => p.image === old ? {...p, image: ref} : p) };
+          if (!persistDemo(next)) { await discardDraftImage(ref); continue; }
+          commitLocalImage(ref); setState(next);
+        } catch { if (ref) await discardDraftImage(ref); }
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
   const league = state.leagues.find(l => l.id === state.leagueId) ?? state.leagues[0];
   const players = state.players.filter(p => p.leagueId === league.id);
   const squad: Squad = state.squads.find(s => s.leagueId === league.id && s.managerId === state.role) ?? { leagueId: league.id, managerId: state.role, playerIds: [], formation: defaultFormation };
@@ -67,13 +92,13 @@ function useDemoStore() {
   };
   const savePlayer = (player: Player) => {
     const s = current.current;
-    try { const next = { ...s, players: saveMarketPlayer(s.role, s.leagueId, player, s.players, s.suggestions) }; if (!persistDemo(next)) return false; setState(next); return true; } catch { return false; }
+    try { const next = { ...s, players: saveMarketPlayer(s.role, s.leagueId, player, s.players, s.suggestions) }; if (!persistDemo(next)) return false; setState(next); cleanupImages(s, next); return true; } catch { return false; }
   };
   const setMarketOpen = (open: boolean) => {
     const s = current.current;
     try { setState(setMarketStatus(s, s.leagueId, open)); return true; } catch { return false; }
   };
-  return { state, setState, league, players, squad, updateSquad, addPlayer, removePlayer, transfer, confirmSquad, suggest, review, savePlayer, setMarketOpen, reset: () => setState(initialState) };
+  return { state, setState, league, players, squad, updateSquad, addPlayer, removePlayer, transfer, confirmSquad, suggest, review, savePlayer, setMarketOpen, reset: () => { const previous = current.current; const saved = persistDemo(initialState); setState(initialState); if (saved) cleanupImages(previous, initialState); } };
 }
 type Store = ReturnType<typeof useDemoStore>;
 const Context = createContext<Store | null>(null);
