@@ -39,3 +39,16 @@ Data is stored in this browser's localStorage, not a database. Reset it in Setti
 Fixtures, standings, match events, fantasy points, activity and notifications are illustrative static data; they do not recalculate for new leagues or squad changes. There is no match scoring engine, result verification, real login, real invitations, payment, API, Supabase or multi-device synchronization. Image URLs are optional external links, not uploaded files. Demo permissions are not a substitute for server authorization. The match dates and season are fictional sample content.
 
 Recommended next phase: design the Supabase schema and row-level security around league membership and multiple ownership; add real authentication and invitations, server-side validation and transactional market workflows, followed by verified match results and a tested points engine. Connect competition views to league-specific live data only after these foundations are in place.
+
+## GitHub Pages deployment
+
+The repository's GitHub Pages site must serve a **built** Vite app, not the source files on `main`. In GitHub, open **Settings → Pages → Build and deployment** and set **Source** to **GitHub Actions**. After this change is merged into `main`, the `Build and deploy GitHub Pages` workflow builds the app and publishes the `dist` artifact. It also runs unit tests and a browser smoke test before deployment. You can rerun it from the Actions tab using **Run workflow**. The site's URL is shown in Settings → Pages and in the workflow's deployment environment.
+
+The Pages workflow supplies the correct project URL prefix using `configure-pages` and enables hash-based routes (for example, `/#/dashboard`) so bookmarked routes work on GitHub Pages without server rewrites. Other hosts retain normal browser-history routes and must rewrite app routes to `index.html` on refresh. For a different subdirectory host, set `VITE_BASE_PATH` at build time; set `VITE_ROUTER_MODE=hash` if the host cannot rewrite routes.
+
+```sh
+npm run test:pages:assets  # verify the generated project-site asset paths
+npm run test:e2e:pages     # build a Pages-style app and run a browser smoke test
+```
+
+The browser test requires Playwright's Chromium and system dependencies (`npx playwright install --with-deps chromium`). The default smoke-test prefix is `/Hagz-fantasy/`.
