@@ -31,17 +31,26 @@ jobs:
       # Without this the workflow happily publishes a Demo-only bundle and the live
       # site cannot sign anyone in. The script reports which variable is wrong and
       # never prints the values.
+      #
+      # The values are read from repository *variables* (Settings -> Secrets and
+      # variables -> Actions -> Variables), falling back to repository *secrets*.
+      # Both spellings are accepted because storing them in the Secrets tab instead
+      # of the Variables tab is an easy and completely silent mistake: `vars.X` on a
+      # missing variable expands to an empty string, not an error. An empty string is
+      # falsy in a GitHub expression, so `||` falls through to the secret. The anon
+      # key is a public value by design - Vite inlines it into the bundle - so this
+      # is configuration, not a leak.
       - name: Validate Supabase configuration
         run: node scripts/check-pages-env.mjs
         env:
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
       - run: npm run build
         env:
           VITE_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           VITE_ROUTER_MODE: hash
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test -c playwright.pages.config.ts
         env:
