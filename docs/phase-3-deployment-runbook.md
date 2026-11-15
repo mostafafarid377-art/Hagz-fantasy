@@ -214,12 +214,18 @@ node scripts/promote-migrations.mjs
 npm run check:migrations
 ```
 
-**Expected:** `Wrote 13 migration(s)` then `28 check(s) passed, 0 failed.`
+**Expected:** `Wrote 13 migration(s)` then `29 check(s) passed, 0 failed.`
 
 The promotion script is deterministic — it re-reads the frozen design sources and
 regenerates the executable package. Running it twice produces identical bytes. If
 `check:migrations` reports drift, **stop**: your checkout differs from what was
 audited.
+
+> **Windows note.** The guard hashes file *content with line endings normalised*.
+> An earlier version hashed raw bytes, so a `core.autocrlf=true` checkout (the Git
+> for Windows default) produced ~24 spurious failures while CI on Linux stayed
+> green. `.gitattributes` now pins SQL to LF, and the guard normalises regardless,
+> so `git status` and the guard agree on either platform.
 
 Optionally verify by hash. This is the manifest hash of all 13 files concatenated
 in sorted order:
@@ -318,6 +324,45 @@ supabase migration list --remote
 console scrollback.
 
 **Report back:** the complete console output plus `migration list --remote`.
+
+---
+
+## 6a. THE CRITICAL ORDERING PROBLEM — read before you run §6
+
+**On a standard Supabase project, `supabase db push` will almost certainly FAIL at
+migration 12, and that is the designed behaviour — not a bug and not something to
+improvise around.**
+
+Here is the chain, verified by simulation:
+
+1. Migration **3** tries to create the `player-images` policy. `storage.objects` is
+   owned by `supabase_storage_admin`, which the migration role is not a member of,
+   so it cannot. Migration 3 **skips** the policy with a WARNING (fail-closed).
+2. Migration **12** asserts the policy exists. It does not. Migration 12 raises
+   `42501: storage policy player_images_member_read is missing or not SELECT-only`.
+3. The push aborts. Migrations **1–11 remain applied**; 12 and 13 do not.
+
+So the correct sequence is **not** "push, then fix storage". It is:
+
+| Step | Action | Result |
+|---|---|---|
+| A | `supabase db push --remote` | applies 1–11, aborts at 12 with the storage error |
+| B | `supabase migration list --remote` | confirms 1–11 applied, 12–13 not |
+| C | §7: create the policy in the SQL Editor | policy now exists |
+| D | `supabase db push --remote` again | applies 12 and 13, skips 1–11 |
+
+**This is the expected path. It is not a failure you need to report as a bug.**
+The re-run in step D is safe: the CLI skips migrations already recorded as applied,
+and 12/13 are pure assertions that mutate nothing.
+
+> If you would rather avoid the aborted run entirely, do §7 **before** §6. The
+> policy creation does not depend on the application schema, so creating it first
+> is safe and makes the first push succeed end to end. Either order works; the
+> "policy first" order is tidier.
+
+**Do not** disable assertion 8, drop the check, or mark 12 as applied without
+running it. That would leave the deployment unverified, which is the whole point
+of the assertion existing.
 
 ---
 

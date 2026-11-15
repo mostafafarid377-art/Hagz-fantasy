@@ -1,0 +1,38 @@
+# Fantasy Friends — line-ending contract.
+#
+# WHY THIS FILE EXISTS
+#   The migration guard pins a SHA-256 for every reviewed design draft. On Linux
+#   and macOS those files are checked out with LF; on Windows, `core.autocrlf=true`
+#   (the Git for Windows default) rewrites them to CRLF in the working tree while
+#   the blob stays LF. `git status` therefore reports a clean tree, but any tool
+#   that reads the file from disk sees different bytes. That mismatch produced 24
+#   spurious guard failures on Windows against a green CI.
+#
+#   The guard now normalises line endings before hashing, so it is correct either
+#   way. This file additionally makes the checkout deterministic, so what is on
+#   disk matches what a reviewer sees in the diff.
+#
+# SQL and generated artefacts are pinned to LF deliberately: these files are
+# hashed, re-derived from source, and applied verbatim by the Supabase CLI.
+# Changing this can silently invalidate every pinned hash on the project.
+
+* text=auto eol=lf
+
+*.sql   text eol=lf
+*.mjs   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.css   text eol=lf
+*.yml   text eol=lf
+*.example text eol=lf
+
+# Binary files must never be line-ending converted.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.dump  binary

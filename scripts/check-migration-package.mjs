@@ -91,7 +91,33 @@ async function exists(p) {
   try { await stat(p); return true; } catch { return false; }
 }
 
-const sha256 = async (p) => createHash('sha256').update(await readFile(p)).digest('hex');
+/**
+ * Normalise line endings before hashing.
+ *
+ * Why this exists: the pinned design drafts are reviewed with LF endings, but a
+ * Windows checkout with `core.autocrlf=true` (the Git for Windows default) writes
+ * CRLF to the working tree. `git hash-object` and `git status` compare the *blob*
+ * (always LF, since the clean filter converts on the way in), so they report a
+ * clean tree - while `fs.readFile` here sees CRLF on disk and every pinned hash
+ * "mismatches". That produced 24 spurious failures on Windows while CI on Linux
+ * was green, which is precisely the kind of noise that trains people to ignore a
+ * security guard.
+ *
+ * The contract we actually care about is the *text* of the reviewed SQL, not which
+ * platform's newline it was checked out with. Normalising CRLF -> LF before
+ * hashing makes the pin platform-independent without weakening it: any change to
+ * the content still changes the digest.
+ *
+ * A lone CR (not followed by LF) is NOT normalised away - it is a genuine defect
+ * that breaks PostgreSQL parsing, and check 5 rejects it explicitly.
+ */
+const normaliseEol = (text) => text.replace(/\r\n/g, '\n');
+
+/** SHA-256 of a file's text with platform newlines normalised to LF. */
+const sha256 = async (p) => {
+  const text = await readFile(p, 'utf8');
+  return createHash('sha256').update(normaliseEol(text), 'utf8').digest('hex');
+};
 
 // --- 1. Design sources are pristine ----------------------------------------
 const designDir = path.join(root, 'supabase', 'design', 'migrations');
@@ -197,8 +223,10 @@ if (!(await exists(execDir))) {
       const target = path.join(execDir, name);
       if (!(await exists(target))) continue;
       const expected = await buildExpected(name, source);
-      const actual = await readFile(target, 'utf8');
-      if (actual !== expected) {
+      // Normalise both sides: on Windows the checked-out file is CRLF while the
+      // freshly generated expectation is LF. See normaliseEol above.
+      const actual = normaliseEol(await readFile(target, 'utf8'));
+      if (actual !== normaliseEol(expected)) {
         drift++;
         fail(`migration ${name}`, `does not match its source ${source}; run npm run migrations:promote`);
       }
@@ -257,13 +285,41 @@ if (!(await exists(configPath))) {
   } else ok('supabase/config.toml seeding disabled', 'no unreviewed seed data is applied');
 }
 
-// --- 7. No hosted-project link state --------------------------------------
-for (const marker of ['.temp/project-ref', '.branches']) {
-  if (await exists(path.join(root, 'supabase', marker))) {
-    fail(`supabase/${marker}`, 'link/branch state present; the project must stay unlinked');
+// --- 7. Link state: unlinked, or linked to the one approved project -------
+//
+// History: this check used to fail on ANY link state, because the package was
+// built while no hosted project was authorised. That is too strict for
+// deployment - `supabase link` necessarily writes supabase/.temp/project-ref -
+// and the alternative (deleting the file before every guard run) is exactly the
+// habit that would let a link to the WRONG project pass unnoticed.
+//
+// The rule is now an allowlist of one. Any other project ref, and any branch
+// state, still fails. The approved ref is a public project identifier, not a
+// secret, so pinning it here is safe.
+const APPROVED_PROJECT_REF = 'ddeojemjbhnxtrgsuicv';
+
+if (await exists(path.join(root, 'supabase', '.branches'))) {
+  fail('supabase/.branches', 'branch state present; deploy from main, not a preview branch');
+} else {
+  ok('no preview-branch state', 'supabase/.branches is absent');
+}
+
+const refFile = path.join(root, 'supabase', '.temp', 'project-ref');
+if (!(await exists(refFile))) {
+  ok('link state', 'unlinked (fine before deployment; required only to push)');
+} else {
+  const linked = (await readFile(refFile, 'utf8')).trim();
+  if (linked === APPROVED_PROJECT_REF) {
+    ok('link state', `linked to the approved project ${APPROVED_PROJECT_REF}`);
+  } else if (!linked) {
+    fail('supabase/.temp/project-ref', 'file exists but is empty; run supabase link again');
+  } else {
+    fail('supabase/.temp/project-ref',
+      `linked to "${linked}", which is NOT the approved project (${APPROVED_PROJECT_REF}). ` +
+      'Run `supabase unlink`, then `supabase link --project-ref ' + APPROVED_PROJECT_REF + '`. ' +
+      'Refusing to treat an unknown project as deployable.');
   }
 }
-ok('no hosted-project link state', 'supabase/.temp/project-ref and .branches are absent');
 
 // --- Report ---------------------------------------------------------------
 console.log('Migration package guard\n');
