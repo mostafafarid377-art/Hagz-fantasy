@@ -150,21 +150,91 @@ test('the actor helper is reachable by the definer only, never by a client role'
   assert.equal(await scalar(`select has_function_privilege('anon','ff_private.current_actor_id()','execute')`), false);
 });
 
-test('the helper resolves the caller from the JWT GUCs and agrees with auth.uid()', async () => {
-  const uid = '11111111-2222-3333-4444-555555555555';
-  await db.exec(`select set_config('request.jwt.claim.sub', '${uid}', false)`);
-  assert.equal(await scalar(`select ff_private.current_actor_id()`), uid);
-  assert.equal(await scalar(`select auth.uid()`), uid);
+// --- Caller identity: the helper must agree with auth.uid() in EVERY state ---
+//
+// The security requirement is not "usually the same". It is that there is no
+// input state in which the helper yields an identity that auth.uid() does not,
+// because that would authenticate a caller the platform considers anonymous.
+// An earlier revision fell back to `request.jwt.claims ->> 'sub'` and failed
+// exactly that test; these cases are the regression guard for it.
 
-  // Aggregate-claims fallback (PostgREST populates request.jwt.claims).
-  await db.exec(`select set_config('request.jwt.claim.sub', '', false)`);
-  await db.exec(`select set_config('request.jwt.claims', '{"sub":"${uid}"}', false)`);
-  assert.equal(await scalar(`select ff_private.current_actor_id()`), uid);
+const A = '11111111-2222-3333-4444-555555555555';
+const B = '99999999-9999-9999-9999-999999999999';
 
-  // Unauthenticated: both must yield null, never a bogus identity.
-  await db.exec(`select set_config('request.jwt.claim.sub', '', false)`);
-  await db.exec(`select set_config('request.jwt.claims', '', false)`);
-  assert.equal(await scalar(`select ff_private.current_actor_id()`), null);
+const setClaims = async (sub, claims) => {
+  await db.query(`select set_config('request.jwt.claim.sub', $1, false)`, [sub]);
+  await db.query(`select set_config('request.jwt.claims', $1, false)`, [claims]);
+};
+const both = async () => (await q(`select auth.uid() as a, ff_private.current_actor_id() as h`)).rows[0];
+
+test('identity: individual claim present -> both return it', async () => {
+  await setClaims(A, JSON.stringify({ sub: A }));
+  assert.deepEqual(await both(), { a: A, h: A });
+});
+
+test('identity: individual claim empty -> both return null (no aggregate rescue)', async () => {
+  // THE case the removed fallback got wrong: auth.uid() says unauthenticated.
+  await setClaims('', JSON.stringify({ sub: A }));
+  const r = await both();
+  assert.equal(r.a, null);
+  assert.equal(r.h, null, 'helper must not synthesise an identity from request.jwt.claims');
+});
+
+test('identity: individual claim absent -> both return null', async () => {
+  // Simulate "never set" via a fresh session-level reset to empty, which is the
+  // state auth.uid() treats identically (current_setting(..., true) -> NULL/'').
+  await db.query(`reset request.jwt.claim.sub`);
+  await db.query(`select set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: A })]);
+  const r = await both();
+  assert.equal(r.a, null);
+  assert.equal(r.h, null, 'helper must not derive an identity when the sub GUC is unset');
+});
+
+test('identity: aggregate claim present only -> both return null', async () => {
+  await setClaims('', JSON.stringify({ sub: A, role: 'authenticated' }));
+  const r = await both();
+  assert.equal(r.a, null);
+  assert.equal(r.h, null);
+});
+
+test('identity: conflicting individual and aggregate claims -> both prefer the individual', async () => {
+  await setClaims(A, JSON.stringify({ sub: B }));
+  const r = await both();
+  assert.deepEqual(r, { a: A, h: A }, 'the per-claim GUC is authoritative; the aggregate must not override it');
+});
+
+test('identity: malformed UUID -> both raise rather than returning an identity', async () => {
+  await setClaims('not-a-uuid', '');
+  await assert.rejects(q(`select auth.uid()`), (e) => e.code === '22P02');
+  await assert.rejects(q(`select ff_private.current_actor_id()`), (e) => e.code === '22P02');
+});
+
+test('identity: malformed JSON in aggregate claims is irrelevant to both', async () => {
+  // The helper must never parse request.jwt.claims. auth.uid() ignores it too,
+  // so neither may fail or succeed because of its contents.
+  await setClaims(A, '{not json');
+  assert.deepEqual(await both(), { a: A, h: A });
+  await setClaims('', '{not json');
+  assert.deepEqual(await both(), { a: null, h: null });
+});
+
+test('identity: unauthenticated request -> null, never a bogus identity', async () => {
+  await setClaims('', '');
+  assert.deepEqual(await both(), { a: null, h: null });
+  // An empty JSON object is equally unauthenticated.
+  await setClaims('', '{}');
+  assert.deepEqual(await both(), { a: null, h: null });
+});
+
+test('the helper body reads exactly one source and has no aggregate-claims fallback', async () => {
+  // Structural guarantee, so a future edit cannot quietly reintroduce a second
+  // identity source that the behavioural tests above might not enumerate.
+  const src = await scalar(`select prosrc from pg_proc
+    where oid = 'ff_private.current_actor_id()'::regprocedure`);
+  assert.match(src, /request\.jwt\.claim\.sub/);
+  assert.doesNotMatch(src, /request\.jwt\.claims/, 'must not read the aggregate claims GUC');
+  assert.doesNotMatch(src, /->>|jsonb?/i, 'must not parse JSON');
+  assert.doesNotMatch(src, /coalesce/i, 'no second branch may supply an identity');
 });
 
 test('the deployed API is callable by authenticated with no USAGE on auth', async () => {

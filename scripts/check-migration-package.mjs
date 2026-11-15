@@ -51,7 +51,7 @@ const DESIGN_MIGRATIONS = {
   '010_privilege_verification.sql': '93711989477d573f456cd505fae4c3c9114fea2434ab0ff2658a2658c16678e1',
   '011_definer_ownership_transfer.sql': '1c1ede4d303699a52ce33d58bc09a2506db3dc60fb43ccdce7e83b7bb6ac8ba6',
   // Phase 3 forward-only repair (promoted to executable 012).
-  '014_definer_actor_identity.sql': '0ebaebef01446beebe72540a24199873caee8021bc915e06f5cbbaf6633ce205',
+  '014_definer_actor_identity.sql': 'a9cdca655aea2ca57810aba0426b4c8a58df8e216d338ae4b91184f70c26e915',
 };
 
 /** Sources authored for publication in Phase 3, under supabase/design/api/. */

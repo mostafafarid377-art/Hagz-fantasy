@@ -592,15 +592,29 @@ verification aborting was the correct outcome.
 as ordinary GUCs. Reading those GUCs needs **no privilege on the `auth` schema**.
 Migration 12:
 
-1. creates `ff_private.current_actor_id()`, which reads the same GUCs with
-   `auth.uid()`'s exact semantics plus the PostgREST `request.jwt.claims`
-   fallback (same value, never a different one);
+1. creates `ff_private.current_actor_id()`, whose body is *textually the same
+   expression* as `auth.uid()`:
+   `nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`.
+   It has no second branch and reads no other input, so there is no request state
+   in which it reports an identity that `auth.uid()` does not;
 2. repoints the **46** definer functions that called `auth.uid()` at it, rewriting
    only that token via `pg_get_functiondef`;
 3. keeps every other property identical, and asserts it.
 
 This is Supabase's own recommended remedy for this exact situation ("Option 2:
 read the user ID from the JWT claims").
+
+> **On "identical semantics".** An earlier revision of the helper also fell back
+> to `request.jwt.claims ->> 'sub'`. That was **not** equivalent and has been
+> removed in security review: when the `sub` GUC is empty or absent but the
+> aggregate claims carry a `sub`, `auth.uid()` returns `NULL` while the fallback
+> returned that UUID — i.e. it could authenticate a caller the platform considers
+> anonymous. The helper is now a single expression with a single input.
+> `supabase/design/tests/phase3-definer-identity.test.mjs` covers all claim
+> states (present, empty, absent, aggregate-only, conflicting, malformed UUID,
+> malformed JSON, unauthenticated) and asserts the helper and `auth.uid()` agree
+> in every one, including a structural check that the body never reads the
+> aggregate claims GUC.
 
 **Not chosen, and why:**
 

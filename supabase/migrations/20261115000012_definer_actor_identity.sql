@@ -58,15 +58,32 @@
 --   ("Option 2: read the user ID from the JWT claims"), chosen because the caller
 --   already is a definer owned by ff_migration_owner.
 --
--- SEMANTICS PRESERVED
---   auth.uid() is, verbatim:
+-- SEMANTICS: EXACTLY auth.uid(), BY CONSTRUCTION
+--   Supabase defines auth.uid() verbatim as:
 --       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
---   The helper performs the identical read, plus the PostgREST fallback from
---   `request.jwt.claims` (the JSON document) when the per-claim setting is absent.
---   That fallback can only produce the SAME value, never a different one, so a
---   caller is never authenticated as somebody they were not already. It is
---   included so the helper keeps working on deployments that populate only the
---   aggregate claims GUC.
+--   The helper below is that expression, textually, with no other branch. The
+--   whole point is that no caller can be authenticated as somebody they were not
+--   already: there is exactly one input, and it is the one auth.uid() reads.
+--
+--   An earlier revision of this file additionally fell back to
+--   `request.jwt.claims ->> 'sub'` when the per-claim setting was absent or
+--   empty. That is NOT equivalent, and it was removed in security review:
+--       * when request.jwt.claim.sub is empty and request.jwt.claims contains a
+--         sub, auth.uid() returns NULL while the fallback returned that UUID;
+--       * so the fallback could synthesise an identity in a state where the
+--         platform's own function says "unauthenticated" - i.e. it widened
+--         access relative to auth.uid(), which is exactly what this migration
+--         must not do.
+--   Measured, not reasoned: the four claim states are covered by
+--   supabase/design/tests/phase3-definer-identity.test.mjs, which asserts the
+--   helper and auth.uid() agree in every one of them, including the divergence
+--   case that removal fixed.
+--
+--   No fallback is needed in practice. auth.uid() resolves for the client roles
+--   on hosted Supabase (it is EXECUTE-granted to PUBLIC), and the GUC it reads is
+--   set by PostgREST. If a deployment ever populated only the aggregate claims
+--   GUC, auth.uid() itself would return NULL there too - and this helper now
+--   matches that, rather than silently disagreeing with it.
 --
 -- WHAT IS NOT TOUCHED
 --   * No privilege is granted on the `auth` schema, on any auth table, or on any
@@ -93,10 +110,10 @@ language sql
 stable
 set search_path = pg_catalog, pg_temp
 as $$
-  select coalesce(
-    nullif(current_setting('request.jwt.claim.sub', true), ''),
-    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-  )::uuid
+  -- Byte-for-byte the body of Supabase's auth.uid(). One input, one branch.
+  -- Do not add a fallback here: any second source of identity is a way to
+  -- authenticate as somebody the platform does not consider signed in.
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
 $$;
 
 revoke all on function ff_private.current_actor_id() from public, anon, authenticated;
