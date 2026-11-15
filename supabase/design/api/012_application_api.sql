@@ -1,0 +1,1626 @@
+-- Fantasy Friends — application API layer (executable migration 012).
+--
+-- WHY THIS FILE EXISTS
+--   After migrations 001-011 the database is secure but unreachable by the
+--   product: `authenticated` holds SELECT on public tables and EXECUTE on ten
+--   read helpers, and NOTHING ELSE. Every INSERT/UPDATE/DELETE is denied,
+--   because no client DML grant exists and the SECURITY DEFINER workflow
+--   functions in ff_private are not executable by clients. Measured end state of
+--   the design package: 40 tables, 0 client-writable, 0 client-callable
+--   workflow functions.
+--
+--   This migration adds the missing surface: one `public.ff_*` RPC per client
+--   action. Each RPC:
+--     * is SECURITY DEFINER with a pinned search_path, so it cannot be hijacked
+--       by a caller-controlled search_path;
+--     * re-derives the caller from auth.uid() and never accepts an actor id,
+--       a role, or a "is this allowed" flag from the client;
+--     * delegates the actual authorization and integrity checks to the existing
+--       ff_private guard/trigger/workflow code rather than re-implementing them;
+--     * is EXECUTE-granted to `authenticated` only - never to anon, never to
+--       PUBLIC.
+--
+-- DESIGN CONSTRAINTS HONOURED
+--   * `authenticated` keeps SELECT-only table privileges. There is no client
+--     DML grant anywhere in this file. Writes happen exclusively inside a
+--     definer function, which is where the checks live.
+--   * The table-owning role is not a client and owns nothing client-reachable.
+--     RPCs are owned by ff_migration_owner (see the ALTER OWNER block at the
+--     end), the same least-privilege definer introduced by 009/011.
+--   * No scoring values are invented. The scoring engine is left closed and
+--     `ff_*` exposes no scoring RPC, matching the approved requirement that
+--     positional scoring values are not yet decided. The existing
+--     block_unimplemented_scoring triggers still refuse invented score rows.
+--
+-- ERROR CONTRACT
+--   Guard failures raise with SQLSTATE 42501 (not authorized) or 23514
+--   (invalid state). PostgREST surfaces the message; the frontend maps both to
+--   ApiError codes ('forbidden' / 'invalidState') in the normalise() function of
+--   src/services/api.ts. RPCs never leak row data on failure.
+
+begin;
+
+-- ---------------------------------------------------------------------------
+-- 0. Small helpers
+-- ---------------------------------------------------------------------------
+
+-- Normalise and validate a display name. The CHECK constraints on the tables
+-- also enforce this; doing it here produces a clear error before the insert.
+create or replace function ff_private.clean_name(p_name text) returns text
+language plpgsql immutable set search_path = pg_catalog, ff_private as $$
+declare v text;
+begin
+  v := btrim(coalesce(p_name, ''));
+  if length(v) < 2 or length(v) > 100 then
+    raise exception 'name must be between 2 and 100 characters' using errcode = '23514';
+  end if;
+  return v;
+end $$;
+
+-- The caller's active membership row, or a 42501. Every RPC that needs a league
+-- context starts here, so "not a member" is one uniform failure.
+create or replace function ff_private.require_member(p_league uuid) returns public.league_members
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare m public.league_members;
+begin
+  if auth.uid() is null then
+    raise exception 'authentication required' using errcode = '42501';
+  end if;
+  select * into m from public.league_members
+   where league_id = p_league and user_id = auth.uid() and status = 'active';
+  if not found then
+    raise exception 'not an active member of this league' using errcode = '42501';
+  end if;
+  return m;
+end $$;
+
+-- Resolve the caller's fantasy team in a league, creating it on first use only
+-- when the caller is an active member. Team creation is not a client DML grant:
+-- it happens inside this definer function.
+create or replace function ff_private.ensure_team(p_league uuid, p_name text default null)
+returns public.fantasy_teams
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare m public.league_members; t public.fantasy_teams;
+begin
+  m := ff_private.require_member(p_league);
+  select * into t from public.fantasy_teams where league_id = p_league and manager_id = m.user_id;
+  if found then return t; end if;
+  insert into public.fantasy_teams(league_id, manager_id, name)
+  values (p_league, m.user_id, coalesce(nullif(btrim(p_name), ''), (select display_name from public.profiles where id = m.user_id), 'My Team'))
+  returning * into t;
+  return t;
+end $$;
+
+-- Audit helper: every mutating RPC records what it did in the same transaction.
+create or replace function ff_private.audit(p_league uuid, p_action text, p_entity text, p_entity_id uuid, p_after jsonb default null, p_reason text default null)
+returns void
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  insert into public.audit_logs(league_id, actor_id, action, entity_type, entity_id, after_data, reason)
+  values (p_league, auth.uid(), p_action, p_entity, p_entity_id, p_after, p_reason);
+end $$;
+
+-- Notification helper. Recipients must be active members of the league; the
+-- FK enforces it, and this keeps the "who hears about what" rules in one place.
+create or replace function ff_private.notify(p_league uuid, p_recipient uuid, p_kind text, p_payload jsonb default '{}')
+returns void
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  if p_recipient = auth.uid() then return; end if; -- no self-notifications
+  if not exists (select 1 from public.league_members m
+                  where m.league_id = p_league and m.user_id = p_recipient and m.status = 'active') then
+    return;
+  end if;
+  insert into public.notifications(league_id, recipient_id, kind, payload)
+  values (p_league, p_recipient, p_kind, coalesce(p_payload, '{}'::jsonb));
+end $$;
+
+create or replace function ff_private.notify_leader(p_league uuid, p_kind text, p_payload jsonb default '{}')
+returns void
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare r uuid;
+begin
+  for r in select user_id from public.league_members
+            where league_id = p_league and role = 'leader' and status = 'active' loop
+    perform ff_private.notify(p_league, r, p_kind, p_payload);
+  end loop;
+end $$;
+
+-- Join-code generation. The code is stored in notifications-free `leagues`?
+-- No: the schema has no code column, so a stable, unguessable code is derived
+-- from the league UUID and the league's creation timestamp. It is deterministic
+-- (so it can be re-shown) but not enumerable, and joining still requires being
+-- an authenticated user plus the leader accepting, depending on settings.
+-- See ff_league_join_by_code for the acceptance rules.
+create or replace function ff_private.league_code(p_league uuid) returns text
+language sql stable security definer set search_path = pg_catalog, ff_private as $$
+  select upper(substr(md5(p_league::text), 1, 8))
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 1. Profiles and bootstrap
+-- ---------------------------------------------------------------------------
+
+-- Create or update the caller's profile and return everything the client needs
+-- to boot: profile, memberships with league names, and the caller's team per
+-- league. Called on every sign-in, so it must be idempotent.
+create or replace function public.ff_bootstrap(p_display_name text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_uid uuid := auth.uid(); v_profile public.profiles; v_name text; v_leagues jsonb;
+begin
+  if v_uid is null then raise exception 'authentication required' using errcode = '42501'; end if;
+
+  v_name := nullif(btrim(coalesce(p_display_name, '')), '');
+  select * into v_profile from public.profiles where id = v_uid;
+
+  if not found then
+    -- Fall back to the email local-part so a first sign-in never fails on a
+    -- missing name; the client prompts for a real one and calls again.
+    v_name := coalesce(v_name, split_part(nullif(current_setting('request.jwt.claims', true), ''), '@', 1));
+    if v_name is null or length(btrim(v_name)) < 2 then v_name := 'Player'; end if;
+    v_name := left(btrim(v_name), 100);
+    insert into public.profiles(id, display_name) values (v_uid, v_name) returning * into v_profile;
+  elsif v_name is not null and v_name is distinct from v_profile.display_name then
+    update public.profiles set display_name = ff_private.clean_name(v_name) where id = v_uid
+    returning * into v_profile;
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'league_id', m.league_id, 'name', l.name, 'role', m.role,
+           'status', m.status, 'budget', l.budget, 'market_open', l.market_open,
+           'archived', l.archived_at is not null,
+           'is_leader', m.role = 'leader',
+           'is_organizer', exists (select 1 from public.match_organizers o
+                                    where o.league_id = m.league_id and o.user_id = m.user_id)
+         ) order by l.created_at), '[]'::jsonb)
+    into v_leagues
+  from public.league_members m join public.leagues l on l.id = m.league_id
+  where m.user_id = v_uid and m.status = 'active';
+
+  return jsonb_build_object(
+    'profile', jsonb_build_object('id', v_profile.id, 'display_name', v_profile.display_name),
+    'leagues', v_leagues
+  );
+end $$;
+
+create or replace function public.ff_update_profile(p_display_name text)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.profiles;
+begin
+  if auth.uid() is null then raise exception 'authentication required' using errcode = '42501'; end if;
+  update public.profiles set display_name = ff_private.clean_name(p_display_name)
+   where id = auth.uid() returning * into v;
+  if not found then raise exception 'profile not found; call ff_bootstrap first' using errcode = '42501'; end if;
+  return jsonb_build_object('id', v.id, 'display_name', v.display_name);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 2. Leagues and membership
+-- ---------------------------------------------------------------------------
+
+-- Create a league. The creator becomes its single active leader (enforced by
+-- the one_active_leader_per_league index), gets a fantasy team, and the default
+-- 100M budget from the schema default.
+create or replace function public.ff_league_create(p_name text, p_budget numeric default 100000000)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_uid uuid := auth.uid(); v_league public.leagues; v_code text;
+begin
+  if v_uid is null then raise exception 'authentication required' using errcode = '42501'; end if;
+  if not exists (select 1 from public.profiles where id = v_uid) then
+    raise exception 'profile required; call ff_bootstrap first' using errcode = '42501';
+  end if;
+  if p_budget is null or p_budget <= 0 then
+    raise exception 'budget must be positive' using errcode = '23514';
+  end if;
+
+  insert into public.leagues(name, budget) values (ff_private.clean_name(p_name), p_budget)
+  returning * into v_league;
+
+  insert into public.league_members(league_id, user_id, role, status)
+  values (v_league.id, v_uid, 'leader', 'active');
+
+  perform ff_private.ensure_team(v_league.id, (select display_name from public.profiles where id = v_uid));
+  perform ff_private.audit(v_league.id, 'league_created', 'league', v_league.id, to_jsonb(v_league));
+
+  v_code := ff_private.league_code(v_league.id);
+  return jsonb_build_object('id', v_league.id, 'name', v_league.name, 'budget', v_league.budget,
+                            'market_open', v_league.market_open, 'code', v_code);
+end $$;
+
+-- The invite code for a league. Visible to leaders and members only.
+create or replace function public.ff_league_code(p_league uuid)
+returns text
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return ff_private.league_code(p_league);
+end $$;
+
+-- Join by invite code. Creates an active `manager` membership and a team.
+-- Re-joining an existing membership is a no-op that reports the current state,
+-- so a double-tap cannot error or duplicate anything.
+create or replace function public.ff_league_join(p_code text)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_uid uuid := auth.uid(); v_league public.leagues; v_code text; v_role text;
+begin
+  if v_uid is null then raise exception 'authentication required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.profiles where id = v_uid) then
+    raise exception 'profile required; call ff_bootstrap first' using errcode = '42501';
+  end if;
+  v_code := upper(btrim(coalesce(p_code, '')));
+  if v_code = '' then raise exception 'invite code required' using errcode = '23514'; end if;
+
+  select l.* into v_league from public.leagues l
+   where l.archived_at is null and ff_private.league_code(l.id) = v_code
+   limit 1;
+  if not found then raise exception 'league not found for this code' using errcode = '23514'; end if;
+
+  select role into v_role from public.league_members
+   where league_id = v_league.id and user_id = v_uid;
+
+  if v_role is not null then
+    -- Re-activate a previously deactivated membership; never change the role.
+    update public.league_members set status = 'active'
+     where league_id = v_league.id and user_id = v_uid and status <> 'active';
+  else
+    insert into public.league_members(league_id, user_id, role, status)
+    values (v_league.id, v_uid, 'manager', 'active');
+    perform ff_private.notify_leader(v_league.id, 'member_joined',
+      jsonb_build_object('user_id', v_uid, 'league_id', v_league.id,
+                         'name', (select display_name from public.profiles where id = v_uid)));
+    perform ff_private.audit(v_league.id, 'league_joined', 'league_member', v_uid);
+  end if;
+
+  perform ff_private.ensure_team(v_league.id);
+  return jsonb_build_object('id', v_league.id, 'name', v_league.name, 'role',
+    coalesce(v_role, 'manager'), 'budget', v_league.budget, 'market_open', v_league.market_open);
+end $$;
+
+-- League members with their team names and roles. Readable by any member.
+create or replace function public.ff_league_members(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'user_id', m.user_id, 'name', p.display_name, 'role', m.role,
+             'status', m.status, 'joined_at', m.joined_at,
+             'team_id', t.id, 'team_name', t.name,
+             'is_organizer', exists (select 1 from public.match_organizers o
+                                      where o.league_id = m.league_id and o.user_id = m.user_id)
+           ) order by m.role desc, p.display_name)
+    from public.league_members m
+    join public.profiles p on p.id = m.user_id
+    left join public.fantasy_teams t on t.league_id = m.league_id and t.manager_id = m.user_id
+    where m.league_id = p_league
+  ), '[]'::jsonb);
+end $$;
+
+-- Leader-only: change a member's role, or deactivate a member.
+-- Guards: only the leader may call it; cannot demote/deactivate yourself (a
+-- league must keep exactly one active leader); cannot promote to leader
+-- directly (ownership transfer is a separate, explicit action).
+create or replace function public.ff_league_set_member(p_league uuid, p_user uuid, p_role text default null, p_status text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_leader uuid := auth.uid(); v_target public.league_members; v_team uuid;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_user = v_leader then
+    raise exception 'a leader cannot change their own membership' using errcode = '42501';
+  end if;
+  select * into v_target from public.league_members where league_id = p_league and user_id = p_user;
+  if not found then raise exception 'member not found' using errcode = '23514'; end if;
+  if p_role is not null and p_role not in ('leader', 'manager') then
+    raise exception 'role must be leader or manager' using errcode = '23514';
+  end if;
+  if p_role = 'leader' then
+    raise exception 'use ff_league_transfer_leadership to change the leader' using errcode = '42501';
+  end if;
+  if p_status is not null and p_status not in ('active', 'inactive') then
+    raise exception 'status must be active or inactive' using errcode = '23514';
+  end if;
+
+  update public.league_members
+     set role = coalesce(p_role, role), status = coalesce(p_status, status)
+   where league_id = p_league and user_id = p_user
+  returning * into v_target;
+
+  select id into v_team from public.fantasy_teams where league_id = p_league and manager_id = p_user;
+
+  perform ff_private.audit(p_league, 'member_updated', 'league_member', p_user,
+    jsonb_build_object('role', v_target.role, 'status', v_target.status));
+  perform ff_private.notify(p_league, p_user, 'membership_updated',
+    jsonb_build_object('league_id', p_league, 'role', v_target.role, 'status', v_target.status));
+
+  return jsonb_build_object('user_id', p_user, 'role', v_target.role,
+                            'status', v_target.status, 'team_id', v_team);
+end $$;
+
+-- Leader-only: hand the league to another active member. Leader stays exactly
+-- one because the promotion and demotion happen in one transaction and the
+-- partial unique index allows at most one active leader.
+create or replace function public.ff_league_transfer_leadership(p_league uuid, p_to uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_from uuid := auth.uid();
+begin
+  perform ff_private.require_leader(p_league);
+  if p_to = v_from then raise exception 'already the leader' using errcode = '23514'; end if;
+  if not exists (select 1 from public.league_members
+                  where league_id = p_league and user_id = p_to and status = 'active') then
+    raise exception 'target must be an active member' using errcode = '23514';
+  end if;
+  -- Demote first so the one-active-leader index is never violated.
+  update public.league_members set role = 'manager' where league_id = p_league and user_id = v_from;
+  update public.league_members set role = 'leader' where league_id = p_league and user_id = p_to;
+  perform ff_private.audit(p_league, 'leadership_transferred', 'league', p_league,
+    jsonb_build_object('from', v_from, 'to', p_to));
+  perform ff_private.notify(p_league, p_to, 'leadership_transferred',
+    jsonb_build_object('league_id', p_league, 'from', v_from));
+  return jsonb_build_object('leader_id', p_to);
+end $$;
+
+-- Leader-only: open/close the transfer market.
+create or replace function public.ff_league_set_market(p_league uuid, p_open boolean)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.leagues;
+begin
+  perform ff_private.require_leader(p_league);
+  update public.leagues set market_open = coalesce(p_open, false)
+   where id = p_league and archived_at is null returning * into v;
+  if not found then raise exception 'league not found' using errcode = '23514'; end if;
+  perform ff_private.audit(p_league, 'market_toggled', 'league', p_league,
+    jsonb_build_object('market_open', v.market_open));
+  return jsonb_build_object('market_open', v.market_open);
+end $$;
+
+-- Leader-only: appoint or remove a match organizer.
+create or replace function public.ff_league_set_organizer(p_league uuid, p_user uuid, p_enabled boolean)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_leader(p_league);
+  if not exists (select 1 from public.league_members
+                  where league_id = p_league and user_id = p_user and status = 'active') then
+    raise exception 'organizer must be an active member' using errcode = '23514';
+  end if;
+  if coalesce(p_enabled, false) then
+    insert into public.match_organizers(league_id, user_id) values (p_league, p_user)
+    on conflict do nothing;
+  else
+    delete from public.match_organizers where league_id = p_league and user_id = p_user;
+  end if;
+  perform ff_private.audit(p_league, 'organizer_updated', 'league_member', p_user,
+    jsonb_build_object('organizer', coalesce(p_enabled, false)));
+  perform ff_private.notify(p_league, p_user, 'organizer_updated',
+    jsonb_build_object('league_id', p_league, 'organizer', coalesce(p_enabled, false)));
+  return jsonb_build_object('user_id', p_user, 'organizer', coalesce(p_enabled, false));
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 3. Player market
+-- ---------------------------------------------------------------------------
+
+-- Leader-only: create a market player, or update one already in this league's
+-- market. A player is a league-scoped `player_profiles` row (identity) plus a
+-- `league_players` row (position, price, rating, active) - the split the schema
+-- already models, so the same real person can later be sold in other leagues
+-- without duplicating identity within a league.
+create or replace function public.ff_market_upsert_player(
+  p_league uuid, p_name text, p_position text, p_price numeric, p_rating integer,
+  p_active boolean default true, p_image_path text default null, p_image_url text default null,
+  p_player_id uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_profile public.player_profiles; v_market public.league_players; v_existing public.player_profiles%rowtype;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_position not in ('GK', 'DEF', 'MID', 'FWD') then
+    raise exception 'position must be GK, DEF, MID or FWD' using errcode = '23514';
+  end if;
+  if p_price is null or p_price <= 0 then
+    raise exception 'price must be positive' using errcode = '23514';
+  end if;
+  if p_rating is null or p_rating < 1 or p_rating > 99 then
+    raise exception 'rating must be between 1 and 99' using errcode = '23514';
+  end if;
+  -- Only a league-relative storage path or an https URL, never javascript: etc.
+  if p_image_url is not null and p_image_url !~* '^https?://' then
+    raise exception 'image url must be http(s)' using errcode = '23514';
+  end if;
+  if p_image_path is not null and p_image_path !~ ('^' || p_league::text || '/players/[0-9a-fA-F-]{36}\.(jpg|jpeg|png|webp)$') then
+    raise exception 'image path must be <league>/players/<uuid>.<ext> inside this league' using errcode = '23514';
+  end if;
+
+  if p_player_id is not null then
+    select * into v_existing from public.player_profiles where id = p_player_id and league_id = p_league;
+    if not found then raise exception 'player not found in this league' using errcode = '42501'; end if;
+    update public.player_profiles
+       set display_name = ff_private.clean_name(p_name),
+           image_path = coalesce(p_image_path, image_path),
+           image_url = coalesce(p_image_url, image_url)
+     where id = p_player_id and league_id = p_league
+    returning * into v_profile;
+    update public.league_players
+       set position = p_position, price = p_price, rating = p_rating, active = coalesce(p_active, true)
+     where league_id = p_league and player_id = p_player_id
+    returning * into v_market;
+  else
+    insert into public.player_profiles(league_id, display_name, image_path, image_url)
+    values (p_league, ff_private.clean_name(p_name), p_image_path, p_image_url)
+    returning * into v_profile;
+    insert into public.league_players(league_id, player_id, position, price, rating, active)
+    values (p_league, v_profile.id, p_position, p_price, p_rating, coalesce(p_active, true))
+    returning * into v_market;
+  end if;
+
+  perform ff_private.audit(p_league, case when p_player_id is null then 'market_player_created' else 'market_player_updated' end,
+    'league_player', v_market.id, jsonb_build_object('name', v_profile.display_name, 'position', v_market.position,
+      'price', v_market.price, 'rating', v_market.rating, 'active', v_market.active));
+  return ff_private.market_player_json(v_market.id);
+end $$;
+
+-- One player's client-facing shape, shared by the list/read RPCs.
+create or replace function ff_private.market_player_json(p_market_player uuid) returns jsonb
+language sql stable security definer set search_path = pg_catalog, ff_private as $$
+  select jsonb_build_object(
+    'id', lp.id, 'player_id', p.id, 'name', p.display_name, 'position', lp.position,
+    'price', lp.price, 'rating', lp.rating, 'active', lp.active,
+    'image_path', p.image_path, 'image_url', p.image_url,
+    'league_id', lp.league_id)
+  from public.league_players lp join public.player_profiles p
+    on p.league_id = lp.league_id and p.id = lp.player_id
+  where lp.id = p_market_player
+$$;
+
+-- The league's market, with ownership counts so the client can show
+-- "selected by N managers". Readable by any active member.
+create or replace function public.ff_market_players(p_league uuid, p_search text default null, p_position text default null, p_include_inactive boolean default false)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(x order by x->>'name')
+    from (
+      select jsonb_build_object(
+        'id', lp.id, 'player_id', p.id, 'name', p.display_name, 'position', lp.position,
+        'price', lp.price, 'rating', lp.rating, 'active', lp.active,
+        'image_path', p.image_path, 'image_url', p.image_url, 'league_id', lp.league_id,
+        'owned_by', (select count(*) from public.fantasy_squad_players s where s.league_id = lp.league_id and s.league_player_id = lp.id),
+        'owned_by_me', exists (select 1 from public.fantasy_squad_players s join public.fantasy_teams t
+                                on t.league_id = s.league_id and t.id = s.fantasy_team_id
+                               where s.league_id = lp.league_id and s.league_player_id = lp.id and t.manager_id = auth.uid())
+      ) x
+      from public.league_players lp
+      join public.player_profiles p on p.league_id = lp.league_id and p.id = lp.player_id
+      where lp.league_id = p_league
+        and (coalesce(p_include_inactive, false) or lp.active)
+        and (p_position is null or lp.position = p_position)
+        and (p_search is null or btrim(p_search) = '' or p.display_name ilike '%' || btrim(p_search) || '%')
+    ) s
+  ), '[]'::jsonb);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 4. Player suggestions (manager submits, leader decides)
+-- ---------------------------------------------------------------------------
+
+create or replace function public.ff_suggestion_submit(
+  p_league uuid, p_name text, p_position text, p_notes text default null,
+  p_image_path text default null, p_image_url text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.player_suggestions; v_name text;
+begin
+  perform ff_private.require_member(p_league);
+  if p_position not in ('GK', 'DEF', 'MID', 'FWD') then
+    raise exception 'position must be GK, DEF, MID or FWD' using errcode = '23514';
+  end if;
+  if p_notes is not null and length(p_notes) > 500 then
+    raise exception 'notes must be 500 characters or fewer' using errcode = '23514';
+  end if;
+  if p_image_url is not null and p_image_url !~* '^https?://' then
+    raise exception 'image url must be http(s)' using errcode = '23514';
+  end if;
+  v_name := ff_private.clean_name(p_name);
+
+  -- Friendly duplicate check before the partial unique index fires, so the user
+  -- sees "already suggested" instead of a constraint name.
+  if exists (select 1 from public.player_suggestions s
+              where s.league_id = p_league and s.status = 'pending'
+                and lower(btrim(s.name)) = lower(v_name)) then
+    raise exception 'a pending suggestion with this name already exists' using errcode = '23514';
+  end if;
+  if exists (select 1 from public.player_profiles p join public.league_players lp
+               on lp.league_id = p.league_id and lp.player_id = p.id
+              where p.league_id = p_league and lower(btrim(p.display_name)) = lower(v_name)) then
+    raise exception 'this player is already in the market' using errcode = '23514';
+  end if;
+
+  insert into public.player_suggestions(league_id, submitted_by, name, position, notes, image_path, image_url)
+  values (p_league, auth.uid(), v_name, p_position, nullif(btrim(coalesce(p_notes, '')), ''), p_image_path, p_image_url)
+  returning * into v;
+
+  perform ff_private.notify_leader(p_league, 'suggestion_submitted',
+    jsonb_build_object('suggestion_id', v.id, 'name', v.name, 'league_id', p_league));
+  perform ff_private.audit(p_league, 'suggestion_submitted', 'player_suggestion', v.id,
+    jsonb_build_object('name', v.name, 'position', v.position));
+  return jsonb_build_object('id', v.id, 'status', v.status, 'name', v.name,
+                            'position', v.position, 'notes', v.notes, 'created_at', v.created_at);
+end $$;
+
+-- Pending queue (leader) or the caller's own suggestions (manager).
+create or replace function public.ff_suggestions(p_league uuid, p_status text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v_leader boolean;
+begin
+  perform ff_private.require_member(p_league);
+  v_leader := ff_private.is_leader(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'id', s.id, 'name', s.name, 'position', s.position, 'notes', s.notes,
+             'status', s.status, 'image_path', s.image_path, 'image_url', s.image_url,
+             'submitted_by', s.submitted_by,
+             'submitted_by_name', (select display_name from public.profiles where id = s.submitted_by),
+             'league_player_id', s.league_player_id, 'created_at', s.created_at,
+             'rejection_reason', (select reason from public.player_approval_logs g
+                                   where g.league_id = s.league_id and g.suggestion_id = s.id)
+           ) order by s.created_at desc)
+    from public.player_suggestions s
+    where s.league_id = p_league
+      and (v_leader or s.submitted_by = auth.uid())
+      and (p_status is null or s.status = p_status)
+  ), '[]'::jsonb);
+end $$;
+
+-- Leader-only: approve (creating exactly one market player at the leader's
+-- chosen price/rating) or reject with a reason. The approval log is unique per
+-- suggestion, so a double approval cannot create two players.
+create or replace function public.ff_suggestion_review(
+  p_league uuid, p_suggestion uuid, p_decision text, p_reason text default null,
+  p_price numeric default null, p_rating integer default null, p_image_path text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare s public.player_suggestions; v_profile public.player_profiles; v_market public.league_players;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_decision not in ('approved', 'rejected') then
+    raise exception 'decision must be approved or rejected' using errcode = '23514';
+  end if;
+  select * into s from public.player_suggestions
+   where league_id = p_league and id = p_suggestion for update;
+  if not found then raise exception 'suggestion not found' using errcode = '42501'; end if;
+  if s.status <> 'pending' then raise exception 'suggestion was already reviewed' using errcode = '23514'; end if;
+  -- A leader may not approve their own suggestion: the manager's proposal must
+  -- be reviewed by someone else, matching the self-approval ban on matches.
+  if s.submitted_by = auth.uid() then
+    raise exception 'self review of a suggestion is forbidden' using errcode = '42501';
+  end if;
+
+  if p_decision = 'rejected' then
+    if p_reason is null or length(btrim(p_reason)) = 0 then
+      raise exception 'rejection needs a reason' using errcode = '23514';
+    end if;
+    update public.player_suggestions set status = 'rejected' where league_id = p_league and id = s.id;
+    insert into public.player_approval_logs(league_id, suggestion_id, actor_id, decision, reason)
+    values (p_league, s.id, auth.uid(), 'rejected', btrim(p_reason));
+    perform ff_private.notify(p_league, s.submitted_by, 'suggestion_rejected',
+      jsonb_build_object('suggestion_id', s.id, 'name', s.name, 'league_id', p_league, 'reason', btrim(p_reason)));
+    perform ff_private.audit(p_league, 'suggestion_rejected', 'player_suggestion', s.id,
+      null, btrim(p_reason));
+    return jsonb_build_object('id', s.id, 'status', 'rejected', 'reason', btrim(p_reason));
+  end if;
+
+  if p_price is null or p_price <= 0 then raise exception 'approved player needs a positive price' using errcode = '23514'; end if;
+  if p_rating is null or p_rating < 1 or p_rating > 99 then raise exception 'approved player needs a rating between 1 and 99' using errcode = '23514'; end if;
+
+  insert into public.player_profiles(league_id, display_name, image_path, image_url)
+  values (p_league, s.name, coalesce(p_image_path, s.image_path), s.image_url)
+  returning * into v_profile;
+  insert into public.league_players(league_id, player_id, position, price, rating, active)
+  values (p_league, v_profile.id, s.position, p_price, p_rating, true)
+  returning * into v_market;
+
+  update public.player_suggestions
+     set status = 'approved', league_player_id = v_market.id
+   where league_id = p_league and id = s.id;
+  insert into public.player_approval_logs(league_id, suggestion_id, actor_id, decision, reason)
+  values (p_league, s.id, auth.uid(), 'approved', nullif(btrim(coalesce(p_reason, '')), ''));
+
+  perform ff_private.notify(p_league, s.submitted_by, 'suggestion_approved',
+    jsonb_build_object('suggestion_id', s.id, 'name', s.name, 'league_id', p_league,
+                       'league_player_id', v_market.id, 'price', p_price, 'rating', p_rating));
+  perform ff_private.audit(p_league, 'suggestion_approved', 'player_suggestion', s.id,
+    jsonb_build_object('league_player_id', v_market.id, 'price', p_price, 'rating', p_rating));
+  return jsonb_build_object('id', s.id, 'status', 'approved', 'league_player_id', v_market.id,
+                            'price', v_market.price, 'rating', v_market.rating);
+end $$;
+
+
+-- Transfers are recorded against a gameweek by schema requirement. Resolve the
+-- gameweek being played now: the earliest whose deadline has not passed, else the
+-- latest. Returns NULL when the league has no gameweek at all, which is a setup
+-- error rather than a valid state - ff_squad_transfer turns it into a clear 23514.
+create or replace function ff_private.current_gameweek(p_league uuid) returns uuid
+language sql stable security definer set search_path = pg_catalog, ff_private as $$
+  select id from (
+    select id, deadline, 0 as pri from public.gameweeks
+     where league_id = p_league and deadline >= now()
+    union all
+    select id, deadline, 1 as pri from public.gameweeks
+     where league_id = p_league
+  ) g
+  order by pri, deadline
+  limit 1
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 5. Squad
+-- ---------------------------------------------------------------------------
+
+-- The caller's team, squad and lineup state for a league. One call so the
+-- frontend does not need three round-trips to render the squad screen.
+create or replace function public.ff_squad(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; v_lineup public.fantasy_lineups; v_squad jsonb; v_bench jsonb;
+begin
+  perform ff_private.require_member(p_league);
+  select * into t from public.fantasy_teams where league_id = p_league and manager_id = auth.uid();
+  if not found then
+    return jsonb_build_object('team', null, 'players', '[]'::jsonb,
+                              'formation', null, 'status', 'empty', 'captain_id', null,
+                              'vice_captain_id', null, 'budget', (select budget from public.leagues where id = p_league),
+                              'spent', 0);
+  end if;
+
+  -- The most recent draft/confirmed lineup is the one the UI edits.
+  select * into v_lineup from public.fantasy_lineups
+   where league_id = p_league and fantasy_team_id = t.id and status in ('draft','confirmed')
+   order by created_at desc limit 1;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'league_player_id', s.league_player_id, 'name', p.display_name,
+           'position', lp.position, 'price', s.acquired_price, 'rating', lp.rating,
+           'image_path', p.image_path, 'image_url', p.image_url, 'active', lp.active,
+           'slot', x.slot, 'captain', coalesce(x.captain, false), 'vice_captain', coalesce(x.vice_captain, false)
+         ) order by coalesce(x.slot, 99), p.display_name), '[]'::jsonb)
+    into v_squad
+  from public.fantasy_squad_players s
+  join public.league_players lp on lp.league_id = s.league_id and lp.id = s.league_player_id
+  join public.player_profiles p on p.league_id = lp.league_id and p.id = lp.player_id
+  left join public.fantasy_lineup_players x
+    on x.league_id = s.league_id and x.lineup_id = v_lineup.id and x.league_player_id = s.league_player_id
+  where s.league_id = p_league and s.fantasy_team_id = t.id;
+
+  return jsonb_build_object(
+    'team', jsonb_build_object('id', t.id, 'name', t.name),
+    'lineup_id', v_lineup.id,
+    'formation', v_lineup.formation,
+    'status', coalesce(v_lineup.status, 'empty'),
+    'version', v_lineup.version,
+    'gameweek_id', v_lineup.gameweek_id,
+    'captain_id', (select league_player_id from public.fantasy_lineup_players
+                    where league_id = p_league and lineup_id = v_lineup.id and captain),
+    'vice_captain_id', (select league_player_id from public.fantasy_lineup_players
+                         where league_id = p_league and lineup_id = v_lineup.id and vice_captain),
+    'players', v_squad,
+    'budget', (select budget from public.leagues where id = p_league),
+    'spent', (select coalesce(sum(acquired_price), 0) from public.fantasy_squad_players
+               where league_id = p_league and fantasy_team_id = t.id)
+  );
+end $$;
+
+-- Buy a market player into the caller's squad. Position limits, the 15-player
+-- cap, duplicate prevention and budget are all re-checked here - the client's
+-- checks are advisory only. Ownership is serialized per player by an advisory
+-- lock so two managers cannot both take the same market row in a race that
+-- violates the league's rules (multiple ownership IS allowed, but the squad
+-- and budget rules are not).
+create or replace function public.ff_squad_buy(p_league uuid, p_league_player uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; lp public.league_players; l public.leagues;
+  v_count integer; v_spent numeric; v_pos_count integer;
+begin
+  perform ff_private.require_member(p_league);
+  select * into l from public.leagues where id = p_league;
+  if not found then raise exception 'league not found' using errcode = '23514'; end if;
+  if not l.market_open then raise exception 'the transfer market is closed' using errcode = '42501'; end if;
+  if l.archived_at is not null then raise exception 'league is archived' using errcode = '42501'; end if;
+
+  select * into lp from public.league_players where league_id = p_league and id = p_league_player;
+  if not found then raise exception 'player is not in this league market' using errcode = '42501'; end if;
+  if not lp.active then raise exception 'player is not active' using errcode = '23514'; end if;
+
+  t := ff_private.ensure_team(p_league);
+  perform pg_advisory_xact_lock(hashtextextended('ff-squad:' || t.id::text, 0));
+
+  if exists (select 1 from public.fantasy_squad_players
+              where league_id = p_league and fantasy_team_id = t.id and league_player_id = lp.id) then
+    raise exception 'player is already in your squad' using errcode = '23514';
+  end if;
+  select count(*), coalesce(sum(acquired_price), 0) into v_count, v_spent
+    from public.fantasy_squad_players where league_id = p_league and fantasy_team_id = t.id;
+  if v_count >= 15 then raise exception 'squad is full (15 players)' using errcode = '23514'; end if;
+  if v_spent + lp.price > l.budget then raise exception 'not enough budget' using errcode = '23514'; end if;
+  select count(*) into v_pos_count
+    from public.fantasy_squad_players s join public.league_players x
+      on x.league_id = s.league_id and x.id = s.league_player_id
+   where s.league_id = p_league and s.fantasy_team_id = t.id and x.position = lp.position;
+  -- 2 GK, 5 DEF, 5 MID, 3 FWD is the approved distribution.
+  if v_pos_count >= (case lp.position when 'GK' then 2 when 'DEF' then 5 when 'MID' then 5 else 3 end) then
+    raise exception 'position limit reached for %', lp.position using errcode = '23514';
+  end if;
+
+  insert into public.fantasy_squad_players(league_id, fantasy_team_id, league_player_id, acquired_price)
+  values (p_league, t.id, lp.id, lp.price);
+
+  -- A squad change invalidates any unconfirmed draft lineup.
+  update public.fantasy_lineups set status = 'superseded'
+   where league_id = p_league and fantasy_team_id = t.id and status = 'draft';
+
+  perform ff_private.audit(p_league, 'squad_buy', 'league_player', lp.id,
+    jsonb_build_object('price', lp.price, 'team_id', t.id));
+  return jsonb_build_object('league_player_id', lp.id, 'price', lp.price,
+                            'squad_size', v_count + 1, 'spent', v_spent + lp.price);
+end $$;
+
+-- Sell a player back to the market, returning their purchase price to the
+-- budget. Refuses if the player is locked in a confirmed lineup for the current
+-- gameweek, so a confirmed lineup can never reference a sold player.
+create or replace function public.ff_squad_sell(p_league uuid, p_league_player uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; v_price numeric;
+begin
+  perform ff_private.require_member(p_league);
+  if not exists (select 1 from public.leagues where id = p_league and market_open) then
+    raise exception 'the transfer market is closed' using errcode = '42501';
+  end if;
+  select * into t from public.fantasy_teams where league_id = p_league and manager_id = auth.uid();
+  if not found then raise exception 'you have no team in this league' using errcode = '23514'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('ff-squad:' || t.id::text, 0));
+
+  select acquired_price into v_price from public.fantasy_squad_players
+   where league_id = p_league and fantasy_team_id = t.id and league_player_id = p_league_player;
+  if not found then raise exception 'player is not in your squad' using errcode = '23514'; end if;
+  if exists (select 1 from public.fantasy_lineup_players x join public.fantasy_lineups li
+               on li.league_id = x.league_id and li.id = x.lineup_id
+              where x.league_id = p_league and x.league_player_id = p_league_player
+                and li.fantasy_team_id = t.id and li.status = 'confirmed') then
+    raise exception 'player is locked in a confirmed lineup; change the lineup first' using errcode = '23514';
+  end if;
+
+  delete from public.fantasy_squad_players
+   where league_id = p_league and fantasy_team_id = t.id and league_player_id = p_league_player;
+  -- Lineup slots and captaincy for that player go with them.
+  delete from public.fantasy_lineup_players x using public.fantasy_lineups li
+   where x.league_id = p_league and x.league_player_id = p_league_player
+     and li.league_id = x.league_id and li.id = x.lineup_id
+     and li.fantasy_team_id = t.id and li.status = 'draft';
+
+  perform ff_private.audit(p_league, 'squad_sell', 'league_player', p_league_player,
+    jsonb_build_object('price', v_price, 'team_id', t.id));
+  return jsonb_build_object('league_player_id', p_league_player, 'refund', v_price);
+end $$;
+
+-- Replace one squad player with another in the same position: sell + buy in one
+-- transaction, with the outgoing player's price credited. Position, budget and
+-- market checks are delegated to the same rules as buy/sell.
+create or replace function public.ff_squad_transfer(p_league uuid, p_out uuid, p_in uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; l public.leagues; out_lp public.league_players; in_lp public.league_players;
+  v_out_price numeric; v_spent numeric; v_count integer; gw uuid;
+begin
+  perform ff_private.require_member(p_league);
+  select * into l from public.leagues where id = p_league;
+  if not l.market_open then raise exception 'the transfer market is closed' using errcode = '42501'; end if;
+  if p_out = p_in then raise exception 'outgoing and incoming players are the same' using errcode = '23514'; end if;
+
+  select * into t from public.fantasy_teams where league_id = p_league and manager_id = auth.uid();
+  if not found then raise exception 'you have no team in this league' using errcode = '23514'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('ff-squad:' || t.id::text, 0));
+
+  select * into out_lp from public.league_players where league_id = p_league and id = p_out;
+  if not found then raise exception 'outgoing player is not in this league market' using errcode = '42501'; end if;
+  select * into in_lp from public.league_players where league_id = p_league and id = p_in;
+  if not found then raise exception 'incoming player is not in this league market' using errcode = '42501'; end if;
+  if not in_lp.active then raise exception 'incoming player is not active' using errcode = '23514'; end if;
+  if in_lp.position <> out_lp.position then
+    raise exception 'a replacement must play in the same position' using errcode = '23514';
+  end if;
+  select acquired_price into v_out_price from public.fantasy_squad_players
+   where league_id = p_league and fantasy_team_id = t.id and league_player_id = p_out;
+  if not found then raise exception 'outgoing player is not in your squad' using errcode = '23514'; end if;
+  if exists (select 1 from public.fantasy_squad_players
+              where league_id = p_league and fantasy_team_id = t.id and league_player_id = p_in) then
+    raise exception 'incoming player is already in your squad' using errcode = '23514';
+  end if;
+  if exists (select 1 from public.fantasy_lineup_players x join public.fantasy_lineups li
+               on li.league_id = x.league_id and li.id = x.lineup_id
+              where x.league_id = p_league and x.league_player_id = p_out
+                and li.fantasy_team_id = t.id and li.status = 'confirmed') then
+    raise exception 'outgoing player is locked in a confirmed lineup' using errcode = '23514';
+  end if;
+
+  select count(*), coalesce(sum(acquired_price), 0) into v_count, v_spent
+    from public.fantasy_squad_players where league_id = p_league and fantasy_team_id = t.id;
+  if v_spent - v_out_price + in_lp.price > l.budget then
+    raise exception 'not enough budget for this transfer' using errcode = '23514';
+  end if;
+
+  delete from public.fantasy_squad_players
+   where league_id = p_league and fantasy_team_id = t.id and league_player_id = p_out;
+  insert into public.fantasy_squad_players(league_id, fantasy_team_id, league_player_id, acquired_price)
+  values (p_league, t.id, in_lp.id, in_lp.price);
+  -- Swap the player in any draft lineup slot, preserving slot and captaincy.
+  update public.fantasy_lineup_players x
+     set league_player_id = in_lp.id, position_snapshot = in_lp.position, price_snapshot = in_lp.price
+   where x.league_id = p_league and x.league_player_id = p_out
+     and exists (select 1 from public.fantasy_lineups li where li.league_id = x.league_id
+                  and li.id = x.lineup_id and li.fantasy_team_id = t.id and li.status = 'draft');
+
+  -- A transfer row requires a gameweek. Failing loudly here is better than
+  -- inserting nothing and reporting success.
+  gw := ff_private.current_gameweek(p_league);
+  if gw is null then
+    raise exception 'create a season with at least one gameweek before making transfers'
+      using errcode = '23514';
+  end if;
+  insert into public.transfers(league_id, fantasy_team_id, gameweek_id, out_player_id, in_player_id,
+                               out_price, in_price, actor_id)
+  values (p_league, t.id, gw, p_out, p_in, v_out_price, in_lp.price, auth.uid());
+
+  perform ff_private.audit(p_league, 'squad_transfer', 'league_player', p_in,
+    jsonb_build_object('out', p_out, 'in', p_in, 'out_price', v_out_price, 'in_price', in_lp.price));
+  return jsonb_build_object('out', p_out, 'in', p_in, 'spent', v_spent - v_out_price + in_lp.price);
+end $$;
+
+-- Save a draft lineup: the exact 15 squad players, a formation, an ordered list
+-- (first 11 = starters), and captain / vice-captain. Server-side validation of
+-- the formation, bench size and captaincy mirrors src/services/rules.ts and is
+-- authoritative.
+create or replace function public.ff_lineup_save(
+  p_league uuid, p_gameweek uuid, p_formation text, p_player_ids uuid[],
+  p_captain uuid default null, p_vice uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; v_lineup public.fantasy_lineups; v_version integer; i integer;
+  v_id uuid; rec record; want jsonb; v_starters jsonb;
+begin
+  perform ff_private.require_member(p_league);
+  if p_formation not in ('4-3-3','4-4-2','3-5-2','3-4-3','4-5-1','5-3-2','5-4-1') then
+    raise exception 'unknown formation' using errcode = '23514';
+  end if;
+  if p_player_ids is null or cardinality(p_player_ids) <> 15 then
+    raise exception 'a lineup needs exactly 15 players' using errcode = '23514';
+  end if;
+  if (select count(distinct x) from unnest(p_player_ids) x) <> 15 then
+    raise exception 'a player cannot appear twice' using errcode = '23514';
+  end if;
+  if p_captain is null or p_vice is null then
+    raise exception 'captain and vice-captain are required' using errcode = '23514';
+  end if;
+  if p_captain = p_vice then raise exception 'captain and vice-captain must differ' using errcode = '23514'; end if;
+  if p_captain <> all(p_player_ids) or p_vice <> all(p_player_ids) then
+    raise exception 'captain and vice-captain must be in the squad' using errcode = '23514';
+  end if;
+  if not exists (select 1 from public.gameweeks where league_id = p_league and id = p_gameweek) then
+    raise exception 'gameweek not found' using errcode = '23514';
+  end if;
+
+  t := ff_private.ensure_team(p_league);
+  perform pg_advisory_xact_lock(hashtextextended('ff-squad:' || t.id::text, 0));
+
+  -- Every listed player must actually be in this team's squad.
+  if exists (select 1 from unnest(p_player_ids) x
+              where not exists (select 1 from public.fantasy_squad_players s
+                                 where s.league_id = p_league and s.fantasy_team_id = t.id and s.league_player_id = x)) then
+    raise exception 'lineup contains a player who is not in your squad' using errcode = '23514';
+  end if;
+
+  -- Formation check against the first 11 by position snapshot.
+  want := case p_formation
+    when '4-3-3' then '{"GK":1,"DEF":4,"MID":3,"FWD":3}'::jsonb
+    when '4-4-2' then '{"GK":1,"DEF":4,"MID":4,"FWD":2}'::jsonb
+    when '3-5-2' then '{"GK":1,"DEF":3,"MID":5,"FWD":2}'::jsonb
+    when '3-4-3' then '{"GK":1,"DEF":3,"MID":4,"FWD":3}'::jsonb
+    when '4-5-1' then '{"GK":1,"DEF":4,"MID":5,"FWD":1}'::jsonb
+    when '5-3-2' then '{"GK":1,"DEF":5,"MID":3,"FWD":2}'::jsonb
+    else '{"GK":1,"DEF":5,"MID":4,"FWD":1}'::jsonb end;
+  select jsonb_build_object(
+           'GK', count(*) filter (where lp.position = 'GK'),
+           'DEF', count(*) filter (where lp.position = 'DEF'),
+           'MID', count(*) filter (where lp.position = 'MID'),
+           'FWD', count(*) filter (where lp.position = 'FWD'))
+    into v_starters
+  from unnest(p_player_ids[1:11]) as u(id)
+  join public.league_players lp on lp.league_id = p_league and lp.id = u.id;
+  if v_starters is distinct from want then
+    raise exception 'starting XI does not match formation %: %', p_formation, v_starters using errcode = '23514';
+  end if;
+
+  -- Reuse the current draft, otherwise start a new version.
+  select * into v_lineup from public.fantasy_lineups
+   where league_id = p_league and fantasy_team_id = t.id and gameweek_id = p_gameweek and status = 'draft'
+   order by version desc limit 1;
+  if not found then
+    select coalesce(max(version), 0) + 1 into v_version from public.fantasy_lineups
+     where league_id = p_league and fantasy_team_id = t.id and gameweek_id = p_gameweek;
+    insert into public.fantasy_lineups(league_id, fantasy_team_id, gameweek_id, version, status, formation)
+    values (p_league, t.id, p_gameweek, v_version, 'draft', p_formation)
+    returning * into v_lineup;
+  else
+    if exists (select 1 from public.fantasy_score_items i
+              where i.league_id = p_league and i.fantasy_lineup_id = v_lineup.id) then
+      raise exception 'lineup has been scored and can no longer change' using errcode = '23514';
+    end if;
+    update public.fantasy_lineups set formation = p_formation where league_id = p_league and id = v_lineup.id;
+    delete from public.fantasy_lineup_players where league_id = p_league and lineup_id = v_lineup.id;
+  end if;
+
+  for i in 1..15 loop
+    v_id := p_player_ids[i];
+    select lp.position, lp.price into rec from public.league_players lp
+     where lp.league_id = p_league and lp.id = v_id;
+    insert into public.fantasy_lineup_players(league_id, lineup_id, league_player_id, position_snapshot,
+      price_snapshot, slot, captain, vice_captain)
+    values (p_league, v_lineup.id, v_id, rec.position, rec.price, i,
+            v_id = p_captain, v_id = p_vice);
+  end loop;
+
+  perform ff_private.audit(p_league, 'lineup_saved', 'fantasy_lineup', v_lineup.id,
+    jsonb_build_object('formation', p_formation, 'version', v_lineup.version));
+  return jsonb_build_object('lineup_id', v_lineup.id, 'version', v_lineup.version,
+                            'formation', p_formation, 'status', 'draft');
+end $$;
+
+-- Confirm a draft lineup. Confirmation is a manager's declaration that the XI is
+-- final; the one_confirmed_lineup index allows exactly one confirmed lineup per
+-- team and gameweek, so the previous one is retired first.
+create or replace function public.ff_lineup_confirm(p_league uuid, p_lineup uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare t public.fantasy_teams; v public.fantasy_lineups; v_n integer; m public.league_members;
+begin
+  m := ff_private.require_member(p_league);
+  select * into t from public.fantasy_teams where league_id = p_league and manager_id = m.user_id;
+  if not found then raise exception 'you have no team in this league' using errcode = '23514'; end if;
+  select * into v from public.fantasy_lineups
+   where league_id = p_league and id = p_lineup and fantasy_team_id = t.id for update;
+  if not found then raise exception 'lineup not found' using errcode = '42501'; end if;
+  if v.status <> 'draft' then raise exception 'only a draft lineup can be confirmed' using errcode = '23514'; end if;
+  select count(*) into v_n from public.fantasy_lineup_players where league_id = p_league and lineup_id = v.id;
+  if v_n <> 15 then raise exception 'a lineup must contain exactly 15 players' using errcode = '23514'; end if;
+
+  update public.fantasy_lineups set status = 'superseded'
+   where league_id = p_league and fantasy_team_id = t.id and gameweek_id = v.gameweek_id
+     and status = 'confirmed' and id <> v.id;
+  update public.fantasy_lineups set status = 'confirmed' where league_id = p_league and id = v.id;
+
+  perform ff_private.audit(p_league, 'lineup_confirmed', 'fantasy_lineup', v.id,
+    jsonb_build_object('formation', v.formation, 'gameweek_id', v.gameweek_id));
+  return jsonb_build_object('lineup_id', v.id, 'status', 'confirmed');
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 6. Gameweeks, fixtures, standings (read + leader setup)
+-- ---------------------------------------------------------------------------
+
+create or replace function public.ff_gameweeks(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'id', g.id, 'number', g.number, 'deadline', g.deadline,
+             'season_id', g.season_id, 'season_name', s.name,
+             'rules_pinned', g.scoring_rule_set_id is not null)
+           order by g.number)
+    from public.gameweeks g join public.seasons s on s.league_id = g.league_id and s.id = g.season_id
+    where g.league_id = p_league
+  ), '[]'::jsonb);
+end $$;
+
+-- Leader-only: create a season and its gameweeks. Required because a lineup is
+-- pinned to a gameweek, so the fantasy game cannot start without one.
+create or replace function public.ff_season_create(
+  p_league uuid, p_name text, p_starts timestamptz, p_ends timestamptz, p_gameweeks integer default 1)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.seasons; i integer; v_gw jsonb := '[]'::jsonb; g public.gameweeks;
+  v_step interval;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_gameweeks is null or p_gameweeks < 1 or p_gameweeks > 60 then
+    raise exception 'gameweeks must be between 1 and 60' using errcode = '23514';
+  end if;
+  if p_ends is null or p_starts is null or p_ends <= p_starts then
+    raise exception 'season must end after it starts' using errcode = '23514';
+  end if;
+  insert into public.seasons(league_id, name, starts_at, ends_at)
+  values (p_league, btrim(coalesce(p_name, 'Season')), p_starts, p_ends) returning * into v;
+
+  v_step := (p_ends - p_starts) / p_gameweeks;
+  for i in 1..p_gameweeks loop
+    insert into public.gameweeks(league_id, season_id, number, deadline)
+    values (p_league, v.id, i, p_starts + (v_step * i))
+    returning * into g;
+    v_gw := v_gw || jsonb_build_array(jsonb_build_object('id', g.id, 'number', g.number, 'deadline', g.deadline));
+  end loop;
+  perform ff_private.audit(p_league, 'season_created', 'season', v.id,
+    jsonb_build_object('name', v.name, 'gameweeks', p_gameweeks));
+  return jsonb_build_object('id', v.id, 'name', v.name, 'gameweeks', v_gw);
+end $$;
+
+-- Leader-only: define the head-to-head schedule for a gameweek.
+create or replace function public.ff_fixture_create(p_league uuid, p_gameweek uuid, p_home uuid, p_away uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.head_to_head_fixtures;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_home = p_away then raise exception 'a team cannot play itself' using errcode = '23514'; end if;
+  if not exists (select 1 from public.gameweeks where league_id = p_league and id = p_gameweek) then
+    raise exception 'gameweek not found' using errcode = '23514';
+  end if;
+  -- The composite FK also rejects a foreign team, but that surfaces as a raw
+  -- "violates foreign key constraint head_to_head_fixtures_..._fkey", which is
+  -- useless to a league leader. Name the actual problem, and never echo whether
+  -- a team exists in another league.
+  if not exists (select 1 from public.fantasy_teams where league_id = p_league and id = p_home)
+     or not exists (select 1 from public.fantasy_teams where league_id = p_league and id = p_away) then
+    raise exception 'both teams must belong to this league' using errcode = '42501';
+  end if;
+  insert into public.head_to_head_fixtures(league_id, gameweek_id, home_team_id, away_team_id)
+  values (p_league, p_gameweek, p_home, p_away) returning * into v;
+  perform ff_private.audit(p_league, 'fixture_created', 'head_to_head_fixture', v.id,
+    jsonb_build_object('home', p_home, 'away', p_away, 'gameweek_id', p_gameweek));
+  return jsonb_build_object('id', v.id, 'home_team_id', p_home, 'away_team_id', p_away);
+end $$;
+
+-- Standings for a league, both modes. h2h_points and fantasy_points are kept
+-- separate on purpose: head-to-head points come from win/draw/loss (3/1/0) and
+-- fantasy points are the tie-break, never the ranking itself.
+create or replace function public.ff_standings(p_league uuid, p_season uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'team_id', st.fantasy_team_id, 'team_name', t.name, 'manager_id', t.manager_id,
+             'manager_name', (select display_name from public.profiles where id = t.manager_id),
+             'mode', st.mode, 'fantasy_points', st.fantasy_points, 'h2h_points', st.h2h_points,
+             'is_stale', st.is_stale, 'computed_at', st.computed_at) order by
+             (st.mode = 'head_to_head') desc, st.h2h_points desc nulls last, st.fantasy_points desc, t.name)
+    from public.league_standings st join public.fantasy_teams t
+      on t.league_id = st.league_id and t.id = st.fantasy_team_id
+    where st.league_id = p_league and (p_season is null or st.season_id = p_season)
+  ), '[]'::jsonb);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 7. Notifications
+-- ---------------------------------------------------------------------------
+
+create or replace function public.ff_notifications(p_league uuid default null, p_limit integer default 50)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  if auth.uid() is null then raise exception 'authentication required' using errcode = '42501'; end if;
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'id', n.id, 'league_id', n.league_id, 'kind', n.kind, 'payload', n.payload,
+             'created_at', n.created_at, 'read_at', n.read_at) order by n.created_at desc)
+    from (select * from public.notifications
+           where recipient_id = auth.uid() and (p_league is null or league_id = p_league)
+           order by created_at desc limit greatest(1, least(coalesce(p_limit, 50), 200))) n
+  ), '[]'::jsonb);
+end $$;
+
+create or replace function public.ff_notification_read(p_notification uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.notifications;
+begin
+  if auth.uid() is null then raise exception 'authentication required' using errcode = '42501'; end if;
+  update public.notifications set read_at = coalesce(read_at, now())
+   where id = p_notification and recipient_id = auth.uid() returning * into v;
+  if not found then raise exception 'notification not found' using errcode = '42501'; end if;
+  return jsonb_build_object('id', v.id, 'read_at', v.read_at);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 8. Matches (organizer + leader)
+-- ---------------------------------------------------------------------------
+
+create or replace function public.ff_tournament_create(p_league uuid, p_name text)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.real_football_teams;
+begin
+  perform ff_private.require_leader(p_league);
+  insert into public.real_football_teams(league_id, name) values (p_league, ff_private.clean_name(p_name))
+  returning * into v;
+  perform ff_private.audit(p_league, 'real_team_created', 'real_football_team', v.id, jsonb_build_object('name', v.name));
+  return jsonb_build_object('id', v.id, 'name', v.name);
+end $$;
+
+create or replace function public.ff_real_teams(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'active', t.active) order by t.name)
+    from public.real_football_teams t where t.league_id = p_league
+  ), '[]'::jsonb);
+end $$;
+
+-- Leader-only: schedule a real match for a gameweek.
+create or replace function public.ff_match_create(
+  p_league uuid, p_gameweek uuid, p_team_a uuid, p_team_b uuid, p_organizer uuid,
+  p_starts_at timestamptz, p_venue text, p_starters_per_side integer default 7,
+  p_max_substitutes integer default 5)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.real_matches;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_team_a = p_team_b then raise exception 'teams must differ' using errcode = '23514'; end if;
+  if not exists (select 1 from public.match_organizers where league_id = p_league and user_id = p_organizer) then
+    raise exception 'organizer must be an appointed match organizer' using errcode = '23514';
+  end if;
+  if not exists (select 1 from public.gameweeks where league_id = p_league and id = p_gameweek) then
+    raise exception 'gameweek not found' using errcode = '23514';
+  end if;
+  -- Same reasoning as ff_fixture_create: report the real problem instead of a
+  -- composite-FK violation message, without disclosing other leagues' teams.
+  if not exists (select 1 from public.real_football_teams where league_id = p_league and id = p_team_a)
+     or not exists (select 1 from public.real_football_teams where league_id = p_league and id = p_team_b) then
+    raise exception 'both teams must belong to this league' using errcode = '42501';
+  end if;
+  if p_starts_at is null then
+    raise exception 'a match needs a kick-off time' using errcode = '23514';
+  end if;
+  if coalesce(p_starters_per_side, 0) < 1 or coalesce(p_max_substitutes, 0) < 0 then
+    raise exception 'starters_per_side must be at least 1 and max_substitutes at least 0' using errcode = '23514';
+  end if;
+  insert into public.real_matches(league_id, gameweek_id, team_a_id, team_b_id, organizer_id,
+    starts_at, venue, starters_per_side, max_substitutes)
+  values (p_league, p_gameweek, p_team_a, p_team_b, p_organizer, p_starts_at,
+    btrim(coalesce(p_venue, '')), p_starters_per_side, p_max_substitutes)
+  returning * into v;
+  perform ff_private.audit(p_league, 'match_created', 'match', v.id,
+    jsonb_build_object('gameweek_id', p_gameweek, 'team_a', p_team_a, 'team_b', p_team_b));
+  return jsonb_build_object('id', v.id, 'starts_at', v.starts_at, 'organizer_id', p_organizer);
+end $$;
+
+-- Organizer or leader: open a lineup revision for a match (the draft container
+-- that lineups and later the result attach to).
+create or replace function public.ff_match_open_revision(p_league uuid, p_match uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.match_revisions; v_ver integer; m public.real_matches;
+begin
+  select * into m from public.real_matches where league_id = p_league and id = p_match;
+  if not found then raise exception 'match not found' using errcode = '42501'; end if;
+  if not (ff_private.is_leader(p_league) or ff_private.is_match_organizer(p_league, p_match)) then
+    raise exception 'not the organizer of this match' using errcode = '42501';
+  end if;
+  select coalesce(max(version), 0) + 1 into v_ver from public.match_revisions
+   where league_id = p_league and match_id = p_match;
+  insert into public.match_revisions(league_id, match_id, version, match_snapshot)
+  values (p_league, p_match, v_ver, jsonb_build_object(
+    'starts_at', m.starts_at, 'venue', m.venue, 'team_a_id', m.team_a_id,
+    'team_b_id', m.team_b_id, 'starters_per_side', m.starters_per_side,
+    'max_substitutes', m.max_substitutes))
+  returning * into v;
+  return jsonb_build_object('id', v.id, 'version', v.version, 'state', v.state);
+end $$;
+
+-- Organizer or leader: set the side lineup for a revision (players, starters and
+-- substitutes). Existing rows for that side are replaced, guarded so a
+-- submitted revision cannot be edited.
+create or replace function public.ff_match_set_lineup(
+  p_league uuid, p_revision uuid, p_team uuid,
+  p_players jsonb) -- [{"player_id","selection","actual_position","eligibility_kind","eligibility_evidence"}]
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare r public.match_revisions; v_lineup public.real_match_lineups; item jsonb;
+begin
+  select * into r from public.match_revisions where league_id = p_league and id = p_revision;
+  if not found then raise exception 'revision not found' using errcode = '42501'; end if;
+  if not (ff_private.is_leader(p_league) or ff_private.is_match_organizer(p_league, r.match_id)) then
+    raise exception 'not the organizer of this match' using errcode = '42501';
+  end if;
+  if r.state <> 'draft' then raise exception 'revision is no longer editable' using errcode = '23514'; end if;
+  if p_players is null or jsonb_typeof(p_players) <> 'array' or jsonb_array_length(p_players) = 0 then
+    raise exception 'a lineup needs at least one player' using errcode = '23514';
+  end if;
+
+  select * into v_lineup from public.real_match_lineups
+   where league_id = p_league and revision_id = p_revision and team_id = p_team;
+  if not found then
+    insert into public.real_match_lineups(league_id, match_id, revision_id, team_id)
+    values (p_league, r.match_id, p_revision, p_team) returning * into v_lineup;
+  else
+    delete from public.real_match_lineup_players
+     where league_id = p_league and revision_id = p_revision and lineup_id = v_lineup.id;
+  end if;
+
+  for item in select * from jsonb_array_elements(p_players) loop
+    insert into public.real_match_lineup_players(league_id, revision_id, lineup_id, player_id,
+      selection, actual_position, eligibility_kind, eligibility_evidence)
+    values (p_league, p_revision, v_lineup.id, (item->>'player_id')::uuid,
+      item->>'selection', item->>'actual_position', coalesce(item->>'eligibility_kind', 'registered'),
+      coalesce(item->'eligibility_evidence', '{}'::jsonb));
+  end loop;
+
+  perform ff_private.audit(p_league, 'lineup_draft_set', 'match', r.match_id,
+    jsonb_build_object('revision', p_revision, 'team', p_team, 'players', jsonb_array_length(p_players)));
+  return jsonb_build_object('lineup_id', v_lineup.id, 'players', jsonb_array_length(p_players));
+end $$;
+
+-- Organizer: submit the drafted lineup for leader review.
+create or replace function public.ff_match_submit_lineup(p_league uuid, p_revision uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v uuid; r public.match_revisions;
+begin
+  v := ff_private.submit_lineup(p_league, p_revision);
+  select * into r from public.match_revisions where league_id = p_league and id = p_revision;
+  perform ff_private.notify_leader(p_league, 'lineup_submitted',
+    jsonb_build_object('submission_id', v, 'match_id', r.match_id, 'league_id', p_league));
+  return jsonb_build_object('submission_id', v);
+end $$;
+
+-- Organizer: create the editable result revision from the approved lineup so
+-- scores and events can be recorded against it.
+-- Organizer: fork the approved lineup into an editable result revision.
+--
+-- p_request_id is REQUIRED and is the idempotency key migration 008 introduced:
+-- a double-tapped "record result" from a flaky phone must return the same
+-- revision instead of creating a second one. The client generates a UUID once
+-- per user action and reuses it on retry (src/services/api.ts).
+create or replace function public.ff_match_fork_result(p_league uuid, p_approval uuid, p_request_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v uuid;
+begin
+  if p_request_id is null then
+    raise exception 'a request id is required for idempotent result forking' using errcode = '23514';
+  end if;
+  v := ff_private.fork_result(p_league, p_approval, p_request_id);
+  return jsonb_build_object('revision_id', v, 'request_id', p_request_id);
+end $$;
+
+create or replace function public.ff_match_set_score(p_league uuid, p_revision uuid, p_a integer, p_b integer)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  if p_a is null or p_b is null or p_a < 0 or p_b < 0 then
+    raise exception 'scores must be non-negative' using errcode = '23514';
+  end if;
+  perform ff_private.set_result_score(p_league, p_revision, p_a, p_b);
+  return jsonb_build_object('revision_id', p_revision, 'team_a_score', p_a, 'team_b_score', p_b);
+end $$;
+
+-- Organizer: record one match event. Event types are validated against the
+-- approved vocabulary; scoring VALUES are not invented here - the scoring engine
+-- stays closed until positional values are approved.
+create or replace function public.ff_match_record_event(
+  p_league uuid, p_revision uuid, p_player uuid, p_type text,
+  p_minute integer default null, p_related uuid default null, p_quantity integer default 1,
+  p_details jsonb default '{}')
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare allowed text[] := array['appearance','goal','assist','clean_sheet','team_win','draw',
+  'mvp','yellow_card','red_card','own_goal','substitution_in','substitution_out','penalty_saved','penalty_missed'];
+  v uuid;
+begin
+  if p_type is null or not (lower(btrim(p_type)) = any(allowed)) then
+    raise exception 'unsupported event type %', p_type using errcode = '23514';
+  end if;
+  if p_minute is not null and (p_minute < 0 or p_minute > 130) then
+    raise exception 'minute is out of range' using errcode = '23514';
+  end if;
+  v := ff_private.record_event(p_league, p_revision, p_player, p_related, lower(btrim(p_type)),
+    p_minute, coalesce(p_quantity, 1), coalesce(p_details, '{}'::jsonb));
+  return jsonb_build_object('event_id', v, 'type', lower(btrim(p_type)));
+end $$;
+
+create or replace function public.ff_match_submit_result(p_league uuid, p_revision uuid, p_lineup_approval uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v uuid; r public.match_revisions;
+begin
+  v := ff_private.submit_result(p_league, p_revision, p_lineup_approval);
+  select * into r from public.match_revisions where league_id = p_league and id = p_revision;
+  perform ff_private.notify_leader(p_league, 'result_submitted',
+    jsonb_build_object('submission_id', v, 'match_id', r.match_id, 'league_id', p_league,
+                       'team_a_score', r.team_a_score, 'team_b_score', r.team_b_score));
+  return jsonb_build_object('submission_id', v);
+end $$;
+
+create or replace function public.ff_match_review_submission(p_league uuid, p_submission uuid, p_decision text, p_reason text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v uuid; s public.match_submissions;
+begin
+  v := ff_private.review_submission(p_league, p_submission, p_decision, p_reason);
+  select * into s from public.match_submissions where league_id = p_league and id = p_submission;
+  perform ff_private.audit(p_league, 'match_reviewed', 'match', s.match_id,
+    jsonb_build_object('submission_id', p_submission, 'decision', p_decision));
+  -- Tell the submitter, and the whole league once a result is official.
+  perform ff_private.notify(p_league, s.submitted_by, 'match_reviewed',
+    jsonb_build_object('submission_id', p_submission, 'decision', p_decision,
+                       'kind', s.kind, 'league_id', p_league, 'reason', p_reason));
+  return jsonb_build_object('approval_id', v, 'decision', p_decision);
+end $$;
+
+create or replace function public.ff_match_open_correction(p_league uuid, p_match uuid, p_reason text)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v uuid;
+begin
+  v := ff_private.open_correction(p_league, p_match, p_reason);
+  perform ff_private.audit(p_league, 'correction_opened', 'match', p_match, jsonb_build_object('draft_revision', v), p_reason);
+  return jsonb_build_object('draft_revision_id', v);
+end $$;
+
+-- Matches visible to the caller. RLS already restricts rows; this RPC exists so
+-- one call returns the joined shape the Match Center renders.
+create or replace function public.ff_matches(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'id', m.id, 'gameweek_id', m.gameweek_id, 'starts_at', m.starts_at, 'venue', m.venue,
+      'team_a_id', m.team_a_id, 'team_a', ta.name, 'team_b_id', m.team_b_id, 'team_b', tb.name,
+      'organizer_id', m.organizer_id, 'starters_per_side', m.starters_per_side,
+      'max_substitutes', m.max_substitutes,
+      'revision_id', r.id, 'revision_version', r.version, 'revision_state', r.state,
+      'team_a_score', r.team_a_score, 'team_b_score', r.team_b_score,
+      'events', coalesce((select jsonb_agg(jsonb_build_object(
+                    'id', e.id, 'type', e.event_type, 'minute', e.minute, 'quantity', e.quantity,
+                    'player_id', e.player_id,
+                    'player_name', (select pp.display_name from public.real_match_lineup_players lp
+                                     join public.player_profiles pp on pp.league_id = lp.league_id and pp.id = lp.player_id
+                                    where lp.league_id = e.league_id and lp.revision_id = e.revision_id and lp.player_id = e.player_id)
+                  ) order by e.minute nulls last)
+                  from public.match_events e where e.league_id = m.league_id and e.revision_id = r.id), '[]'::jsonb)
+    ) order by m.starts_at desc)
+    from public.real_matches m
+    join public.real_football_teams ta on ta.league_id = m.league_id and ta.id = m.team_a_id
+    join public.real_football_teams tb on tb.league_id = m.league_id and tb.id = m.team_b_id
+    left join lateral (select * from public.match_revisions v
+                        where v.league_id = m.league_id and v.match_id = m.id
+                        order by v.version desc limit 1) r on true
+    where m.league_id = p_league
+  ), '[]'::jsonb);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 9. Execution surface: ownership and grants
+-- ---------------------------------------------------------------------------
+
+-- Close EXECUTE on everything new, then open exactly the reviewed RPC surface to
+-- authenticated. anon receives nothing: every ff_ RPC requires auth.uid(), but a
+-- missing grant makes that a network-level rejection rather than a function call.
+revoke all on function
+  ff_private.clean_name(text), ff_private.require_member(uuid), ff_private.ensure_team(uuid, text),
+  ff_private.audit(uuid, text, text, uuid, jsonb, text), ff_private.notify(uuid, uuid, text, jsonb),
+  ff_private.notify_leader(uuid, text, jsonb), ff_private.league_code(uuid),
+  ff_private.market_player_json(uuid), ff_private.current_gameweek(uuid)
+from public, anon, authenticated;
+
+revoke all on function
+  public.ff_bootstrap(text), public.ff_update_profile(text),
+  public.ff_league_create(text, numeric), public.ff_league_code(uuid), public.ff_league_join(text),
+  public.ff_league_members(uuid), public.ff_league_set_member(uuid, uuid, text, text),
+  public.ff_league_transfer_leadership(uuid, uuid), public.ff_league_set_market(uuid, boolean),
+  public.ff_league_set_organizer(uuid, uuid, boolean),
+  public.ff_market_upsert_player(uuid, text, text, numeric, integer, boolean, text, text, uuid),
+  public.ff_market_players(uuid, text, text, boolean),
+  public.ff_suggestion_submit(uuid, text, text, text, text, text),
+  public.ff_suggestions(uuid, text),
+  public.ff_suggestion_review(uuid, uuid, text, text, numeric, integer, text),
+  public.ff_squad(uuid), public.ff_squad_buy(uuid, uuid), public.ff_squad_sell(uuid, uuid),
+  public.ff_squad_transfer(uuid, uuid, uuid),
+  public.ff_lineup_save(uuid, uuid, text, uuid[], uuid, uuid), public.ff_lineup_confirm(uuid, uuid),
+  public.ff_gameweeks(uuid), public.ff_season_create(uuid, text, timestamptz, timestamptz, integer),
+  public.ff_fixture_create(uuid, uuid, uuid, uuid), public.ff_standings(uuid, uuid),
+  public.ff_notifications(uuid, integer), public.ff_notification_read(uuid),
+  public.ff_tournament_create(uuid, text), public.ff_real_teams(uuid),
+  public.ff_match_create(uuid, uuid, uuid, uuid, uuid, timestamptz, text, integer, integer),
+  public.ff_match_open_revision(uuid, uuid), public.ff_match_set_lineup(uuid, uuid, uuid, jsonb),
+  public.ff_match_submit_lineup(uuid, uuid),
+  public.ff_match_fork_result(uuid, uuid, uuid), public.ff_match_set_score(uuid, uuid, integer, integer),
+  public.ff_match_record_event(uuid, uuid, uuid, text, integer, uuid, integer, jsonb),
+  public.ff_match_submit_result(uuid, uuid, uuid),
+  public.ff_match_review_submission(uuid, uuid, text, text),
+  public.ff_match_open_correction(uuid, uuid, text), public.ff_matches(uuid)
+from public, anon, authenticated;
+
+-- The reviewed client-callable surface. Every entry is authorized internally by
+-- ff_private.require_member / require_leader / require_organizer, or by the
+-- trigger-based guard chain it delegates to.
+grant execute on function
+  public.ff_bootstrap(text), public.ff_update_profile(text),
+  public.ff_league_create(text, numeric), public.ff_league_code(uuid), public.ff_league_join(text),
+  public.ff_league_members(uuid), public.ff_league_set_member(uuid, uuid, text, text),
+  public.ff_league_transfer_leadership(uuid, uuid), public.ff_league_set_market(uuid, boolean),
+  public.ff_league_set_organizer(uuid, uuid, boolean),
+  public.ff_market_upsert_player(uuid, text, text, numeric, integer, boolean, text, text, uuid),
+  public.ff_market_players(uuid, text, text, boolean),
+  public.ff_suggestion_submit(uuid, text, text, text, text, text),
+  public.ff_suggestions(uuid, text),
+  public.ff_suggestion_review(uuid, uuid, text, text, numeric, integer, text),
+  public.ff_squad(uuid), public.ff_squad_buy(uuid, uuid), public.ff_squad_sell(uuid, uuid),
+  public.ff_squad_transfer(uuid, uuid, uuid),
+  public.ff_lineup_save(uuid, uuid, text, uuid[], uuid, uuid), public.ff_lineup_confirm(uuid, uuid),
+  public.ff_gameweeks(uuid), public.ff_season_create(uuid, text, timestamptz, timestamptz, integer),
+  public.ff_fixture_create(uuid, uuid, uuid, uuid), public.ff_standings(uuid, uuid),
+  public.ff_notifications(uuid, integer), public.ff_notification_read(uuid),
+  public.ff_tournament_create(uuid, text), public.ff_real_teams(uuid),
+  public.ff_match_create(uuid, uuid, uuid, uuid, uuid, timestamptz, text, integer, integer),
+  public.ff_match_open_revision(uuid, uuid), public.ff_match_set_lineup(uuid, uuid, uuid, jsonb),
+  public.ff_match_submit_lineup(uuid, uuid),
+  public.ff_match_fork_result(uuid, uuid, uuid), public.ff_match_set_score(uuid, uuid, integer, integer),
+  public.ff_match_record_event(uuid, uuid, uuid, text, integer, uuid, integer, jsonb),
+  public.ff_match_submit_result(uuid, uuid, uuid),
+  public.ff_match_review_submission(uuid, uuid, text, text),
+  public.ff_match_open_correction(uuid, uuid, text), public.ff_matches(uuid)
+to authenticated;
+
+-- Ownership is transferred LAST, after every GRANT above has been issued. Doing
+-- it earlier would strip this migration's own deployer of the authority to grant
+-- EXECUTE on functions it no longer owns.
+-- Every ff_ function in this migration becomes owned by the least-privilege
+-- definer role. ff_migration_owner is NOLOGIN + BYPASSRLS and owns no table, so
+-- it mediates data access without holding DDL authority. Ownership follows the
+-- same per-function justification recorded for the existing 56 definers.
+-- Ownership transfer, EXHAUSTIVE rather than name-matched.
+--
+-- The first version of this block matched `proname like 'ff_%'` plus a hand-written
+-- list. That left ff_private.current_gameweek() - added by this same migration -
+-- owned by the migration role, i.e. by `postgres` on Supabase. The read-only
+-- verification script caught it (check 07). Matching by name is exactly how this
+-- class of defect appears, so the rule is now stated structurally instead:
+--
+--   EVERY function in ff_private, and every ff_* function in public, is owned by
+--   ff_migration_owner.
+--
+-- That is the whole internal surface: ff_private is unreachable by clients and
+-- contains only helpers, so no hand-maintained list is needed or wanted. A
+-- SECURITY DEFINER function owned by a superuser-ish role is a privilege
+-- escalation surface; this removes it by construction.
+do $$
+declare f record; n int := 0;
+begin
+  for f in
+    select p.oid, n.nspname, p.proname
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where (n.nspname = 'ff_private')
+       or (n.nspname = 'public' and p.proname like 'ff\_%')
+  loop
+    if pg_get_userbyid((select proowner from pg_proc where oid = f.oid)) <> 'ff_migration_owner' then
+      execute format('alter function %I.%I(%s) owner to ff_migration_owner',
+        f.nspname, f.proname, pg_get_function_identity_arguments(f.oid));
+      n := n + 1;
+    end if;
+  end loop;
+end $$;
+
+-- No client DML anywhere. This restates the 009 posture after adding functions,
+-- and is what makes "frontend cannot write tables directly" a checked fact.
+revoke insert, update, delete, truncate, references, trigger on all tables in schema public
+  from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 10. Definer-reachability repair (pre-existing defect found by the Phase 3 API suite)
+-- ---------------------------------------------------------------------------
+-- Migration 011 transfers ownership of the 56 SECURITY DEFINER functions to
+-- ff_migration_owner. It does NOT touch the four ff_private helpers that are not
+-- SECURITY DEFINER:
+--
+--   append_only(), block_unimplemented_scoring(), require_read_committed(),
+--   revision_insert_guard()
+--
+-- Those stay owned by the migration role (postgres on Supabase). Every definer
+-- function that calls one of them - guard_run() -> require_read_committed(),
+-- guard_official_result() -> require_leader(), the scoring write-blockers, the
+-- audit append-only trigger - is therefore calling a function its own owner has
+-- no EXECUTE privilege on, and fails with:
+--
+--   42501: permission denied for function require_read_committed
+--
+-- This was latent before the API layer: no client-callable path existed, so the
+-- trigger chain was never exercised by a definer other than the table owner.
+-- Turning the API on makes it reachable from the very first roster write.
+--
+-- Ownership alone would not be enough: 009 revoked EXECUTE on all ff_private
+-- functions from PUBLIC and granted it back only to `authenticated`, so even a
+-- correctly-owned helper would refuse its definer caller. Both are fixed here,
+-- and neither widens the client surface:
+--   * ownership follows the same least-privilege definer as everything else;
+--   * EXECUTE is granted to ff_migration_owner ONLY - not to PUBLIC, anon or
+--     authenticated - so no client gains a callable helper.
+do $$
+declare f record; n int := 0;
+begin
+  if not exists (select 1 from pg_roles where rolname = 'ff_migration_owner') then
+    raise exception 'ff_migration_owner does not exist; apply 009 before this migration'
+      using errcode = '42501';
+  end if;
+
+  for f in
+    select p.oid, p.proname
+    from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+    where ns.nspname = 'ff_private'
+      and p.proname in ('append_only', 'block_unimplemented_scoring',
+                        'require_read_committed', 'revision_insert_guard')
+  loop
+    execute format('alter function ff_private.%I() owner to ff_migration_owner', f.proname);
+    execute format('grant execute on function ff_private.%I() to ff_migration_owner', f.proname);
+    n := n + 1;
+  end loop;
+
+  if n <> 4 then
+    raise exception 'expected 4 non-definer helpers in ff_private, found %; the helper set changed, review before deploying', n
+      using errcode = '42501';
+  end if;
+
+  -- Exhaustive, not name-matched: grant the definer EXECUTE on EVERY ff_private
+  -- function. Matching on names ('ff_%' plus a hand-written list) is exactly how
+  -- this defect appears - ff_private.current_gameweek() was added by this
+  -- migration and silently fell outside the pattern, making the transfer RPC
+  -- fail with "permission denied for function". A definer must be able to call
+  -- the helpers it delegates to.
+  for f in select p.oid, p.proname from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+           where ns.nspname = 'ff_private'
+  loop
+    execute format('grant execute on function ff_private.%I(%s) to ff_migration_owner',
+      f.proname, pg_get_function_identity_arguments(f.oid));
+  end loop;
+
+  -- Belt and braces: every ff_private function must be executable by the definer
+  -- role, or a trigger chain will fail at runtime in a way no static grant check
+  -- would catch.
+  if exists (
+    select 1 from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+    where ns.nspname = 'ff_private'
+      and not has_function_privilege('ff_migration_owner', p.oid, 'execute')
+  ) then
+    raise exception 'some ff_private functions are not executable by ff_migration_owner' using errcode = '42501';
+  end if;
+
+  -- ...and no client role may have gained EXECUTE on any ff_private helper
+  -- beyond the ten reviewed read helpers granted by 009.
+  if exists (
+    select 1 from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+    where ns.nspname = 'ff_private'
+      and has_function_privilege('anon', p.oid, 'execute')
+  ) then
+    raise exception 'a private helper became executable by anon' using errcode = '42501';
+  end if;
+end $$;
+
+commit;

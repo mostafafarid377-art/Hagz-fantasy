@@ -11,12 +11,15 @@
 #
 # This directory is NOT linked to any hosted Supabase project. Nothing here
 # contacts the Supabase Platform, and no migration has been applied anywhere.
-# `supabase/migrations/` is intentionally absent. The reviewed drafts stay in
-# `supabase/design/migrations/` until Phase 2B.2 makes them executable. Do not
-# move an unreviewed design draft into `supabase/migrations/`.
 #
-# See docs/phase-2b1-supabase-cli-preparation.md for the migration package,
-# readiness assessment and remaining blockers.
+# `supabase/migrations/` now contains the 13 executable migrations. They are
+# GENERATED - never edit them by hand. The reviewed sources are
+# `supabase/design/migrations/001-011` and `supabase/design/api/012-013`;
+# regenerate with `npm run migrations:promote`, and `npm run check:migrations`
+# fails the build if a generated file drifts from its source.
+#
+# Deploying this package is documented in docs/phase-3-deployment-runbook.md.
+# It has never been applied to a hosted project from this repository.
 # ---------------------------------------------------------------------------
 #
 # A string used to distinguish different Supabase projects on the same host. Defaults to the

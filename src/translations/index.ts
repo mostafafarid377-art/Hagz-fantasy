@@ -26,5 +26,7 @@ Object.assign(ar, {
   'No competition data for this league':'لا توجد بيانات منافسة لهذا الدوري', 'Competition results are static demo data.':'نتائج المنافسة بيانات تجريبية ثابتة.', 'Provisional':'مقترح'
 });
 const language=localStorage.getItem('ff-language')||'en';
+Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});
+Object.assign(ar, {'Some data could not be loaded':'تعذر تحميل بعض البيانات','The numbers below may be incomplete. This is not an empty league.':'الأرقام أدناه قد تكون غير مكتملة. هذا ليس دورياً فارغاً.','That did not work':'لم ينجح ذلك','Try again':'حاول مجدداً'});
 i18n.use(initReactI18next).init({resources:{en:{translation:{}},ar:{translation:ar}},lng:language,fallbackLng:'en',interpolation:{escapeValue:false},returnNull:false});
 export default i18n;

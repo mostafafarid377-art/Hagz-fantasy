@@ -1,0 +1,224 @@
+// Live, Supabase-backed data for the current league.
+//
+// This provider is the real counterpart to useDemo(). It deliberately exposes the
+// same *concepts* the screens already use (league, players, squad, suggestions,
+// members, role) so the UI does not fork into two implementations that drift.
+//
+// Design decisions worth stating:
+//   * Every mutation calls the API and then reloads the affected slice. The server
+//     is the source of truth; we never optimistically invent state the database
+//     has not confirmed, because the database is where the rules are enforced.
+//   * Errors are kept, not swallowed: a refused action surfaces in the UI instead
+//     of silently doing nothing.
+//   * The selected league persists in localStorage so a reload keeps context.
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import * as api from '../services/api';
+import { ApiError } from '../services/api';
+import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion } from '../types/api';
+import type { Bootstrap } from '../services/api';
+
+const LEAGUE_KEY = 'ff-live-league';
+
+export interface LiveState {
+  loading: boolean;
+  leagueId: string | null;
+  leagues: Bootstrap['leagues'];
+  members: ApiMember[];
+  players: ApiPlayer[];
+  squad: ApiSquad | null;
+  suggestions: ApiSuggestion[];
+  gameweeks: Array<{ id: string; number: number; deadline: string; season_id: string; season_name: string; rules_pinned: boolean }>;
+  matches: ApiMatch[];
+  standings: ApiStanding[];
+  notifications: ApiNotification[];
+  error: string | null;
+  /**
+   * Reads that failed while the rest of the screen loaded. Non-empty means the
+   * numbers on screen are incomplete - the UI must say so rather than imply the
+   * league is empty. See the `safe()` comment in load().
+   */
+  partialFailures: string[];
+}
+
+interface LiveContextValue extends LiveState {
+  league: Bootstrap['leagues'][number] | null;
+  isLeader: boolean;
+  isOrganizer: boolean;
+  myUserId: string | null;
+  selectLeague: (id: string) => void;
+  reload: () => Promise<void>;
+  /** League actions */
+  createLeague: (name: string) => Promise<void>;
+  joinLeague: (code: string) => Promise<void>;
+  setMarketOpen: (open: boolean) => Promise<void>;
+  setMember: (userId: string, role?: 'leader' | 'manager', status?: 'active' | 'inactive') => Promise<void>;
+  setOrganizer: (userId: string, enabled: boolean) => Promise<void>;
+  transferLeadership: (userId: string) => Promise<void>;
+  /** Market + suggestions */
+  savePlayer: (input: api.UpsertPlayerInput) => Promise<void>;
+  suggestPlayer: (input: Parameters<typeof api.submitSuggestion>[1]) => Promise<void>;
+  reviewSuggestion: (id: string, decision: 'approved' | 'rejected', opts?: Parameters<typeof api.reviewSuggestion>[3]) => Promise<void>;
+  /** Squad */
+  buy: (marketPlayerId: string) => Promise<void>;
+  sell: (marketPlayerId: string) => Promise<void>;
+  transfer: (outId: string, inId: string) => Promise<void>;
+  saveLineup: (input: Omit<Parameters<typeof api.saveLineup>[1], 'gameweekId'> & { gameweekId?: string }) => Promise<void>;
+  confirmLineup: (lineupId: string) => Promise<void>;
+  /** Competition + matches */
+  createSeason: (name: string, startsAt: string, endsAt: string, count: number) => Promise<void>;
+  refreshMatches: () => Promise<void>;
+  markNotificationRead: (id: string) => Promise<void>;
+}
+
+const LiveContext = createContext<LiveContextValue | null>(null);
+
+const message = (error: unknown): string =>
+  error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'Something went wrong';
+
+export function LiveProvider({ userId, children }: { userId: string | null; children: ReactNode }) {
+  const [state, setState] = useState<LiveState>({
+    loading: true, leagueId: null, leagues: [], members: [], players: [], squad: null,
+    suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+    error: null, partialFailures: [],
+  });
+  const generation = useRef(0);
+
+  const load = useCallback(async (leagueId: string | null) => {
+    const mine = ++generation.current;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const boot = await api.bootstrap();
+      const usable = boot.leagues.filter((l) => !l.archived);
+      const chosen = leagueId && usable.some((l) => l.league_id === leagueId)
+        ? leagueId
+        : usable[0]?.league_id ?? null;
+
+      if (!chosen) {
+        if (mine !== generation.current) return;
+        setState({
+          loading: false, leagueId: null, leagues: usable, members: [], players: [], squad: null,
+          suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+          error: null, partialFailures: [],
+        });
+        return;
+      }
+
+      // Load the league slice in parallel. One slow or broken read must not blank
+      // the entire screen, so each slice falls back to an empty value - BUT the
+      // failure is recorded and surfaced. Swallowing these silently is dangerous:
+      // if RLS or a grant is wrong, every read returns "permission denied", and a
+      // silent fallback renders "0 players / 0 members / no fixtures" - the UI then
+      // states as fact that the user has an empty league. Live mode must never
+      // present fake emptiness as real data.
+      const failures: string[] = [];
+      const safe = async <T,>(label: string, promise: Promise<T>, fallback: T): Promise<T> => {
+        try {
+          return await promise;
+        } catch (error) {
+          failures.push(`${label}: ${error instanceof Error ? error.message : 'failed'}`);
+          return fallback;
+        }
+      };
+      const [members, players, squad, suggestions, gameweeks, matches, standings, notifications] =
+        await Promise.all([
+          safe('members', api.leagueMembers(chosen), []),
+          safe('players', api.marketPlayers(chosen, { includeInactive: true }), []),
+          safe('squad', api.squad(chosen), null),
+          safe('suggestions', api.suggestions(chosen), []),
+          safe('gameweeks', api.gameweeks(chosen), []),
+          safe('matches', api.matches(chosen), []),
+          safe('standings', api.standings(chosen), []),
+          safe('notifications', api.notifications(chosen), []),
+        ]);
+
+      if (mine !== generation.current) return;
+      setState({
+        loading: false, leagueId: chosen, leagues: usable, members, players, squad,
+        suggestions, gameweeks, matches, standings, notifications,
+        error: null,
+        partialFailures: failures,
+      });
+      try { localStorage.setItem(LEAGUE_KEY, chosen); } catch { /* private mode */ }
+    } catch (error) {
+      if (mine !== generation.current) return;
+      setState((s) => ({ ...s, loading: false, error: message(error) }));
+    }
+  }, []);
+
+  useEffect(() => {
+    let initial: string | null = null;
+    try { initial = localStorage.getItem(LEAGUE_KEY); } catch { /* ignore */ }
+    void load(initial);
+  }, [load, userId]);
+
+  const leagueId = state.leagueId;
+
+  /**
+   * Run a mutation, then refresh. `failure` is returned rather than thrown so
+   * callers can render inline errors; the refresh still happens because a partial
+   * server-side change is possible for some actions (e.g. a correction).
+   */
+  const mutate = useCallback(async (action: () => Promise<unknown>): Promise<void> => {
+    try {
+      await action();
+      await load(leagueId);
+    } catch (error) {
+      setState((s) => ({ ...s, error: message(error) }));
+      throw error;
+    }
+  }, [leagueId, load]);
+
+  const selectLeague = useCallback((id: string) => { void load(id); }, [load]);
+
+  const league = state.leagues.find((l) => l.league_id === leagueId) ?? null;
+  const isLeader = league?.is_leader ?? false;
+  const isOrganizer = league?.is_organizer ?? false;
+
+  const value = useMemo<LiveContextValue>(() => ({
+    ...state,
+    league, isLeader, isOrganizer, myUserId: userId,
+    selectLeague,
+    reload: () => load(leagueId),
+    createLeague: async (name) => {
+      const created = await api.createLeague(name);
+      await load(created.id);
+    },
+    joinLeague: async (code) => {
+      const joined = await api.joinLeague(code);
+      await load(joined.id);
+    },
+    setMarketOpen: (open) => mutate(() => api.setMarket(require(leagueId), open)),
+    setMember: (userId2, role, status) => mutate(() => api.setMember(require(leagueId), userId2, role, status)),
+    setOrganizer: (userId2, enabled) => mutate(() => api.setOrganizer(require(leagueId), userId2, enabled)),
+    transferLeadership: (userId2) => mutate(() => api.transferLeadership(require(leagueId), userId2)),
+    savePlayer: (input) => mutate(() => api.upsertMarketPlayer(require(leagueId), input)),
+    suggestPlayer: (input) => mutate(() => api.submitSuggestion(require(leagueId), input)),
+    reviewSuggestion: (id, decision, opts) => mutate(() => api.reviewSuggestion(require(leagueId), id, decision, opts)),
+    buy: (id) => mutate(() => api.buyPlayer(require(leagueId), id)),
+    sell: (id) => mutate(() => api.sellPlayer(require(leagueId), id)),
+    transfer: (outId, inId) => mutate(() => api.transferPlayer(require(leagueId), outId, inId)),
+    saveLineup: (input) => mutate(() => api.saveLineup(require(leagueId), {
+      ...input,
+      gameweekId: input.gameweekId ?? state.gameweeks[0]?.id ?? '',
+    })),
+    confirmLineup: (id) => mutate(() => api.confirmLineup(require(leagueId), id)),
+    createSeason: (name, startsAt, endsAt, count) =>
+      mutate(() => api.createSeason(require(leagueId), name, startsAt, endsAt, count)),
+    refreshMatches: () => load(leagueId),
+    markNotificationRead: (id) => mutate(() => api.markNotificationRead(id)),
+  }), [state, league, isLeader, isOrganizer, userId, selectLeague, load, leagueId, mutate]);
+
+  return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
+}
+
+function require(id: string | null): string {
+  if (!id) throw new ApiError('invalidState', 'Select a league first');
+  return id;
+}
+
+export function useLive(): LiveContextValue {
+  const value = useContext(LiveContext);
+  if (!value) throw new Error('LiveProvider required');
+  return value;
+}
