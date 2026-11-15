@@ -33,11 +33,14 @@ const fakeAuth = () => ({
  * Mount AppLayout with a LiveProvider exposing `liveLeagues`.
  * `withLiveProvider: false` simulates demo mode (no provider, as in main.tsx).
  */
-async function mountLayout(opts: { withLiveProvider: boolean; liveLeagues?: Array<{ league_id: string; name: string }> }) {
+async function mountLayout(opts: {
+  withLiveProvider: boolean;
+  liveLeagues?: Array<{ league_id: string; name: string; is_leader?: boolean }>;
+}) {
   vi.resetModules();
   const liveLeagues = (opts.liveLeagues ?? []).map((l) => ({
     ...l, role: 'manager', status: 'active', budget: 100, market_open: true,
-    archived: false, is_leader: false, is_organizer: false,
+    archived: false, is_leader: l.is_leader ?? false, is_organizer: false,
   }));
 
   // `isLive` is `Boolean(auth.session) && isSupabaseConfigured`, so the configured
@@ -60,6 +63,7 @@ async function mountLayout(opts: { withLiveProvider: boolean; liveLeagues?: Arra
     const context = {
       leagues: liveLeagues,
       league: liveLeagues[0] ?? null,
+      isLeader: (liveLeagues[0] as { is_leader?: boolean } | undefined)?.is_leader ?? false,
       selectLeague: () => {},
     };
     const { createContext } = await import('react');
@@ -123,5 +127,33 @@ describe('demo mode is unchanged', () => {
     // Demo mode is a feature; its own leagues must keep working.
     expect(options).toContain('The Football Circle');
     expect(options).toContain('Friday Night League');
+  });
+});
+
+describe('leader tools follow the LIVE role, not the demo role', () => {
+  it('shows LEADER TOOLS to a signed-in league leader', async () => {
+    // The demo role defaults to 'manager'; the live role says leader. The sidebar
+    // used to read the demo value, so this user never saw their own tools.
+    await mountLayout({
+      withLiveProvider: true,
+      liveLeagues: [{ league_id: 'L1', name: 'My Real League', is_leader: true }],
+    });
+    expect(screen.queryByText('LEADER TOOLS')).not.toBeNull();
+    expect(screen.queryByText('Player Management')).not.toBeNull();
+    expect(screen.queryByText('Approval Queue')).not.toBeNull();
+  });
+
+  it('hides LEADER TOOLS from a signed-in manager', async () => {
+    await mountLayout({
+      withLiveProvider: true,
+      liveLeagues: [{ league_id: 'L1', name: 'My Real League', is_leader: false }],
+    });
+    expect(screen.queryByText('LEADER TOOLS')).toBeNull();
+  });
+
+  it('demo mode still follows the demo role', async () => {
+    // Demo defaults to manager, so no leader tools - unchanged behaviour.
+    await mountLayout({ withLiveProvider: false });
+    expect(screen.queryByText('LEADER TOOLS')).toBeNull();
   });
 });

@@ -77,6 +77,31 @@ export function LiveDashboard() {
 
   if (live.loading) return <Loading />;
   if (live.error) return <ErrorNote message={live.error} onRetry={() => void live.reload()} />;
+  // A league is known to exist, but none of its slices could be read: every panel
+  // below would render zeros ("0 members", "0 players", "no fixtures"), which the
+  // user reads as an empty league rather than as a failure. Say what happened and
+  // show the reasons instead of presenting fake emptiness as fact.
+  if (live.leagues.length > 0 && !live.league) {
+    return (
+      <>
+        <PageTitle eyebrow="DASHBOARD" title="Could not open your league"
+          description="Your league exists, but its data could not be loaded." />
+        <ErrorNote
+          message={live.partialFailures.length
+            ? live.partialFailures.join(' · ')
+            : 'The league did not load.'}
+          onRetry={() => void live.reload()}
+        />
+        <div className="panel narrow">
+          <SectionHead title="What you can try" />
+          <p className="section-description">
+            {t('Reload the page. If it keeps happening, the database refused the request.')}
+          </p>
+          <Link className="button button-outline" to="/create-league">{t('Create League')}</Link>
+        </div>
+      </>
+    );
+  }
   if (!live.league) {
     return (
       <>
@@ -96,6 +121,12 @@ export function LiveDashboard() {
   return (
     <>
       <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
+      {live.isLeader && (
+        // A leader who cannot reach their own tools assumes they were never granted
+        // the role. Make the server-derived role visible instead of leaving it to a
+        // menu that may be empty because of a failed read.
+        <p className="notice">{t('You are the league leader of this league.')}</p>
+      )}
       <PageTitle eyebrow="YOUR DASHBOARD" title="Welcome back"
         description={`${live.league.name} · ${t(live.league.role === 'leader' ? 'League Leader' : 'Fantasy manager')}`} />
 
