@@ -6,7 +6,7 @@
 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trophy, UsersRound, X,
 } from 'lucide-react';
@@ -298,6 +298,7 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
   const { t } = useTranslation();
   const live = useLive();
   const auth = useAuth();
+  const navigate = useNavigate();
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -310,6 +311,10 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
       if (join) await live.joinLeague(code.trim());
       else await live.createLeague(name.trim());
       await auth.refresh();
+      // Confirm the action by going to the league. Before this the form stayed put
+      // after a successful create, so "nothing happened" was indistinguishable from
+      // a failure - the user's report was that it "just doesn't load".
+      navigate('/league', { replace: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t('Could not complete that request.'));
     } finally { setBusy(false); }
