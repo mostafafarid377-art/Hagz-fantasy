@@ -49,7 +49,7 @@ const DESIGN_MIGRATIONS = {
   '008_result_fork_idempotency.sql': '02de6a93950c5886c1ab30365b0acce09cdf61780ba09183df2f956548c8e8ab',
   '009_ownership_and_grants.sql': '3afec7f948ceb8229004d145d2b8b3522ec2c9c03b3f5211accf2085689b3e24',
   '010_privilege_verification.sql': 'e1ac306c09e64c664254ef8402a90be62ee41e6076a81e00ee30dfcae2209968',
-  '011_definer_ownership_transfer.sql': '0947d828e1da37628a0566f6e4065d7b64f12991af00a8a8692213b83de0f156',
+  '011_definer_ownership_transfer.sql': '1c1ede4d303699a52ce33d58bc09a2506db3dc60fb43ccdce7e83b7bb6ac8ba6',
 };
 
 /** Sources authored for publication in Phase 3, under supabase/design/api/. */
