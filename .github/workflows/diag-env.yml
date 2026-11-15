@@ -1,7 +1,11 @@
 name: Diagnosis (temporary)
 
-# TEMPORARY diagnostic. Reports only whether each value is SET or EMPTY.
-# It never prints, echoes or derives any part of a value.
+# TEMPORARY diagnostic. The answer is carried by each job's PASS/FAIL rather than
+# by log text, because log downloads are blocked in the environment being debugged.
+#   PASS = variable is SET and non-empty
+#   FAIL = variable is EMPTY or absent
+# Nothing here prints, echoes, or derives any part of a value: `test -n` only
+# inspects the length and never emits it.
 on:
   push:
     branches:
@@ -11,35 +15,34 @@ permissions:
   contents: read
 
 jobs:
-  # Job A: no environment declared -> sees only REPOSITORY-scoped variables.
-  repo-scope:
+  repo-vars-url:
     runs-on: ubuntu-latest
     steps:
-      - name: Report repository scope
+      - name: vars.VITE_SUPABASE_URL non-empty?
         env:
-          V_URL: ${{ vars.VITE_SUPABASE_URL }}
-          V_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
-          S_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          S_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-        run: |
-          r() { if [ -n "${1:-}" ]; then echo "  $2: SET"; else echo "  $2: EMPTY"; fi; }
-          echo "REPOSITORY scope:"
-          r "$V_URL" "vars.VITE_SUPABASE_URL"
-          r "$V_KEY" "vars.VITE_SUPABASE_ANON_KEY"
-          r "$S_URL" "secrets.VITE_SUPABASE_URL"
-          r "$S_KEY" "secrets.VITE_SUPABASE_ANON_KEY"
+          V: ${{ vars.VITE_SUPABASE_URL }}
+        run: test -n "$V" && echo "SET"
 
-  # Job B: declares the github-pages environment -> also sees ENVIRONMENT-scoped values.
-  env-scope:
+  repo-vars-key:
     runs-on: ubuntu-latest
-    environment: github-pages
     steps:
-      - name: Report environment scope
+      - name: vars.VITE_SUPABASE_ANON_KEY non-empty?
         env:
-          V_URL: ${{ vars.VITE_SUPABASE_URL }}
-          V_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
-        run: |
-          r() { if [ -n "${1:-}" ]; then echo "  $2: SET"; else echo "  $2: EMPTY"; fi; }
-          echo "github-pages ENVIRONMENT scope:"
-          r "$V_URL" "vars.VITE_SUPABASE_URL"
-          r "$V_KEY" "vars.VITE_SUPABASE_ANON_KEY"
+          V: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: test -n "$V" && echo "SET"
+
+  repo-secrets-url:
+    runs-on: ubuntu-latest
+    steps:
+      - name: secrets.VITE_SUPABASE_URL non-empty?
+        env:
+          V: ${{ secrets.VITE_SUPABASE_URL }}
+        run: test -n "$V" && echo "SET"
+
+  repo-secrets-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: secrets.VITE_SUPABASE_ANON_KEY non-empty?
+        env:
+          V: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: test -n "$V" && echo "SET"
