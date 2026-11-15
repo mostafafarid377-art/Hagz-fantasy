@@ -285,16 +285,24 @@ export function LiveStandings() {
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
-  const h2h = live.standings.filter((s) => s.mode === 'head_to_head');
-  const totals = live.standings.filter((s) => s.mode === 'fantasy_total');
+  // ONE ranking, by fantasy points. Head-to-head is not a ranking input at all:
+  // mixing the two produced a table ordered by h2h_points where fantasy points
+  // only broke ties, which is not the game this league plays. `h2h_points` is
+  // still shown where the server provides it, purely for reference.
+  //
+  // Sorted here rather than trusting the RPC order, so the table is correct even
+  // if it is built against a database that predates the matching SQL change.
+  const ranked = [...live.standings].sort((a, b) =>
+    (b.fantasy_points ?? 0) - (a.fantasy_points ?? 0)
+    || a.team_name.localeCompare(b.team_name));
 
   return (
     <>
       <PageTitle eyebrow="THE TABLE" title="League Standings"
-        description="Head-to-head points decide the table; fantasy points break ties." />
+        description="Ranked by fantasy points." />
       {live.error && <ErrorNote message={live.error} />}
 
-      {live.standings.length === 0 ? (
+      {ranked.length === 0 ? (
         <Empty title="No standings yet"
           description="Standings are calculated from approved results. No result has been approved in this league yet." />
       ) : (
@@ -303,16 +311,15 @@ export function LiveStandings() {
             <thead>
               <tr>
                 <th>{t('Rank')}</th><th>{t('TEAM')}</th><th>{t('Manager')}</th>
-                <th>{t('H2H points')}</th><th>{t('Fantasy points')}</th>
+                <th>{t('Fantasy points')}</th>
               </tr>
             </thead>
             <tbody>
-              {(h2h.length ? h2h : totals).map((row, index) => (
-                <tr key={`${row.team_id}-${row.mode}`}>
+              {ranked.map((row, index) => (
+                <tr key={row.team_id}>
                   <td>{String(index + 1).padStart(2, '0')}</td>
                   <td><strong>{row.team_name}</strong></td>
                   <td>{row.manager_name}</td>
-                  <td>{row.h2h_points ?? '—'}</td>
                   <td><strong className="lime">{row.fantasy_points}</strong></td>
                 </tr>
               ))}
@@ -322,7 +329,7 @@ export function LiveStandings() {
       )}
 
       <p className="notice">
-        {t('Win = 3 points, draw = 1, loss = 0. Fantasy points are a tie-break, never the ranking itself.')}
+        {t('The table is ranked by fantasy points. Head-to-head results are not part of the ranking.')}
       </p>
     </>
   );
