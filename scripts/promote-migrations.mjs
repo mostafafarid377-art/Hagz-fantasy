@@ -10,14 +10,24 @@
  *   promoted file from the pinned draft and fails if a promoted file has
  *   drifted from its source.
  *
- * Execution order is NOT lexical-by-draft-number. Two requirements drive it:
+ * Execution order is NOT lexical-by-draft-number. Three requirements drive it:
  *   * 010 (privilege verification) asserts that all 56 definer functions are
  *     owned by ff_migration_owner, so the ownership transfer (draft 011) has to
  *     run BEFORE the verification (draft 010).
+ *   * Draft 014 (definer actor identity) repoints the definers off auth.uid(),
+ *     because hosted Supabase cannot grant USAGE on the auth schema. Draft 010
+ *     asserts that repair has happened, so 014 must also run before 010.
  *   * The application API layer (draft 012) creates the client-callable RPCs the
- *     frontend uses, and must exist before the final verification asserts that
- *     no over-broad EXECUTE grant slipped through.
- * The resulting order is 001..009, 011, 012, 010.
+ *     frontend uses, and must exist before the final verification (draft 013)
+ *     asserts that no over-broad EXECUTE grant slipped through.
+ *
+ * Executable versions in order:
+ *   001-009  schema through ownership/grants
+ *   010      ownership transfer      (draft 011)
+ *   011      application API         (draft 012)
+ *   012      definer actor identity  (draft 014)  <- forward-only repair
+ *   013      privilege verification  (draft 010)
+ *   014      API surface verification(draft 013)
  *
  * One draft cannot be promoted byte-for-byte, and this is deliberate:
  *   003_storage.sql ends with `create policy ... on storage.objects`. On hosted
@@ -114,9 +124,10 @@ const PACKAGE = [
   // definer must not depend on USAGE on the auth schema, which hosted Supabase
   // cannot grant (see the draft header). Draft 014 -> executable 012.
   //
-  // 012 and 013 were never recorded as applied on the hosted project (they are
-  // pending), so their executable versions are renumbered here rather than
-  // edited in place. Already-applied migrations 001-011 keep their versions.
+  // The previous executable 012 (privilege verification) and 013 (API surface
+  // verification) were never recorded as applied on the hosted project - both
+  // are pending - so they are renumbered here rather than edited in place.
+  // Already-applied migrations 001-011 keep their versions and are untouched.
   ['20261115000012', '014_definer_actor_identity.sql', 'definer_actor_identity'],
   // Draft 010: asserts the base privilege posture after the repair and API layer.
   ['20261115000013', '010_privilege_verification.sql', 'privilege_verification'],
@@ -182,8 +193,10 @@ async function main() {
   console.log(`Wrote ${written.length} migration(s) to supabase/migrations/:`);
   for (const name of written) console.log(`  ${name}`);
   console.log(
-    '\nOrder note: 011 (ownership transfer) runs before 010 (verification); the new 012 API ' +
-      'layer and 013 API-surface check run after it, with 013 last.',
+    '\nOrder note: 001-011 first, then the forward-only repair and the assertions it\n' +
+      'enables: 012 definer actor identity, 013 privilege verification, and\n' +
+      '014 API surface verification last. The repair must precede 013 because 013\n' +
+      'asserts the repair has happened.',
   );
 }
 

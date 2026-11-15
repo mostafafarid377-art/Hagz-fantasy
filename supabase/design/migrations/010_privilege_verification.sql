@@ -130,12 +130,13 @@ begin
   ) then
     raise exception 'a SECURITY DEFINER function owned by ff_migration_owner still calls auth.uid(); '
       'hosted Supabase cannot grant USAGE on the auth schema, so it would fail with 42501 at runtime. '
-      'Apply 014 (definer actor identity) first.'
+      'Apply executable 012 (definer actor identity, draft 014) first.'
       using errcode = '42501';
   end if;
   -- When the actor-identity helper exists, the definer must be able to execute it.
-  -- 014 owns creating it and asserts its own preconditions; this check only
-  -- guards against the helper being present but unreachable.
+  -- Executable 012 (draft 014) owns creating it and asserts its own
+  -- preconditions; this check only guards against the helper being present but
+  -- unreachable.
   if to_regprocedure('ff_private.current_actor_id()') is not null
      and not has_function_privilege('ff_migration_owner', 'ff_private.current_actor_id()', 'execute') then
     raise exception 'ff_migration_owner cannot execute ff_private.current_actor_id(); the definer has no usable caller identity'

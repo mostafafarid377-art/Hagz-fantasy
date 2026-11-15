@@ -1,7 +1,7 @@
 // Phase 3-10 — the definer's caller identity must not need USAGE on `auth`.
 //
-// REGRESSION GUARD for the hosted deployment failure:
-//   012 (executable) aborted with
+// REGRESSION GUARD for the hosted deployment failure. The privilege verification
+// — executable 012 at the time, now executable 013 — aborted with
 //     'ff_migration_owner needs USAGE on schema auth to call auth.uid()'
 //
 // The first version of the package assumed 009's
