@@ -1,0 +1,45 @@
+name: Diagnosis (temporary)
+
+# TEMPORARY diagnostic. Reports only whether each value is SET or EMPTY.
+# It never prints, echoes or derives any part of a value.
+on:
+  push:
+    branches:
+      - arena/1e1a8a1f-hagz-fantasy
+
+permissions:
+  contents: read
+
+jobs:
+  # Job A: no environment declared -> sees only REPOSITORY-scoped variables.
+  repo-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report repository scope
+        env:
+          V_URL: ${{ vars.VITE_SUPABASE_URL }}
+          V_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          S_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          S_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          r() { if [ -n "${1:-}" ]; then echo "  $2: SET"; else echo "  $2: EMPTY"; fi; }
+          echo "REPOSITORY scope:"
+          r "$V_URL" "vars.VITE_SUPABASE_URL"
+          r "$V_KEY" "vars.VITE_SUPABASE_ANON_KEY"
+          r "$S_URL" "secrets.VITE_SUPABASE_URL"
+          r "$S_KEY" "secrets.VITE_SUPABASE_ANON_KEY"
+
+  # Job B: declares the github-pages environment -> also sees ENVIRONMENT-scoped values.
+  env-scope:
+    runs-on: ubuntu-latest
+    environment: github-pages
+    steps:
+      - name: Report environment scope
+        env:
+          V_URL: ${{ vars.VITE_SUPABASE_URL }}
+          V_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          r() { if [ -n "${1:-}" ]; then echo "  $2: SET"; else echo "  $2: EMPTY"; fi; }
+          echo "github-pages ENVIRONMENT scope:"
+          r "$V_URL" "vars.VITE_SUPABASE_URL"
+          r "$V_KEY" "vars.VITE_SUPABASE_ANON_KEY"
