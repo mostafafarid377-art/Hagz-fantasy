@@ -1,0 +1,276 @@
+-- PHASE 2A.3 OFFLINE PROTOTYPE ONLY. NOT DEPLOYABLE. Apply only after 001-004
+-- on a disposable test database. No client workflow grants. All role/claim
+-- authenticity and deployment privileges remain to be reviewed on Supabase.
+-- Functions are VOLATILE (the PostgreSQL default): under READ COMMITTED each
+-- SQL statement following a lock wait obtains a fresh snapshot. These paths
+-- fail closed under other isolation levels; 40P01 requires whole-tx retry.
+
+create function ff_private.require_read_committed() returns void
+language plpgsql set search_path=pg_catalog,ff_private as $$
+begin
+ if current_setting('transaction_isolation')<>'read committed' then
+   raise exception 'workflow requires READ COMMITTED isolation' using errcode='25001'; end if;
+end $$;
+
+-- Match-bound organizer authorization takes match, membership, then organizer
+-- assignment locks. Revocation/demotion/removal must wait or commit first.
+create or replace function ff_private.require_organizer(p_league uuid,p_match uuid) returns void
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+ perform ff_private.require_read_committed();
+  if auth.uid() is null then raise exception 'not an active organizer assigned to this match' using errcode='42501'; end if;
+  perform 1 from public.real_matches m where m.league_id=p_league and m.id=p_match and m.organizer_id=auth.uid() for update;
+  if not found then raise exception 'not an active organizer assigned to this match' using errcode='42501'; end if;
+  perform 1 from public.league_members lm where lm.league_id=p_league and lm.user_id=auth.uid() and lm.status='active' for share;
+  if not found then raise exception 'not an active organizer assigned to this match' using errcode='42501'; end if;
+  perform 1 from public.match_organizers o where o.league_id=p_league and o.user_id=auth.uid() for share;
+  if not found then raise exception 'not an active organizer assigned to this match' using errcode='42501'; end if;
+end $$;
+create or replace function ff_private.require_leader(p_league uuid) returns void
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+ perform ff_private.require_read_committed();
+  if auth.uid() is null then raise exception 'not an active league leader' using errcode='42501'; end if;
+  perform 1 from public.league_members m where m.league_id=p_league and m.user_id=auth.uid() and m.status='active' and m.role='leader' for share;
+  if not found then raise exception 'not an active league leader' using errcode='42501'; end if;
+end $$;
+
+-- The latest approved lineup in this match is the only eligible source;
+-- a correction additionally requires its own lineup to be reapproved.
+create function ff_private.require_current_lineup(p_league uuid,p_match uuid,p_revision uuid) returns void
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare latest uuid;
+begin
+ perform ff_private.require_latest_corrected_lineup(p_league,p_match,p_revision);
+ select a.revision_id into latest from public.match_approvals a
+ join public.match_revisions r on r.league_id=a.league_id and r.match_id=a.match_id and r.id=a.revision_id
+ where a.league_id=p_league and a.match_id=p_match and a.kind='lineup' and a.decision='approved' and r.state='approved'
+ order by r.version desc limit 1;
+ if latest is distinct from p_revision then raise exception 'approved lineup is stale' using errcode='23514'; end if;
+end $$;
+
+-- validate_submission already holds the match row. A pre-correction lineup
+-- draft cannot be newly submitted as though it were the correction draft.
+create function ff_private.guard_submission_generation() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare corrected uuid; source_revision uuid;
+begin
+ perform ff_private.require_read_committed();
+ if new.kind='lineup' then
+   if exists(select 1 from public.official_match_results o where o.league_id=new.league_id and o.match_id=new.match_id and o.is_current) then
+     raise exception 'official result requires correction before a new lineup' using errcode='23514'; end if;
+   select c.draft_revision_id into corrected from public.match_corrections c
+   join public.match_revisions r on r.league_id=c.league_id and r.id=c.draft_revision_id
+   where c.league_id=new.league_id and c.match_id=new.match_id order by r.version desc limit 1;
+   if corrected is not null and corrected<>new.revision_id then
+     raise exception 'stale lineup submission after correction' using errcode='23514'; end if;
+ else
+   select a.revision_id into source_revision from public.match_approvals a
+   where a.league_id=new.league_id and a.match_id=new.match_id and a.id=new.approved_lineup_approval_id
+     and a.kind='lineup' and a.decision='approved';
+   perform ff_private.require_current_lineup(new.league_id,new.match_id,source_revision);
+ end if;
+ return new;
+end $$;
+create trigger zz_guard_submission_generation before insert on public.match_submissions for each row execute function ff_private.guard_submission_generation();
+
+-- Review the exact submitted revision and the exact approved lineup lineage
+-- under the same match lock used by corrections. Result revisions are separate
+-- from lineup revisions in this design, and copy the approved lineup exactly.
+create or replace function ff_private.validate_approval() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare sub public.match_submissions%rowtype; source_revision uuid; corrected uuid;
+begin
+ perform ff_private.require_read_committed();
+ perform 1 from public.real_matches where league_id=new.league_id and id=new.match_id for update;
+ if not found then raise exception 'match not found' using errcode='23514'; end if;
+ perform ff_private.require_leader(new.league_id);
+ if new.reviewed_by is distinct from auth.uid() then raise exception 'invalid reviewer' using errcode='42501'; end if;
+ select * into sub from public.match_submissions where league_id=new.league_id and id=new.submission_id and match_id=new.match_id and revision_id=new.revision_id and kind=new.kind;
+ if not found or not exists(select 1 from public.match_revisions where league_id=new.league_id and match_id=new.match_id and id=new.revision_id and state='submitted') then
+   raise exception 'submission is not awaiting review' using errcode='23514'; end if;
+ if exists(select 1 from public.match_submissions newer
+   join public.match_revisions nr on nr.league_id=newer.league_id and nr.match_id=newer.match_id and nr.id=newer.revision_id
+   join public.match_revisions cur on cur.league_id=sub.league_id and cur.match_id=sub.match_id and cur.id=sub.revision_id
+   where newer.league_id=sub.league_id and newer.match_id=sub.match_id and newer.kind=sub.kind and nr.version>cur.version) then
+   raise exception 'submission superseded by newer revision' using errcode='23514'; end if;
+ if sub.submitted_by=auth.uid() then raise exception 'self approval is forbidden' using errcode='42501'; end if;
+ if new.decision='rejected' and (new.reason is null or length(btrim(new.reason))=0) then raise exception 'rejection needs a reason' using errcode='23514'; end if;
+ select c.draft_revision_id into corrected from public.match_corrections c join public.match_revisions r on r.league_id=c.league_id and r.id=c.draft_revision_id
+ where c.league_id=new.league_id and c.match_id=new.match_id order by r.version desc limit 1;
+ if new.kind='lineup' and exists(select 1 from public.official_match_results o where o.league_id=new.league_id and o.match_id=new.match_id and o.is_current) then
+   raise exception 'official result requires correction before a new lineup' using errcode='23514'; end if;
+ if new.kind='lineup' and corrected is not null and new.revision_id<>corrected then
+   raise exception 'stale lineup submission after correction' using errcode='23514'; end if;
+ if new.kind='result' then
+   select a.revision_id into source_revision from public.match_approvals a
+   join public.match_revisions r on r.league_id=a.league_id and r.match_id=a.match_id and r.id=a.revision_id
+   where a.league_id=sub.league_id and a.match_id=sub.match_id and a.id=sub.approved_lineup_approval_id
+     and a.kind='lineup' and a.decision='approved' and r.state='approved';
+   if source_revision is null then raise exception 'approved lineup lineage required' using errcode='23514'; end if;
+   perform ff_private.require_current_lineup(new.league_id,new.match_id,source_revision);
+ end if;
+ return new;
+end $$;
+
+-- Acquire the match lock before taking the leader membership lock. The insert
+-- trigger repeats all checks so direct table inserts cannot skip validation.
+create or replace function ff_private.review_submission(p_league uuid,p_submission uuid,p_decision text,p_reason text default null) returns uuid
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare s public.match_submissions%rowtype; approval uuid;
+begin
+ select * into s from public.match_submissions where league_id=p_league and id=p_submission;
+ if not found then raise exception 'submission not found' using errcode='42501'; end if;
+ perform 1 from public.real_matches where league_id=p_league and id=s.match_id for update;
+ perform ff_private.require_leader(p_league);
+ insert into public.match_approvals(league_id,match_id,submission_id,revision_id,kind,decision,reviewed_by,reason)
+ values(p_league,s.match_id,s.id,s.revision_id,s.kind,p_decision,auth.uid(),p_reason) returning id into approval;
+ return approval;
+end $$;
+
+-- Defense in depth for privileged official pointer insertion: the result's
+-- own approval and its submission's approved lineup must still be current.
+create or replace function ff_private.guard_official_result() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare lineup_rev uuid;
+begin
+ perform ff_private.require_read_committed();
+ if tg_op='DELETE' then raise exception 'official result is historical' using errcode='23514'; end if;
+ if tg_op='INSERT' then
+   perform 1 from public.real_matches where league_id=new.league_id and id=new.match_id for update;
+   select la.revision_id into lineup_rev from public.match_approvals a
+   join public.match_revisions r on r.league_id=a.league_id and r.match_id=a.match_id and r.id=a.revision_id
+   join public.match_submissions s on s.league_id=a.league_id and s.match_id=a.match_id and s.id=a.submission_id and s.revision_id=a.revision_id and s.kind=a.kind
+   join public.match_approvals la on la.league_id=s.league_id and la.match_id=s.match_id and la.id=s.approved_lineup_approval_id and la.kind='lineup' and la.decision='approved'
+   join public.match_revisions lr on lr.league_id=la.league_id and lr.match_id=la.match_id and lr.id=la.revision_id and lr.state='approved'
+   where a.league_id=new.league_id and a.match_id=new.match_id and a.revision_id=new.revision_id and a.id=new.approval_id and a.kind='result' and a.decision='approved' and r.state='approved';
+   if not new.is_current or lineup_rev is null then raise exception 'official result requires approved result revision and lineup' using errcode='23514'; end if;
+   perform ff_private.require_current_lineup(new.league_id,new.match_id,lineup_rev);
+   return new;
+ end if;
+ perform ff_private.require_leader(old.league_id);
+ if not exists(select 1 from public.match_corrections c where c.league_id=old.league_id and c.official_result_id=old.id and c.actor_id=auth.uid()) then
+   raise exception 'correction record required to supersede result' using errcode='23514'; end if;
+ if not old.is_current or new.is_current or (new.id,new.league_id,new.match_id,new.revision_id,new.approval_id,new.decision,new.kind)
+    is distinct from (old.id,old.league_id,old.match_id,old.revision_id,old.approval_id,old.decision,old.kind) then
+   raise exception 'official result may only be superseded' using errcode='23514'; end if;
+ return new;
+end $$;
+
+create or replace function ff_private.open_correction(p_league uuid,p_match uuid,p_reason text) returns uuid
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare official public.official_match_results%rowtype; next_rev uuid; next_ver integer; old_lineup record; next_lineup uuid;
+begin
+ if p_reason is null or length(btrim(p_reason))=0 then raise exception 'correction requires a reason' using errcode='23514'; end if;
+ perform 1 from public.real_matches where league_id=p_league and id=p_match for update;
+ perform ff_private.require_leader(p_league);
+ select * into official from public.official_match_results where league_id=p_league and match_id=p_match and is_current for update;
+ if not found then raise exception 'current approved result required' using errcode='23514'; end if;
+ select coalesce(max(version),0)+1 into next_ver from public.match_revisions where league_id=p_league and match_id=p_match;
+ insert into public.match_revisions(league_id,match_id,version,match_snapshot,corrects_revision_id)
+ select p_league,p_match,next_ver,match_snapshot,id from public.match_revisions where league_id=p_league and id=official.revision_id returning id into next_rev;
+ for old_lineup in select * from public.real_match_lineups where league_id=p_league and revision_id=official.revision_id loop
+   insert into public.real_match_lineups(league_id,match_id,revision_id,team_id) values(p_league,p_match,next_rev,old_lineup.team_id) returning id into next_lineup;
+   insert into public.real_match_lineup_players(league_id,revision_id,lineup_id,player_id,selection,actual_position,eligibility_kind,eligibility_evidence)
+   select league_id,next_rev,next_lineup,player_id,selection,actual_position,eligibility_kind,eligibility_evidence from public.real_match_lineup_players where league_id=p_league and lineup_id=old_lineup.id;
+ end loop;
+ insert into public.match_corrections(league_id,match_id,official_result_id,previous_revision_id,draft_revision_id,actor_id,reason)
+ values(p_league,p_match,official.id,official.revision_id,next_rev,auth.uid(),p_reason);
+ return next_rev;
+end $$;
+
+
+-- Each player gets a transaction-scoped advisory lock shared by all lineup and
+-- roster writers. Hash collisions only serialize unrelated players. Updates
+-- lock old/new keys in sorted order. Registration row locks precede BEFORE
+-- triggers; deadlocks with match-first writers are possible and must abort and
+-- retry, never be ignored. Authorization for roster writes is future work.
+create function ff_private.lock_roster_player(p_league uuid,p_player uuid) returns void
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin perform ff_private.require_read_committed(); perform pg_advisory_xact_lock(hashtextextended('ff-roster:'||p_league::text||':'||p_player::text,0)); end $$;
+create or replace function ff_private.guard_roster_history() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare k record;
+begin
+ for k in select distinct league_id,player_id from (select old.league_id as league_id,old.player_id as player_id union all select new.league_id,new.player_id where tg_op='UPDATE') x order by league_id,player_id loop
+   perform ff_private.lock_roster_player(k.league_id,k.player_id);
+ end loop;
+ perform m.id from public.real_matches m join public.real_match_lineups l on l.league_id=m.league_id and l.match_id=m.id
+ join public.real_match_lineup_players p on p.league_id=l.league_id and p.lineup_id=l.id
+ where m.league_id=old.league_id and l.team_id=old.team_id and p.player_id=old.player_id and p.eligibility_kind='registered'
+   and old.valid_from<=m.starts_at and (old.valid_until is null or old.valid_until>m.starts_at)
+ order by m.id for update of m;
+ if exists(select 1 from public.real_matches m join public.real_match_lineups l on l.league_id=m.league_id and l.match_id=m.id
+   join public.real_match_lineup_players p on p.league_id=l.league_id and p.lineup_id=l.id
+   where m.league_id=old.league_id and l.team_id=old.team_id and p.player_id=old.player_id and p.eligibility_kind='registered'
+   and old.valid_from<=m.starts_at and (old.valid_until is null or old.valid_until>m.starts_at)) then
+   raise exception 'selected lineup references registration' using errcode='23514'; end if;
+ if tg_op='DELETE' then return old; end if; return new;
+end $$;
+-- Reject overlapping registrations to different teams for the same league
+-- player. A per-player advisory lock serializes check+write, including INSERT.
+-- Existing conflicting data must be resolved before applying this prototype.
+do $$ begin
+ if exists(select 1 from public.real_team_players a join public.real_team_players b
+   on a.league_id=b.league_id and a.player_id=b.player_id and a.id<b.id and a.team_id<>b.team_id
+   and tstzrange(a.valid_from,a.valid_until,'[)') && tstzrange(b.valid_from,b.valid_until,'[)')) then
+   raise exception 'conflicting roster registrations exist' using errcode='23514'; end if;
+end $$;
+create function ff_private.guard_roster_overlap() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+ perform ff_private.lock_roster_player(new.league_id,new.player_id);
+ if exists(select 1 from public.real_team_players rp where rp.league_id=new.league_id and rp.player_id=new.player_id
+    and rp.id<>new.id and rp.team_id<>new.team_id
+    and tstzrange(rp.valid_from,rp.valid_until,'[)') && tstzrange(new.valid_from,new.valid_until,'[)')) then
+   raise exception 'overlapping registrations for different teams' using errcode='23514'; end if;
+ return new;
+end $$;
+create trigger zz_guard_roster_overlap before insert or update on public.real_team_players for each row execute function ff_private.guard_roster_overlap();
+create function ff_private.guard_lineup_roster_lock() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare l uuid; r uuid; p uuid; t uuid; kickoff timestamptz;
+begin
+ if tg_op='DELETE' then l:=old.league_id; r:=old.revision_id; p:=old.player_id;
+ else l:=new.league_id; r:=new.revision_id; p:=new.player_id; end if;
+ -- Updates that change player identity acquire both keys in deterministic order.
+ if tg_op='UPDATE' and (old.league_id,old.player_id) is distinct from (new.league_id,new.player_id) then
+   if (old.league_id,old.player_id)<(new.league_id,new.player_id) then
+     perform ff_private.lock_roster_player(old.league_id,old.player_id); perform ff_private.lock_roster_player(new.league_id,new.player_id);
+   else perform ff_private.lock_roster_player(new.league_id,new.player_id); perform ff_private.lock_roster_player(old.league_id,old.player_id); end if;
+ else perform ff_private.lock_roster_player(l,p); end if;
+ if tg_op='DELETE' then return old; end if;
+ if new.eligibility_kind='registered' then
+   select li.team_id,m.starts_at into t,kickoff from public.real_match_lineups li join public.real_matches m on m.league_id=li.league_id and m.id=li.match_id where li.league_id=l and li.id=new.lineup_id and li.revision_id=r;
+   if not exists(select 1 from public.real_team_players rp where rp.league_id=l and rp.team_id=t and rp.player_id=p and rp.valid_from<=kickoff and (rp.valid_until is null or rp.valid_until>kickoff)) then
+     raise exception 'player not registered for match side at kickoff' using errcode='23514'; end if;
+ end if;
+ return new;
+end $$;
+create trigger zz_guard_lineup_roster_lock before insert or update or delete on public.real_match_lineup_players for each row execute function ff_private.guard_lineup_roster_lock();
+
+-- Source inserts acquire match then run lock and recheck sealed status. The
+-- row lock used to seal/supersede a run excludes concurrent source insertion.
+create or replace function ff_private.guard_run_source() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+ perform ff_private.require_read_committed();
+ if tg_op<>'INSERT' then raise exception 'run sources are immutable' using errcode='23514'; end if;
+ perform m.id from public.official_match_results o join public.real_matches m on m.league_id=o.league_id and m.id=o.match_id
+ where o.league_id=new.league_id and o.id=new.official_result_id for update of m;
+ perform 1 from public.scoring_runs r where r.league_id=new.league_id and r.id=new.scoring_run_id for update;
+ if not exists(select 1 from public.scoring_runs r
+   join public.official_match_results o on o.league_id=r.league_id
+   join public.real_matches m on m.league_id=o.league_id and m.id=o.match_id
+   join public.match_approvals a on a.league_id=o.league_id and a.id=o.approval_id and a.revision_id=o.revision_id
+   join public.match_revisions v on v.league_id=o.league_id and v.id=o.revision_id
+   where r.league_id=new.league_id and r.id=new.scoring_run_id and r.status='pending' and not r.sources_sealed
+     and o.id=new.official_result_id and o.revision_id=new.revision_id and o.is_current
+     and m.gameweek_id=r.gameweek_id and a.kind='result' and a.decision='approved' and v.state='approved') then
+   raise exception 'run source must be current approved result in same gameweek' using errcode='23514'; end if;
+ return new;
+end $$;
+revoke all on all functions in schema ff_private from public,anon,authenticated;
+grant execute on function ff_private.is_member(uuid),ff_private.is_leader(uuid),ff_private.is_organizer(uuid),ff_private.owns_team(uuid,uuid),
+ ff_private.can_read_lineup(uuid,uuid),ff_private.can_read_revision(uuid,uuid),ff_private.can_read_match(uuid,uuid),
+ ff_private.can_read_suggestion(uuid,uuid),ff_private.can_read_image(text),ff_private.is_match_organizer(uuid,uuid) to authenticated;

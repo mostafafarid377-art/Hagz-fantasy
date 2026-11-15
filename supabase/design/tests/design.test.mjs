@@ -64,7 +64,16 @@ test('official result cannot reference a missing, rejected, wrong-kind, or diffe
   await Q('insert into public.official_match_results(league_id,match_id,revision_id,approval_id) values ($1,$2,$3,$4)',[L,M,other,approvedResult]);
 });
 test('historical records cannot be cascade-deleted, and scoring values have no invented defaults',async()=>{
-  await mustFail(Q('delete from public.real_matches where id=$1',[M]),'23001');
+  // PostgreSQL 18 reports restrict_violation (23001); PostgreSQL 15 reports
+  // foreign_key_violation (23503) for the same ON DELETE RESTRICT action.
+  // Assert the version-specific code, the actual restricting FK, and survival.
+  const version=Number((await Q("select current_setting('server_version_num')::int as version")).rows[0].version);
+  const expected=version>=180000?'23001':'23503';
+  let constraint;
+  await assert.rejects(Q('delete from public.real_matches where id=$1',[M]),e=>{assert.equal(e.code,expected,e.message);constraint=e.constraint;assert.ok(constraint);return true;});
+  const fk=await Q("select confdeltype from pg_constraint where conname=$1 and contype='f' and confrelid='public.real_matches'::regclass",[constraint]);
+  assert.deepEqual(fk.rows.map(row=>row.confdeltype),['r']);
+  assert.equal((await Q('select count(*)::int as n from public.real_matches where id=$1',[M])).rows[0].n,1);
   assert.equal((await Q('select count(*)::int n from public.scoring_rule_values')).rows[0].n,0);
   await mustFail(Q("insert into public.fantasy_score_items(league_id,scoring_run_id,fantasy_lineup_id,performance_id,base_points,multiplier,points) values ($1,$2,$3,$4,5,3,15)",[L,R,LA,P[0]]),'23514');
 });

@@ -12,7 +12,7 @@
     "test:e2e:pages": "VITE_BASE_PATH=/Hagz-fantasy/ VITE_ROUTER_MODE=hash npm run build && playwright test -c playwright.pages.config.ts",
     "test:pages:assets": "VITE_BASE_PATH=/Hagz-fantasy/ VITE_ROUTER_MODE=hash npm run build && VITE_BASE_PATH=/Hagz-fantasy/ node scripts/check-pages-build.mjs",
     "typecheck": "tsc -b",
-    "test:db:design": "node --test supabase/design/tests/design.test.mjs",
+    "test:db:design": "node --test supabase/design/tests/*.test.mjs",
     "types:db:design": "node supabase/design/generate-types.mjs"
   },
   "dependencies": {

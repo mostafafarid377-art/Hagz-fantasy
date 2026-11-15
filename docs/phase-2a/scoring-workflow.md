@@ -1,5 +1,7 @@
 # Fantasy scoring and standings design
 
+> **Phase 2A.1 supplement:** This document describes the original 001–003 draft. See [offline hardening](phase-2a1-hardening.md) for the later 004 prototypes, test coverage and remaining gaps. No live deployment is authorized.
+
 **No scoring worker or write functions are implemented, and no official points can be created by clients.** All values except the user-specified captain multiplier and head-to-head 3/1/0 are pending product configuration. `scoring_rule_values` is deliberately empty; the tests' sample values exist only in an isolated in-memory database.
 
 ## Versioning and approvals
