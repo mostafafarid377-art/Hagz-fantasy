@@ -48,7 +48,7 @@ const DESIGN_MIGRATIONS = {
   '007_correction_attempts.sql': 'fdd52cbca5a96bbd80d782e75a00aafc319481d7829ac8af511727b8843e5fdf',
   '008_result_fork_idempotency.sql': '02de6a93950c5886c1ab30365b0acce09cdf61780ba09183df2f956548c8e8ab',
   '009_ownership_and_grants.sql': '3afec7f948ceb8229004d145d2b8b3522ec2c9c03b3f5211accf2085689b3e24',
-  '010_privilege_verification.sql': 'e1ac306c09e64c664254ef8402a90be62ee41e6076a81e00ee30dfcae2209968',
+  '010_privilege_verification.sql': 'bc40eea952bf6f5d0612ca61e4573419c674ba419507fc7c7f7b042f5d6f6ef6',
   '011_definer_ownership_transfer.sql': '1c1ede4d303699a52ce33d58bc09a2506db3dc60fb43ccdce7e83b7bb6ac8ba6',
 };
 
@@ -74,8 +74,9 @@ const PACKAGE = [
   ['20261115000009_ownership_and_grants.sql', 'design/migrations/009_ownership_and_grants.sql'],
   ['20261115000010_definer_ownership_transfer.sql', 'design/migrations/011_definer_ownership_transfer.sql'],
   ['20261115000011_application_api.sql', 'design/api/012_application_api.sql'],
-  ['20261115000012_privilege_verification.sql', 'design/migrations/010_privilege_verification.sql'],
-  ['20261115000013_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
+  ['20261115000012_definer_actor_identity.sql', 'design/migrations/014_definer_actor_identity.sql'],
+  ['20261115000013_privilege_verification.sql', 'design/migrations/010_privilege_verification.sql'],
+  ['20261115000014_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */

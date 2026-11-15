@@ -111,8 +111,35 @@ begin
                and pg_get_userbyid(c.relowner) = 'ff_migration_owner') then
     raise exception 'ff_migration_owner must not own public relations' using errcode = '42501';
   end if;
-  if not has_schema_privilege('ff_migration_owner', 'auth', 'USAGE') then
-    raise exception 'ff_migration_owner needs USAGE on schema auth to call auth.uid()' using errcode = '42501';
+  -- The definer must be able to establish the caller identity WITHOUT needing
+  -- USAGE on the `auth` schema. Hosted Supabase cannot grant that USAGE: the
+  -- auth schema is owned by supabase_admin and `postgres` holds USAGE without
+  -- the grant option, so `grant usage on schema auth` silently no-ops (Postgres
+  -- only logs 'no privileges were granted'). Asserting the unobtainable grant
+  -- made this migration abort on every hosted project.
+  --
+  -- The requirement is therefore stated as what it actually is: the definer must
+  -- not resolve anything inside `auth`. Asserting that no definer function calls
+  -- auth.uid() is the invariant that makes the API work on a hosted project, and
+  -- it is strictly stronger than the old check on a local one.
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname in ('public', 'ff_private') and p.prosecdef
+      and pg_get_userbyid(p.proowner) = 'ff_migration_owner'
+      and position('auth.uid()' in p.prosrc) > 0
+  ) then
+    raise exception 'a SECURITY DEFINER function owned by ff_migration_owner still calls auth.uid(); '
+      'hosted Supabase cannot grant USAGE on the auth schema, so it would fail with 42501 at runtime. '
+      'Apply 014 (definer actor identity) first.'
+      using errcode = '42501';
+  end if;
+  -- When the actor-identity helper exists, the definer must be able to execute it.
+  -- 014 owns creating it and asserts its own preconditions; this check only
+  -- guards against the helper being present but unreachable.
+  if to_regprocedure('ff_private.current_actor_id()') is not null
+     and not has_function_privilege('ff_migration_owner', 'ff_private.current_actor_id()', 'execute') then
+    raise exception 'ff_migration_owner cannot execute ff_private.current_actor_id(); the definer has no usable caller identity'
+      using errcode = '42501';
   end if;
 
   -- 7. Storage: RLS must be enabled on storage.objects. This is an assertion, not

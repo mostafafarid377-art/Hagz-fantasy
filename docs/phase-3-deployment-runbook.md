@@ -537,6 +537,139 @@ no relation, so the membership grants no reachable authority.
 
 ---
 
+## 6c. The `auth`-schema trap — **unfixable by GRANT; repaired by migration**
+
+> **Fixed forward-only in executable migration 12 (`definer_actor_identity`).**
+> Read this if your push aborted at the privilege verification with
+> `ff_migration_owner needs USAGE on schema auth to call auth.uid()`, and to
+> understand why no GRANT can solve it.
+
+### 6c.1 Why the grant in 009 cannot work
+
+On hosted Supabase:
+
+* the `auth` **schema** is owned by `supabase_admin`;
+* the **tables and functions** inside it are owned by `supabase_auth_admin`;
+* `postgres` holds `USAGE` on `auth` **without the grant option**, and is **not a
+  member** of either owner role — membership in them is reserved to superusers,
+  and `postgres` is `NOSUPERUSER`.
+
+PostgreSQL lets a role grant a privilege only if it holds that privilege **WITH
+GRANT OPTION**. `postgres` does not, so migration 009's
+
+```sql
+grant usage on schema auth to ff_migration_owner;
+```
+
+**does not fail — it silently succeeds and changes nothing.** Postgres logs only:
+
+```
+WARNING:  no privileges were granted for "auth"
+```
+
+`has_schema_privilege('ff_migration_owner','auth','USAGE')` stays `false`.
+
+This is not a bug in the migration; it is the platform's privilege model, and
+Supabase documents it: see *"Permission errors when granting custom roles access
+to the auth schema"* in the Supabase knowledge base. That page also states that
+`postgres` cannot become `supabase_auth_admin`, so **there is no role available to
+the deployment that can perform this grant.**
+
+### 6c.2 Why the assertion was still right
+
+It was not cosmetic. With `auth` unreachable, every SECURITY DEFINER function that
+calls `auth.uid()` failed **at runtime** with `42501 permission denied for schema
+auth`. In the deployment harness, all client RPCs failed this way: migrations
+001–011 applied cleanly and produced a database whose API was unusable. The
+verification aborting was the correct outcome.
+
+### 6c.3 What migration 12 does instead
+
+`auth.uid()` is only a thin reader of the request JWT claims, which Supabase sets
+as ordinary GUCs. Reading those GUCs needs **no privilege on the `auth` schema**.
+Migration 12:
+
+1. creates `ff_private.current_actor_id()`, which reads the same GUCs with
+   `auth.uid()`'s exact semantics plus the PostgREST `request.jwt.claims`
+   fallback (same value, never a different one);
+2. repoints the **46** definer functions that called `auth.uid()` at it, rewriting
+   only that token via `pg_get_functiondef`;
+3. keeps every other property identical, and asserts it.
+
+This is Supabase's own recommended remedy for this exact situation ("Option 2:
+read the user ID from the JWT claims").
+
+**Not chosen, and why:**
+
+| Alternative | Why rejected |
+|---|---|
+| Grant `authenticated` to `ff_migration_owner` (Supabase "Option 3") | Makes the definer inherit SELECT on all 40 public tables and membership in a client role. 013 assertion 9 forbids a client role in the definer's membership chain; it also widens a BYPASSRLS role. |
+| Drop 012's assertion | Ships a database whose API returns 42501 on every call. |
+| Ask for an owner-authorised superuser grant | Not available on hosted Supabase (6c.1). |
+
+**Unchanged:** no privilege is granted on `auth`, `auth.users`, or any auth
+function; no auth object is altered or re-owned; `ff_migration_owner` keeps
+NOLOGIN, NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, BYPASSRLS; RLS policies
+still call `auth.uid()` directly and are untouched (they run as the querying
+role, which always could).
+
+### 6c.4 Recovery from the aborted push
+
+Migrations 001–011 are applied; 012–013 were rolled back. Nothing to repair.
+
+| Step | Command / action | Expected |
+|---|---|---|
+| 1 | `supabase migration list --remote` | 1–11 applied, 12–13 pending |
+| 2 | `supabase db push --dry-run --remote` | lists the two pending migrations |
+| 3 | `supabase db push --remote` | the repair applies, then the assertion passes; the push aborts at the **storage** assertion — see 6a, expected |
+| 4 | §7 storage owner step, then `supabase db push --remote` again | final assertion applies |
+| 5 | `supabase migration list --remote` | all 14 applied |
+
+> **On the renumbering.** The repair had to run *before* the assertion that
+> polices it, and the CLI applies migrations in version order. 012 and 013 were
+> never recorded as applied, so they are renumbered rather than edited in place:
+> the repair is now `12`, and the two assertions become `13` and `14`. Applied
+> migrations 001–011 keep their versions and are untouched.
+
+### 6c.5 Verification (read-only)
+
+```sql
+-- 1. Must be 0: no definer owned by ff_migration_owner still calls auth.uid().
+select count(*) as definers_using_auth_uid
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname in ('public','ff_private') and p.prosecdef
+  and pg_get_userbyid(p.proowner) = 'ff_migration_owner'
+  and position('auth.uid()' in p.prosrc) > 0;
+
+-- 2. The helper exists, the definer can call it, clients cannot.
+select has_function_privilege('ff_migration_owner','ff_private.current_actor_id()','execute') as definer_can_call,
+       has_function_privilege('authenticated','ff_private.current_actor_id()','execute')   as client_can_call;
+
+-- 3. Unchanged: still no USAGE on auth, and it no longer matters.
+select has_schema_privilege('ff_migration_owner','auth','USAGE') as usage_on_auth;
+
+-- 4. The definer still owns everything and still has BYPASSRLS.
+select count(*) as definers,
+       count(*) filter (where pg_get_userbyid(p.proowner) = 'ff_migration_owner') as owned_by_definer
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname in ('public','ff_private') and p.prosecdef;
+
+select rolcanlogin, rolinherit, rolsuper, rolbypassrls
+from pg_roles where rolname = 'ff_migration_owner';
+```
+
+Expected: `definers_using_auth_uid = 0`; `definer_can_call = true`,
+`client_can_call = false`; `usage_on_auth = false` (and that is fine — it is no
+longer used); `definers = owned_by_definer`; and the role still NOLOGIN with
+`rolbypassrls = true`.
+
+**The real proof is a live API call.** From the app (or the dashboard with a
+signed-in session), call any RPC. Before the repair it returned
+`42501 permission denied for schema auth`; after it, it returns data or a
+domain-level refusal. That single call is worth more than every row above.
+
+---
+
 ## 7. Storage: the owner-authorised step — **⚠️ REMOTE WRITE, NEEDS YOUR APPROVAL**
 
 This is separate from the CLI because only the role that owns `storage.objects`

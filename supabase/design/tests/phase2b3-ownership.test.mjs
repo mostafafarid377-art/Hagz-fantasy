@@ -333,6 +333,16 @@ test('PUBLIC holds no EXECUTE on any reviewed function', async () => {
 // ---------------------------------------------------------------------------
 
 test('010 requires BYPASSRLS on the definer owner, because ownership change is otherwise silent-broken', async () => {
+  // 010 also asserts that no definer still calls auth.uid(): hosted Supabase
+  // cannot grant USAGE on the auth schema, so such a function fails with 42501
+  // at runtime. Apply the actor-identity repair first, as the deployment does.
+  //
+  // 011 established two preconditions for that repair; this suite re-owns the
+  // functions but never created them as the definer, so supply them here rather
+  // than silently depending on ordering elsewhere in the file.
+  await db.exec('grant create on schema ff_private to ff_migration_owner');
+  await db.exec(`grant ff_migration_owner to current_user with set true`);
+  await db.exec(await readFile(new URL('../migrations/014_definer_actor_identity.sql', import.meta.url), 'utf8'));
   // Re-run the reviewed verification. Under model C it must pass.
   await db.exec(await readFile(new URL('../migrations/010_privilege_verification.sql', import.meta.url), 'utf8'));
   // Under a nobypassrls owner it must fail, otherwise the assertion is decorative.

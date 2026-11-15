@@ -110,14 +110,22 @@ const PACKAGE = [
   // New in this phase: the client-callable API surface (authored source lives in
   // supabase/design/api/, not in the CLI migration directory).
   ['20261115000011', '012_application_api.sql', 'application_api'],
-  // Draft 010: asserts the base privilege posture after the transfer and API layer.
-  ['20261115000012', '010_privilege_verification.sql', 'privilege_verification'],
+  // Forward-only repair, applied BEFORE the assertions that police it: the
+  // definer must not depend on USAGE on the auth schema, which hosted Supabase
+  // cannot grant (see the draft header). Draft 014 -> executable 012.
+  //
+  // 012 and 013 were never recorded as applied on the hosted project (they are
+  // pending), so their executable versions are renumbered here rather than
+  // edited in place. Already-applied migrations 001-011 keep their versions.
+  ['20261115000012', '014_definer_actor_identity.sql', 'definer_actor_identity'],
+  // Draft 010: asserts the base privilege posture after the repair and API layer.
+  ['20261115000013', '010_privilege_verification.sql', 'privilege_verification'],
   // Draft 013 last: asserts the API surface itself did not drift.
-  ['20261115000013', '013_api_surface_verification.sql', 'api_surface_verification'],
+  ['20261115000014', '013_api_surface_verification.sql', 'api_surface_verification'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);
