@@ -43,6 +43,106 @@ begin
   end if;
 end $$;
 
+-- PRE-FLIGHT: make the transfer legally performable by the deploying role.
+--
+-- WHY THIS BLOCK EXISTS (measured, not assumed — see the runbook section 6b)
+--   `ALTER ... OWNER TO ff_migration_owner` is refused with
+--     42501 must be able to SET ROLE "ff_migration_owner"
+--   unless the CURRENT role either (a) is a superuser, or (b) holds a
+--   membership in ff_migration_owner whose set_option is TRUE. On Supabase the
+--   deploying role is `postgres`: NOSUPERUSER, CREATEROLE, BYPASSRLS. It creates
+--   ff_migration_owner in 009, which leaves it with admin_option = TRUE but
+--   set_option = FALSE, and that is not enough for ALTER OWNER. The two options
+--   are independent: admin_option lets you grant the role onward, set_option is
+--   the one ALTER OWNER consults. Granting membership again WITHOUT `with set`
+--   does not help, because it only refreshes admin_option and leaves
+--   set_option = FALSE.
+--
+--   This is why the block is self-granting: because 009 ran under the same role,
+--   that role holds admin_option and may therefore grant the membership to
+--   itself. Nothing is granted to a role that did not already administer it, and
+--   no internal Supabase role is touched.
+--
+--   The second statement is the separate, latent blocker that only surfaces once
+--   SET ROLE succeeds: the NEW owner needs CREATE on a schema to take ownership
+--   of an object inside it (42501 permission denied for schema ff_private).
+--   Measured: giving CREATE to the EXECUTOR does not help; it must be the new
+--   owner. 009 already grants `usage, create` on `public`, so only the private
+--   schema is short.
+--
+--   Both statements are idempotent, so a retried push is safe.
+--
+--   SECURITY NOTE: neither statement changes ff_migration_owner. It stays
+--   NOLOGIN, NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, BYPASSRLS. The
+--   membership is a property of the MIGRATING role, not of the definer, and it
+--   can be revoked afterwards without affecting any ownership set below
+--   (verified: ownership persists, the role's attributes are untouched).
+do $$
+declare
+  -- PG16 split the old membership booleans into inherit/set options. Introspect
+  -- rather than assume, so this migration is safe on PG15 (inherit covers SET)
+  -- and on PG16+ (set_option is authoritative).
+  v_has_set_option boolean;
+  v_can_set        boolean;
+begin
+  select exists (
+    select 1 from pg_attribute
+    where attrelid = 'pg_auth_members'::regclass
+      and attname = 'set_option' and attnum > 0 and not attisdropped
+  ) into v_has_set_option;
+
+  if v_has_set_option then
+    select exists (
+      select 1 from pg_auth_members am
+      join pg_roles r on r.oid = am.roleid
+      where r.rolname = 'ff_migration_owner'
+        and am.member = (select oid from pg_roles where rolname = current_user)
+        and am.set_option
+    ) into v_can_set;
+  else
+    select exists (
+      select 1 from pg_auth_members am
+      join pg_roles r on r.oid = am.roleid
+      where r.rolname = 'ff_migration_owner'
+        and am.member = (select oid from pg_roles where rolname = current_user)
+        and am.inherit_option
+    ) into v_can_set;
+  end if;
+
+  -- (1) Give the deploying role a SET ROLE path to the definer it administers.
+  if not v_can_set then
+    begin
+      if v_has_set_option then
+        execute format('grant ff_migration_owner to %I with set true', current_user);
+      else
+        execute format('grant ff_migration_owner to %I', current_user);
+      end if;
+      v_can_set := true;
+    exception
+      when insufficient_privilege then
+        -- Not fatal here; the assertion below turns this into one clear message
+        -- instead of 56 identical, misleading ALTER OWNER failures.
+        null;
+    end;
+  end if;
+
+  -- (2) The new owner needs CREATE on the schema that holds the objects.
+  execute 'grant create on schema ff_private to ff_migration_owner';
+
+  -- Refuse loudly rather than emitting 56 confusing ALTER OWNER failures.
+  if not v_can_set then
+    raise exception
+      'cannot SET ROLE ff_migration_owner with the deploying role (%).', current_user
+      using
+        errcode = '42501',
+        detail = 'ALTER ... OWNER requires SET ROLE on the new owner, and this role neither created '
+                 || 'ff_migration_owner in 009 nor holds admin_option over it.',
+        hint = 'Run the reviewed pre-flight in docs/phase-3-deployment-runbook.md section 6b as a role '
+               || 'that administers ff_migration_owner, then re-run the push. Do not edit this migration '
+               || 'and do not mark it applied.';
+  end if;
+end $$;
+
 -- helpers
 alter function ff_private.can_read_image(object_name text) owner to ff_migration_owner;
 alter function ff_private.can_read_lineup(p_league uuid, p_lineup uuid) owner to ff_migration_owner;

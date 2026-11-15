@@ -366,6 +366,177 @@ of the assertion existing.
 
 ---
 
+## 6b. The ownership-transfer trap (`must be able to SET ROLE`)
+
+> **Fixed in migration 10 itself.** This section explains the failure, how to
+> recover if you already hit it, and what to do in the one case the migration
+> cannot repair by itself. If your push has not run yet, you need to read this but
+> you do not need to do anything: 010 now performs the pre-flight itself.
+
+### 6b.1 What the error means
+
+If you hit this, the push aborted at migration 10 with:
+
+```
+ERROR: must be able to SET ROLE "ff_migration_owner"   (SQLSTATE 42501)
+```
+
+Migrations 1–9 are recorded as applied; 10–13 are not. **Nothing is corrupted,
+and the database is in a defined, safe state.** Migration 10 only changes object
+owners; it has not run, so nothing has been re-pointed.
+
+`ALTER <object> OWNER TO <role>` is not a privilege you can be "granted" in the
+ordinary sense. Postgres requires the *executing* role to be able to `SET ROLE`
+into the *target* role. A superuser always can. On Supabase the deploying role is
+`postgres`, which is **NOSUPERUSER** (it holds CREATEROLE and BYPASSRLS instead),
+so it needs a membership in `ff_migration_owner` that carries **`set_option`**.
+
+The trap is subtle, and it is why this failed on a reviewed package:
+
+| `pg_auth_members` option | What it controls |
+|---|---|
+| `admin_option` | whether you may **grant** the role onward |
+| `inherit_option` | whether the role's privileges apply **implicitly** |
+| `set_option` | whether you may **`SET ROLE`** into it — **this is the one `ALTER OWNER` needs** |
+
+Because 009 creates `ff_migration_owner` while running as `postgres`, Postgres
+gives `postgres` `admin_option = TRUE` automatically — but `set_option` is
+**FALSE**. So `postgres` administers the role and still cannot become it. Running
+`grant ff_migration_owner to postgres;` again does **not** fix this: a bare grant
+refreshes `admin_option` and leaves `set_option = FALSE`.
+
+There is a **second, latent blocker** immediately behind the first. Once
+`SET ROLE` works, `ALTER FUNCTION ... OWNER TO ff_migration_owner` fails with
+`42501 permission denied for schema ff_private`, because the **new owner** must
+hold `CREATE` on a schema to own an object inside it. 009 grants `usage` only, on
+`ff_private`. Granting `CREATE` to the *executing* role does not help — it has to
+be the *new owner*. Fixing only the first error just moves the failure a few lines
+down the file.
+
+### 6b.2 What migration 10 now does about it
+
+Before the 56 ownership statements, 010 runs a guarded pre-flight that:
+
+1. gives the current role a `SET ROLE` path, **only if it does not already have
+   one**, and **only to itself** (`grant ff_migration_owner to <current_user> with
+   set true`) — it never touches an internal Supabase role, and it can only
+   succeed for a role that already administered `ff_migration_owner` via
+   `admin_option`;
+2. grants `CREATE` on `ff_private` to `ff_migration_owner`, which is the
+   unavoidable minimum for ownership of the functions inside it to be transferable
+   at all;
+3. asserts the result, so a genuine permission problem raises **one** precise
+   message with a hint instead of 56 misleading ones.
+
+Both statements are idempotent; a retried push is safe. **Neither changes the
+security model**: `ff_migration_owner` stays NOLOGIN, NOINHERIT, NOSUPERUSER,
+NOCREATEDB, NOCREATEROLE, BYPASSRLS, it still owns the functions and no relations,
+and the membership is a property of the *migrating* role, not of the definer.
+
+### 6b.3 Recovery if your push already aborted at 10
+
+You do **not** need to reset, re-run 1–9, or mark anything applied.
+
+| Step | Command / action | Expected |
+|---|---|---|
+| 1 | Dashboard → SQL Editor → run the **read-only** diagnostic in 6b.4 | see 6b.5 |
+| 2 | `supabase migration list --remote` | 1–9 applied, 10–13 pending |
+| 3 | `supabase db push --dry-run --remote` | lists 10–13 only |
+| 4 | `supabase db push --remote` | 10 now passes the pre-flight; aborts at 12 with the **storage** error — see 6a, that is expected |
+| 5 | §7 (storage owner step), then `supabase db push --remote` again | 12 and 13 apply |
+| 6 | `supabase migration list --remote` | all 13 applied |
+
+> Do **not** use `supabase migration repair`, and do **not** edit an already-applied
+> migration (1–9 cannot be changed remotely; the CLI would refuse to re-run them).
+> Do **not** run `supabase db reset --remote` — it drops your schemas.
+
+### 6b.4 Read-only diagnostic — run this first
+
+```sql
+-- Who is executing, and can they become the definer?
+select current_user as executor;
+
+select rolname, rolsuper, rolcreaterole, rolbypassrls, rolcanlogin, rolinherit
+from pg_roles where rolname in ('postgres', 'ff_migration_owner');
+
+-- The decisive one: set_option is what ALTER OWNER consults.
+select r.rolname as target_role, m.rolname as member,
+       am.admin_option, am.inherit_option, am.set_option
+from pg_auth_members am
+join pg_roles r on r.oid = am.roleid
+join pg_roles m on m.oid = am.member
+where r.rolname = 'ff_migration_owner';
+
+-- The latent blocker.
+select nspname,
+       has_schema_privilege('ff_migration_owner', oid, 'USAGE')  as usage,
+       has_schema_privilege('ff_migration_owner', oid, 'CREATE') as create_priv
+from pg_namespace where nspname in ('public', 'ff_private');
+
+-- Which migrations are actually recorded.
+select version from supabase_migrations.schema_migrations order by version;
+```
+
+### 6b.5 Reading the result
+
+* **`executor` is `postgres`** and `ff_migration_owner` has `rolbypassrls = true`,
+  `rolcanlogin = false` — the expected profile. Continue to 6b.3 step 2.
+* **A `pg_auth_members` row exists with `set_option = false`** — exactly the
+  condition migration 10 now repairs. Nothing for you to do; re-push.
+* **No `pg_auth_members` row at all** for `postgres` — 009's `create role` did not
+  run under `postgres`, so the executor does not administer the role and 010's
+  self-grant cannot succeed. In that case only, run the reviewed one-time
+  bootstrap below as a role that *does* administer `ff_migration_owner`, then
+  re-push. This is the single case where a manual statement is required.
+* **`create_priv` is `false` for `ff_private`** — expected before the push;
+  010 grants it.
+* **10–13 absent from the version list** — expected; that is what the push will add.
+
+### 6b.6 One-time bootstrap — only for the "no membership row" case
+
+**⚠️ REMOTE WRITE, NEEDS YOUR APPROVAL.** Run as a role that administers
+`ff_migration_owner` (usually `postgres`) **only if 6b.4 showed no membership row**:
+
+```sql
+begin;
+
+-- 1. Give the migrating role a SET ROLE path. `with set true` is the part that
+--    matters; a bare grant leaves set_option = false and fixes nothing.
+grant ff_migration_owner to postgres with set true;
+
+-- 2. The new owner needs CREATE on the schema it will own objects in.
+grant create on schema ff_private to ff_migration_owner;
+
+commit;
+```
+
+Verify before moving on:
+
+```sql
+select pg_has_role('postgres', 'ff_migration_owner', 'set')                     as can_set_role,
+       has_schema_privilege('ff_migration_owner', 'ff_private', 'CREATE')       as can_create;
+```
+
+Both must be `true`. Then continue at 6b.3 step 2.
+
+### 6b.7 Optional tidy-up, after all 13 are applied
+
+The membership is not required at runtime — only `ALTER OWNER` needed it. You may
+remove it once the deployment is verified, and it is safe to do so:
+
+```sql
+revoke ff_migration_owner from postgres;
+```
+
+Verified behaviour: ownership of all 104 SECURITY DEFINER functions persists,
+`ff_migration_owner` keeps BYPASSRLS and NOLOGIN, and `postgres` loses `SET ROLE`
+into it. `admin_option` remains (Postgres keeps the creator's admin path), so this
+does not fully erase the relationship — do not claim otherwise. Leaving the
+membership in place is also acceptable; `ff_migration_owner` is NOLOGIN and owns
+no relation, so the membership grants no reachable authority.
+
+---
+
 ## 7. Storage: the owner-authorised step — **⚠️ REMOTE WRITE, NEEDS YOUR APPROVAL**
 
 This is separate from the CLI because only the role that owns `storage.objects`
