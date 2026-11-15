@@ -142,10 +142,16 @@ const PACKAGE = [
   // function BODY only, and the signature, owner and ACL that 013/014 assert are
   // identical before and after (015 asserts that itself).
   ['20261115000015', '015_actor_identity_claim_fallback.sql', 'actor_identity_claim_fallback'],
+  // Additive feature, applied last: adds one new leader-only RPC and touches
+  // nothing that already exists, so it cannot invalidate the assertions above.
+  // "Delete league" is implemented as an archive because every FK to leagues is
+  // `on delete restrict` - a hard delete would need a cascade review and would
+  // destroy other managers' history. See the draft header.
+  ['20261115000016', '016_league_archive.sql', 'league_archive'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);

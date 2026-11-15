@@ -52,6 +52,8 @@ interface LiveContextValue extends LiveState {
   createLeague: (name: string) => Promise<void>;
   joinLeague: (code: string) => Promise<void>;
   setMarketOpen: (open: boolean) => Promise<void>;
+  /** Archive the current league; it disappears from every screen. Leader-only. */
+  archiveLeague: () => Promise<void>;
   setMember: (userId: string, role?: 'leader' | 'manager', status?: 'active' | 'inactive') => Promise<void>;
   setOrganizer: (userId: string, enabled: boolean) => Promise<void>;
   transferLeadership: (userId: string) => Promise<void>;
@@ -217,6 +219,14 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       await load(joined.id);
     },
     setMarketOpen: (open) => mutate(() => api.setMarket(require(leagueId), open)),
+    archiveLeague: async () => {
+      const target = require(leagueId);
+      await api.archiveLeague(target);
+      // Reload without the archived league and let `load` pick another one; the
+      // archived row still appears in bootstrap with archived=true, and `usable`
+      // filters it out, so reselecting it is impossible.
+      await load(null);
+    },
     setMember: (userId2, role, status) => mutate(() => api.setMember(require(leagueId), userId2, role, status)),
     setOrganizer: (userId2, enabled) => mutate(() => api.setOrganizer(require(leagueId), userId2, enabled)),
     transferLeadership: (userId2) => mutate(() => api.transferLeadership(require(leagueId), userId2)),

@@ -1,0 +1,79 @@
+-- Fantasy Friends design draft 016: league archiving ("delete league")
+--
+-- WHY THIS EXISTS
+--   There is no way for a leader to get rid of a league they created. The UI has
+--   no control, and there is no RPC that removes or hides one.
+--
+-- WHY ARCHIVE AND NOT DELETE
+--   Every foreign key to public.leagues is `on delete restrict` (league_members,
+--   fantasy_teams, league_standings, market_players, fixtures, real_matches and
+--   the rest). A hard delete is therefore impossible without a cascade review, and
+--   a cascade across ~15 tables would destroy another manager's squad history,
+--   audit trail and scoring records because the leader clicked a button. That is
+--   not a mistake worth making available in one click.
+--
+--   The schema already anticipates exactly this: leagues.archived_at exists,
+--   ff_bootstrap reports it as 'archived', and the frontend already filters
+--   archived leagues out of every screen (useLive: `filter((l) => !l.archived)`).
+--   Nothing ever WROTE that column. This migration supplies the missing writer, so
+--   "delete" means "remove it from every view", which is what a user means, while
+--   the data remains recoverable by an operator.
+--
+-- WHAT THIS MIGRATION DOES
+--   Adds public.ff_league_archive(p_league uuid):
+--     * leader-only (ff_private.require_leader, the same guard every other
+--       leader-only action uses),
+--     * stamps archived_at (idempotent: re-archiving keeps the original timestamp),
+--     * writes an audit row like every other state change,
+--     * returns the archived flag.
+--   It is additive: one new function, no table, column, policy, grant or
+--   ownership change to anything that already exists.
+--
+-- DEAD-END GUARDS THIS RESPECTS
+--   * ff_league_join already requires `archived_at is null`, so an archived league
+--     cannot be joined.
+--   * ff_league_set_market already raises 'league is archived' via its
+--     `archived_at is null` predicate.
+--   * ff_bootstrap keeps listing the row with archived=true, so the leader can
+--     still SEE that it happened; the client hides it from the working screens.
+--
+-- NOT A SECURITY DEFINER WIDENING
+--   The function is `security definer` with a pinned search_path, consistent with
+--   the other 56 definers, and it re-checks the caller's leadership inside the
+--   function body. EXECUTE is granted to `authenticated` only and revoked from
+--   PUBLIC, matching the API surface contract asserted by the verification
+--   migrations.
+
+create or replace function public.ff_league_archive(p_league uuid)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare v public.leagues;
+begin
+  perform ff_private.require_leader(p_league);
+  update public.leagues
+     set archived_at = coalesce(archived_at, now())
+   where id = p_league
+   returning * into v;
+  if not found then raise exception 'league not found' using errcode = '23514'; end if;
+  perform ff_private.audit(p_league, 'league_archived', 'league', p_league,
+    jsonb_build_object('archived_at', v.archived_at));
+  return jsonb_build_object('id', v.id, 'archived', v.archived_at is not null);
+end $$;
+
+-- OWNERSHIP: every SECURITY DEFINER function in this project is owned by
+-- ff_migration_owner (asserted by the phase-3 tests and by 013). A newly created
+-- definer is owned by whoever ran the migration, so it must be transferred
+-- explicitly, exactly as draft 011 does for the other definers. `create or
+-- replace` preserves ownership, so this is safe on a re-run.
+--
+-- Guarded on the role existing so this file cannot fail in an environment where
+-- the definer role has not been created yet (draft 009 creates it).
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'ff_migration_owner') then
+    alter function public.ff_league_archive(uuid) owner to ff_migration_owner;
+  end if;
+end $$;
+
+revoke all on function public.ff_league_archive(uuid) from public;
+grant execute on function public.ff_league_archive(uuid) to authenticated;
