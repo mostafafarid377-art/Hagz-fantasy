@@ -157,3 +157,20 @@ describe('leader tools follow the LIVE role, not the demo role', () => {
     expect(screen.queryByText('LEADER TOOLS')).toBeNull();
   });
 });
+
+describe('a signed-in user can log out', () => {
+  it('shows a log out control in live mode', async () => {
+    await mountLayout({
+      withLiveProvider: true,
+      liveLeagues: [{ league_id: 'L1', name: 'My Real League', is_leader: true }],
+    });
+    // The auth service had signOut() all along; no UI called it, so there was no
+    // way to leave a session.
+    expect(screen.getByRole('button', { name: /log out/i })).toBeTruthy();
+  });
+
+  it('does not offer log out in demo mode (there is no session to end)', async () => {
+    await mountLayout({ withLiveProvider: false });
+    expect(screen.queryByRole('button', { name: /log out/i })).toBeNull();
+  });
+});

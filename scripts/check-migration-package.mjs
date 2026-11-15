@@ -84,6 +84,7 @@ const PACKAGE = [
   ['20261115000013_privilege_verification.sql', 'design/migrations/010_privilege_verification.sql'],
   ['20261115000014_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
   ['20261115000015_actor_identity_claim_fallback.sql', 'design/migrations/015_actor_identity_claim_fallback.sql'],
+  ['20261115000016_league_archive.sql', 'design/migrations/016_league_archive.sql'],
 ];
 
 /**
@@ -99,7 +100,14 @@ const PACKAGE = [
  * file" rule: a new post-verification migration must be added here by review, and
  * 015 asserts its own invariants (signature, owner, ACL, search_path) at runtime.
  */
-const POST_VERIFICATION_REPAIRS = ['20261115000015_actor_identity_claim_fallback.sql'];
+const POST_VERIFICATION_REPAIRS = [
+  '20261115000015_actor_identity_claim_fallback.sql',
+  // 016 is additive: it CREATES one new leader-only function and modifies no
+  // existing table, policy, grant, owner or function body, so it cannot
+  // invalidate what 013/014 certified. It runs last because it is the newest
+  // migration, not because it needs to escape the assertions.
+  '20261115000016_league_archive.sql',
+];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
 const MANUAL_ONLY = ['003b_storage_policy_owner_step.sql', 'verify_storage_setup.sql'];

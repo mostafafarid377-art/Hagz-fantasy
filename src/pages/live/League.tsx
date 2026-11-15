@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trophy, UsersRound, X,
+  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trash2, Trophy, UsersRound, X,
 } from 'lucide-react';
 import { Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatMoney } from '../../utils/format';
@@ -214,6 +214,21 @@ export function LiveLeagueOverview() {
   const { t } = useTranslation();
   const live = useLive();
   const [busy, setBusy] = useState('');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  async function deleteLeague() {
+    setDeleting(true); setDeleteError('');
+    try {
+      await live.archiveLeague();
+      // The archived league is filtered out of the next load, so this screen falls
+      // back to another league or to the empty state.
+      setConfirmingDelete(false);
+    } catch (caught) {
+      setDeleteError(caught instanceof Error ? caught.message : t('Could not delete the league.'));
+    } finally { setDeleting(false); }
+  }
 
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
@@ -319,6 +334,35 @@ export function LiveLeagueOverview() {
           <Link className="settings-row" to="/management">{t('Player Management')}<ArrowUpRight size={16} /></Link>
           <Link className="settings-row" to="/approvals">{t('Approval Queue')}<ArrowUpRight size={16} /></Link>
           <Link className="settings-row" to="/statistics">{t('Season and gameweeks')}<ArrowUpRight size={16} /></Link>
+        </div>
+      )}
+
+      {/* Removing a league is leader-only and irreversible from the UI, so it sits
+          apart from the settings and states plainly what happens. It is an archive,
+          not a row delete: the history stays recoverable server-side while the
+          league disappears from every screen. */}
+      {live.isLeader && (
+        <div className="panel section-spacer danger-zone">
+          <SectionHead eyebrow="DANGER ZONE" title="Delete league" />
+          <p className="section-description">
+            {t('The league disappears from your dashboard and cannot be joined again. Members keep their history.')}
+          </p>
+          {confirmingDelete ? (
+            <div className="button-row">
+              <button className="button danger" disabled={deleting} onClick={() => void deleteLeague()}>
+                {deleting ? t('Deleting…') : t('Yes, delete this league')}
+              </button>
+              <button className="button button-outline" disabled={deleting}
+                onClick={() => { setConfirmingDelete(false); setDeleteError(''); }}>
+                {t('Cancel')}
+              </button>
+            </div>
+          ) : (
+            <button className="button button-outline" onClick={() => setConfirmingDelete(true)}>
+              <Trash2 size={15} /> {t('Delete league')}
+            </button>
+          )}
+          {deleteError && <p className="error" role="alert"><AlertCircle size={14} /> {deleteError}</p>}
         </div>
       )}
     </>

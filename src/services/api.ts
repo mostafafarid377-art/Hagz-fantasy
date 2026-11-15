@@ -117,6 +117,18 @@ export const setMember = (leagueId: string, userId: string, role?: 'leader' | 'm
 export const transferLeadership = (leagueId: string, to: string) =>
   call<{ leader_id: string }>('ff_league_transfer_leadership', { p_league: leagueId, p_to: to });
 
+/**
+ * Archive ("delete") a league. Leader-only, checked server-side.
+ *
+ * This is an archive, not a row delete: every FK to `leagues` is `on delete
+ * restrict`, so a hard delete would have to cascade across ~15 tables and destroy
+ * other managers' squads and audit history. `ff_bootstrap` reports `archived`, and
+ * useLive filters archived leagues out, so from the app's point of view the league
+ * is gone - while an operator can still recover it.
+ */
+export const archiveLeague = (leagueId: string) =>
+  call<{ id: string; archived: boolean }>('ff_league_archive', { p_league: leagueId });
+
 export const setMarket = (leagueId: string, open: boolean) =>
   call<{ market_open: boolean }>('ff_league_set_market', { p_league: leagueId, p_open: open });
 
