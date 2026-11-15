@@ -4,3 +4,12 @@ dist
 playwright-report
 test-results
 *.tsbuildinfo
+
+# Secrets and local environment. .env.example is committed; real values never are.
+.env
+.env.*
+!.env.example
+
+# Database dumps contain every row in the project. Never commit them.
+backups/
+*.dump
