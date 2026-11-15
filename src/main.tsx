@@ -21,6 +21,7 @@ import { Fixtures, MatchCenter, Standings, Statistics } from './pages/Competitio
 import { LeagueForm, LeagueOverview, Notifications, Profile, SettingsPage } from './pages/Other';
 import { LiveAuthPage } from './pages/live/Auth';
 import { LiveLeagueForm, LiveLeagueOverview } from './pages/live/League';
+import { LiveProfile, LiveSettings } from './pages/live/Account';
 import { LiveApprovals, LiveManagement, LiveMarket, LivePlayerProfile, LiveSuggestPlayer } from './pages/live/Market';
 import { LiveSeason, LiveSquad, LiveStandings } from './pages/live/Squad';
 import { LiveFixtures, LiveMatchCenter, LiveNotifications } from './pages/live/Match';
@@ -87,8 +88,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
                   <Route path="/standings" element={<ModeSwitch live={()=><LiveStandings/>} demo={()=><Standings/>}/>}/>
                   <Route path="/statistics" element={<ModeSwitch live={()=><LiveSeason/>} demo={()=><Statistics/>}/>}/>
                   <Route path="/points" element={<ModeSwitch live={()=><LiveStandings/>} demo={()=><Statistics points/>}/>}/>
-                  <Route path="/profile" element={<Profile/>}/>
-                  <Route path="/settings" element={<SettingsPage/>}/>
+                  <Route path="/profile" element={<ModeSwitch live={()=><LiveProfile/>} demo={()=><Profile/>}/>}/>
+                  <Route path="/settings" element={<ModeSwitch live={()=><LiveSettings/>} demo={()=><SettingsPage/>}/>}/>
                   <Route path="/notifications" element={<ModeSwitch live={()=><LiveNotifications/>} demo={()=><Notifications/>}/>}/>
                 </Route>
                 <Route path="*" element={<Navigate to="/dashboard" replace/>}/>
