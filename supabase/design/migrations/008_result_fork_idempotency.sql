@@ -1,0 +1,191 @@
+-- PHASE 2B.2 DESIGN DRAFT. NOT A DEPLOYABLE MIGRATION. Do not place under
+-- supabase/migrations or apply to a Supabase project.
+--
+-- Persists result-fork idempotency on top of the reviewed 001-007 baseline.
+-- 006's fork_result creates a new result revision on every call: locking
+-- serialises concurrent forks but does not deduplicate them.
+--
+-- Contract implemented here (Phase 2A.5 section 3):
+--   * a logical result fork has the stable business key
+--     (league_id, match_id, workflow_case_id, lineup_approval_id, result_attempt_no);
+--   * the client request UUID is also persisted uniquely, so a retried
+--     attempt-creation cannot allocate two attempt numbers;
+--   * the key-to-revision mapping is written in the same transaction as the copy,
+--     so a same-key replay returns the stored revision and a mismatched payload
+--     fails instead of creating a second draft;
+--   * a genuinely new attempt requires a recorded rejection of the previous
+--     attempt and therefore a new attempt number and new request UUID.
+--
+-- Client access stays fail-closed: SELECT for leaders only, no client DML, and
+-- no EXECUTE grant on the mutation function.
+
+create table public.match_result_forks (
+  id uuid primary key default gen_random_uuid(),
+  league_id uuid not null,
+  match_id uuid not null,
+  workflow_case_id uuid not null,
+  lineup_approval_id uuid not null,
+  lineup_revision_id uuid not null,
+  result_attempt_no integer not null check (result_attempt_no > 0),
+  request_id uuid not null,
+  result_revision_id uuid not null,
+  prior_fork_id uuid,
+  created_by uuid not null,
+  created_at timestamptz not null default now(),
+  unique (league_id, id),
+  unique (league_id, match_id, id),
+  unique (request_id),
+  unique (league_id, match_id, workflow_case_id, lineup_approval_id, result_attempt_no),
+  unique (result_revision_id),
+  unique (prior_fork_id),
+  check ((result_attempt_no = 1 and prior_fork_id is null) or (result_attempt_no > 1 and prior_fork_id is not null)),
+  foreign key (league_id, match_id, lineup_approval_id, lineup_revision_id) references public.match_approvals (league_id, match_id, id, revision_id) on delete restrict,
+  foreign key (league_id, match_id, result_revision_id) references public.match_revisions (league_id, match_id, id) on delete restrict,
+  foreign key (league_id, match_id, prior_fork_id) references public.match_result_forks (league_id, match_id, id) on delete restrict,
+  foreign key (league_id, created_by) references public.league_members (league_id, user_id) on delete restrict
+);
+create index result_forks_match_idx on public.match_result_forks (league_id, match_id, created_at desc);
+
+alter table public.match_result_forks enable row level security;
+revoke all on public.match_result_forks from public, anon, authenticated;
+grant select on public.match_result_forks to authenticated;
+create policy result_fork_leader on public.match_result_forks
+  for select to authenticated using (ff_private.is_leader(league_id));
+
+-- Fork mappings are append-only facts; a replay never rewrites them.
+create trigger result_forks_append_only
+  before update or delete on public.match_result_forks
+  for each row execute function ff_private.append_only();
+
+-- The workflow case a result fork belongs to. Initial (non-correction) results
+-- use a stable case derived from the match, so the key is equally stable there.
+create function ff_private.result_workflow_case(p_league uuid, p_match uuid) returns uuid
+language sql stable security definer set search_path=pg_catalog,ff_private as $$
+  select coalesce(
+    (select c.id from public.match_corrections c
+      where c.league_id = p_league and c.match_id = p_match
+      order by c.created_at desc limit 1),
+    md5('ff-initial-result-case:' || p_league::text || ':' || p_match::text)::uuid
+  )
+$$;
+
+-- The latest approved lineup attempt that may source a result. For a corrected
+-- match this is the latest attempt's approval; otherwise it is the latest
+-- approved lineup in the match.
+create function ff_private.result_source_lineup_approval(p_league uuid, p_match uuid) returns uuid
+language sql stable security definer set search_path=pg_catalog,ff_private as $$
+  select coalesce(
+    (select ap.id
+       from public.match_correction_attempts at
+       join public.match_approvals ap on ap.league_id = at.league_id and ap.revision_id = at.draft_revision_id
+       join public.match_revisions v on v.league_id = ap.league_id and v.id = ap.revision_id
+      where at.league_id = p_league and at.match_id = p_match
+        and ap.kind = 'lineup' and ap.decision = 'approved' and v.state = 'approved'
+      order by at.created_at desc, at.attempt_no desc limit 1),
+    (select ap.id
+       from public.match_approvals ap
+       join public.match_revisions v on v.league_id = ap.league_id and v.id = ap.revision_id
+      where ap.league_id = p_league and ap.match_id = p_match
+        and ap.kind = 'lineup' and ap.decision = 'approved' and v.state = 'approved'
+      order by v.version desc limit 1)
+  )
+$$;
+
+-- Idempotent, attempt-aware result fork. Replaces 006's fork_result, whose
+-- signature cannot express a request key and therefore cannot deduplicate.
+create or replace function ff_private.fork_result(
+  p_league uuid,
+  p_lineup_approval uuid,
+  p_request_id uuid) returns uuid
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+declare a public.match_approvals%rowtype; existing public.match_result_forks%rowtype;
+        case_id uuid; expected_no integer; prior public.match_result_forks%rowtype;
+        next_rev uuid; next_ver integer; line record; next_line uuid;
+begin
+  perform ff_private.require_read_committed();
+  if p_request_id is null then
+    raise exception 'result fork requires a request id' using errcode='23514';
+  end if;
+
+  -- A replay of an already-committed request must return its revision, before
+  -- any further authorization or payload work can fail it.
+  select * into existing from public.match_result_forks f where f.request_id = p_request_id;
+  if found then
+    if existing.league_id <> p_league or existing.lineup_approval_id <> p_lineup_approval then
+      raise exception 'result fork request id reused with a different payload' using errcode='23514';
+    end if;
+    return existing.result_revision_id;
+  end if;
+
+  select * into a from public.match_approvals
+  where league_id = p_league and id = p_lineup_approval and kind = 'lineup' and decision = 'approved';
+  if not found then raise exception 'approved lineup required' using errcode='23514'; end if;
+  perform ff_private.require_organizer(p_league, a.match_id);
+  perform 1 from public.real_matches where league_id = p_league and id = a.match_id for update;
+  perform ff_private.require_current_lineup(p_league, a.match_id, a.revision_id);
+
+  case_id := ff_private.result_workflow_case(p_league, a.match_id);
+  if ff_private.result_source_lineup_approval(p_league, a.match_id) is distinct from a.id then
+    raise exception 'lineup approval is not the current result source' using errcode='23514';
+  end if;
+
+  -- Attempt numbering is derived from the persisted business key, not from the
+  -- caller, so two concurrent first forks contend on the same unique key.
+  select coalesce(max(f.result_attempt_no), 0) + 1 into expected_no
+  from public.match_result_forks f
+  where f.league_id = p_league and f.match_id = a.match_id
+    and f.workflow_case_id = case_id and f.lineup_approval_id = a.id;
+  if expected_no > 1 then
+    -- A further attempt is only legitimate after the previous attempt was rejected.
+    select * into prior from public.match_result_forks f
+    where f.league_id = p_league and f.match_id = a.match_id and f.workflow_case_id = case_id
+      and f.lineup_approval_id = a.id and f.result_attempt_no = expected_no - 1;
+    if not found then
+      raise exception 'prior result attempt not found' using errcode='23514';
+    end if;
+    if not exists (
+      select 1 from public.match_submissions s
+      join public.match_approvals ap on ap.league_id = s.league_id and ap.submission_id = s.id
+      where s.league_id = p_league and s.match_id = a.match_id and s.revision_id = prior.result_revision_id
+        and s.kind = 'result' and ap.kind = 'result' and ap.decision = 'rejected'
+    ) then
+      raise exception 'a new result attempt requires the previous attempt to be rejected' using errcode='23514';
+    end if;
+  end if;
+
+  select coalesce(max(version), 0) + 1 into next_ver from public.match_revisions
+  where league_id = p_league and match_id = a.match_id;
+  insert into public.match_revisions(league_id, match_id, version, match_snapshot, based_on_lineup_approval_id, based_on_lineup_revision_id)
+  select p_league, a.match_id, next_ver, match_snapshot, a.id, a.revision_id
+  from public.match_revisions where league_id = p_league and id = a.revision_id
+  returning id into next_rev;
+  for line in select * from public.real_match_lineups where league_id = p_league and revision_id = a.revision_id loop
+    insert into public.real_match_lineups(league_id, match_id, revision_id, team_id)
+    values (p_league, a.match_id, next_rev, line.team_id) returning id into next_line;
+    insert into public.real_match_lineup_players(league_id, revision_id, lineup_id, player_id, selection, actual_position, eligibility_kind, eligibility_evidence)
+    select league_id, next_rev, next_line, player_id, selection, actual_position, eligibility_kind, eligibility_evidence
+    from public.real_match_lineup_players where league_id = p_league and lineup_id = line.id;
+  end loop;
+
+  -- Key-to-revision mapping, draft children and audit commit together. A unique
+  -- conflict on a concurrent same-key fork aborts this transaction and the
+  -- caller retries with the same request id, which then hits the replay branch.
+  insert into public.match_result_forks(league_id, match_id, workflow_case_id, lineup_approval_id, lineup_revision_id,
+    result_attempt_no, request_id, result_revision_id, prior_fork_id, created_by)
+  values (p_league, a.match_id, case_id, a.id, a.revision_id, expected_no, p_request_id, next_rev,
+    case when expected_no > 1 then prior.id else null end, auth.uid());
+  insert into public.audit_logs(league_id, actor_id, action, entity_type, entity_id, after_data)
+  values (p_league, auth.uid(), 'fork_result', 'match', a.match_id,
+    jsonb_build_object('lineup_approval', a.id, 'draft_revision', next_rev, 'workflow_case', case_id,
+                       'result_attempt_no', expected_no, 'request_id', p_request_id));
+  return next_rev;
+end $$;
+
+-- The request-id-only variant of the 004/006 signature is deliberately not
+-- retained: a fork without a request key cannot be idempotent.
+drop function if exists ff_private.fork_result(uuid, uuid);
+
+revoke all on all functions in schema ff_private from public, anon, authenticated;
+grant execute on function ff_private.is_member(uuid),ff_private.is_leader(uuid),ff_private.is_organizer(uuid),ff_private.owns_team(uuid,uuid),
+ ff_private.can_read_lineup(uuid,uuid),ff_private.can_read_revision(uuid,uuid),ff_private.can_read_match(uuid,uuid),
+ ff_private.can_read_suggestion(uuid,uuid),ff_private.can_read_image(text),ff_private.is_match_organizer(uuid,uuid) to authenticated;
