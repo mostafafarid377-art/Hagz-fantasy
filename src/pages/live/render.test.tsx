@@ -163,20 +163,27 @@ describe('the demo shell is not a dead end', () => {
    * showing it would be a broken affordance.
    */
   async function renderShell() {
-    const [{ default: AppLayout }, { DemoProvider }] = await Promise.all([
+    // AppLayout now reads the session so its chrome can say "Live" instead of
+    // "Demo mode" for a signed-in user, so the shell needs the auth provider too -
+    // exactly as main.tsx mounts it. With no backend configured AuthProvider
+    // resolves straight to 'anon', which is the state these tests exercise.
+    const [{ default: AppLayout }, { DemoProvider }, { AuthProvider }] = await Promise.all([
       import('../../layouts/AppLayout'),
       import('../../hooks/useDemo'),
+      import('../../hooks/useAuth'),
     ]);
     render(
-      <DemoProvider>
-        <MemoryRouter initialEntries={['/dashboard']}>
-          <Routes>
-            <Route element={<AppLayout />}>
-              <Route path="/dashboard" element={<div>DEMO DASHBOARD</div>} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
-      </DemoProvider>,
+      <AuthProvider>
+        <DemoProvider>
+          <MemoryRouter initialEntries={['/dashboard']}>
+            <Routes>
+              <Route element={<AppLayout />}>
+                <Route path="/dashboard" element={<div>DEMO DASHBOARD</div>} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </DemoProvider>
+      </AuthProvider>,
     );
     return screen.findByText('DEMO DASHBOARD');
   }
