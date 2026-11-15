@@ -86,7 +86,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
 
   const load = useCallback(async (leagueId: string | null) => {
     const mine = ++generation.current;
-    setState((s) => ({ ...s, loading: true, error: null }));
+    commit((s) => ({ ...s, loading: true, error: null }));
     try {
       const boot = await api.bootstrap();
       const usable = boot.leagues.filter((l) => !l.archived);
@@ -96,7 +96,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
 
       if (!chosen) {
         if (mine !== generation.current) return;
-        setState({
+        commit({
           loading: false, leagueId: null, leagues: usable, members: [], players: [], squad: null,
           suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
           error: null, partialFailures: [],
@@ -133,7 +133,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
         ]);
 
       if (mine !== generation.current) return;
-      setState({
+      commit({
         loading: false, leagueId: chosen, leagues: usable, members, players, squad,
         suggestions, gameweeks, matches, standings, notifications,
         error: null,
@@ -142,7 +142,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       try { localStorage.setItem(LEAGUE_KEY, chosen); } catch { /* private mode */ }
     } catch (error) {
       if (mine !== generation.current) return;
-      setState((s) => ({ ...s, loading: false, error: message(error) }));
+      commit((s) => ({ ...s, loading: false, error: message(error) }));
     }
   }, []);
 
@@ -154,6 +154,20 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
 
   const leagueId = state.leagueId;
 
+  // The latest state, readable from callbacks created in an earlier render (the
+  // context memo closes over `state` and would otherwise compare the newly created
+  // league against a stale list).
+  //
+  // The ref is written by `commit` at the moment state is set, NOT mirrored in a
+  // useEffect: an effect runs after the render, so `createLeague`'s post-reload
+  // check would read the list from before the reload - precisely the stale read
+  // the check exists to avoid.
+  const stateRef = useRef(state);
+  const commit = useCallback((next: LiveState | ((previous: LiveState) => LiveState)) => {
+    stateRef.current = typeof next === 'function' ? next(stateRef.current) : next;
+    setState(stateRef.current);
+  }, []);
+
   /**
    * Run a mutation, then refresh. `failure` is returned rather than thrown so
    * callers can render inline errors; the refresh still happens because a partial
@@ -164,7 +178,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       await action();
       await load(leagueId);
     } catch (error) {
-      setState((s) => ({ ...s, error: message(error) }));
+      commit((s) => ({ ...s, error: message(error) }));
       throw error;
     }
   }, [leagueId, load]);
@@ -182,7 +196,21 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     reload: () => load(leagueId),
     createLeague: async (name) => {
       const created = await api.createLeague(name);
+      // Reload, then VERIFY. The RPC can succeed while the league never becomes
+      // visible - a missing league_members row, an archived league, or a bootstrap
+      // that does not list it - and the old code reported success regardless, so
+      // the form just sat there with no error and no new league. Silence that looks
+      // like success is the worst outcome for a create action, so confirm it.
       await load(created.id);
+      const visible = stateRef.current.leagues.some((l) => l.league_id === created.id);
+      if (!visible) {
+        // `invalidState` is the closest existing code: the request succeeded but
+        // the resulting state is not usable, which is exactly this case.
+        throw new ApiError(
+          'invalidState',
+          'The league was created but could not be loaded. Please reload the page.',
+        );
+      }
     },
     joinLeague: async (code) => {
       const joined = await api.joinLeague(code);
@@ -221,4 +249,18 @@ export function useLive(): LiveContextValue {
   const value = useContext(LiveContext);
   if (!value) throw new Error('LiveProvider required');
   return value;
+}
+
+/**
+ * The live context, or `null` when no `LiveProvider` is mounted.
+ *
+ * `AppLayout` wraps every route - demo and live - but `LiveProvider` only exists
+ * for a signed-in user (see `LiveData` in main.tsx), so the layout cannot call
+ * `useLive()`. It still needs the live league list for the sidebar selector,
+ * which previously read the DEMO leagues and therefore showed leagues the user
+ * never created. This accessor lets chrome shared by both modes read live data
+ * when it exists and fall back otherwise, without throwing.
+ */
+export function useLiveOptional(): LiveContextValue | null {
+  return useContext(LiveContext);
 }
