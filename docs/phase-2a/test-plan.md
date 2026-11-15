@@ -1,5 +1,7 @@
 # Phase 2A verification, gaps and next-phase gates
 
+> **Phase 2A.1 supplement:** This document describes the original 001–003 draft. See [offline hardening](phase-2a1-hardening.md) for the later 004 prototypes, test coverage and remaining gaps. No live deployment is authorized.
+
 ## Commands and local evidence
 
 Baseline on a clean `arena/5dd60aec-hagz-fantasy` working tree at `33d8038`:
@@ -19,10 +21,10 @@ Run each case with independently authenticated actors: unauthenticated, two leag
 
 | Area | Required scenarios | Current status |
 |---|---|---|
-| RLS / permissions | cross-league reads/writes; no role escalation; self/other fantasy teams; inactive/revoked roles; anon; helper `search_path`, default grants, ownership/BYPASSRLS; nonrecursive policies | draft read/deny cases tested in PGlite; real stack not tested |
+| RLS / permissions | cross-league reads/writes; no role escalation; self/other fantasy teams; inactive/revoked roles; anon; helper `search_path`, default grants, ownership/BYPASSRLS; nonrecursive policies; organizer reads assigned matches only (not other drafts), leaders read league-wide, and neither RLS visibility grants DML/approval | draft read/deny cases tested in PGlite; migration 004 narrows organizer reads; real stack not tested |
 | Squad and budget | 15/11/4, distribution and all seven formations, duplicate team ownership, independent multi-ownership, exact price/budget, inactive historical selections, same-position transfer, race/retry, deadline and tenant enforcement | duplicate/multi-ownership FK tested; aggregate/transactions **not implemented** |
 | Real match lineup | exact configured starters on each side, max subs, both actual teams only, registered roster valid at kickoff, temporary authorization, no duplicate across sides, time-zone boundaries, immutable historical version and reapproval | duplicate and labels tested; team/eligibility/count/immutability **not implemented** |
-| Match workflow | organizer creation/submission, leader-only review, reasons, state transitions, replay/idempotency, stale versions, review races, organizer revocation, correction authorization and reapproval | all client writes currently denied; permitted workflow **not implemented** |
+| Match workflow | assigned-organizer reads/writes only, leader-only review, reasons, state transitions, replay/idempotency, stale versions, review races, organizer revocation, correction authorization, immutable numbered correction retries, approval invalidation, and same-key concurrent result-fork replay/payload conflict | migrations 004–006 provide prototype checks but not correction-attempt or fork-idempotency records; all client writes currently denied; runtime workflow **not implemented** |
 | Events/results | valid participant and related player in same revision/team; goals/assists/own-goals/cards/MVP/appearances/substitutions/clean sheets/custom events; unauthorized or post-approval edits; result/event consistency | participant FKs and direct client denial tested; semantics/approvals **not implemented** |
 | Scoring | no draft/rejected/corrected data reaches official scores; position config for every event; version pinning, no accidental zero, exact-once performance, independently attributed shared player, no-play zero, ×2 only once, vice participation policy, bench eligibility, multiple matches, idempotent recompute after correction, rollback/outbox | selected DDL keys and ×2 allowed constraint tested; worker, aggregation, captain algorithm and corrections **not implemented** |
 | Fixtures / standings | separate real and fantasy fixture identities; automatic/manual fixture creation, 3/1/0 H2H, fantasy-total mode, approved-score-only updates, deterministic ties, concurrent gameweeks and league isolation | mode schema and current frontend fantasy-only sorting tested; backend computation **not implemented** |
@@ -32,8 +34,8 @@ Run each case with independently authenticated actors: unauthenticated, two leag
 
 ## Roadmap — require human approval between gates
 
-1. Review and resolve the standings conflict, scoring/bench/vice semantics, permissions, result corrections, identity/deletion, money, privacy and storage decisions in [architecture](architecture.md). Obtain threat-model approval; do not replace local demo data.
-2. In a **disposable local-only** Supabase stack (never live), translate reviewed drafts into real, ordered migrations with verified role ownership/least privilege and actual Storage/auth integration. Add complete constraints, immutable revision enforcement, required indexes and transactional audited RPCs. Keep all user writes disabled until tests pass.
+1. Follow the Phase 2A.5 decisions for the pristine-project baseline, assigned-match organizer visibility, immutable correction attempts and idempotent result forks. Remaining scoring, standings, money, identity/deletion, privacy and storage choices remain product decisions. Obtain explicit human approval; do not replace local demo data.
+2. In a **disposable local-only** Supabase-compatible stack (never live), translate the reviewed 001–006 design baseline into a verified ordered migration set. Validate actual Auth/Storage prerequisites, role ownership/least privilege, exact RLS and PostgREST exposure, migration replay/rollback and pristine-target behavior. Add correction-attempt and fork-idempotency persistence plus transactional audited RPCs. Keep all user writes disabled until tests pass.
 3. Implement local-only trusted match, market and fantasy-team RPCs with idempotency, row locks and approval workflows; run positive/negative real Supabase RLS and concurrency tests. Review SQL security with `EXPLAIN` and roles; independently verify actual role grants and PostgREST exposure.
 4. After approved scoring decisions, implement private event derivation, versioned scoring, outbox/replay and two separate standings modes; validate approved-only lineage, corrections and audit through full end-to-end real-stack tests. No final event values are invented by this architecture.
 5. Build private, verified upload pipeline and approved opt-in local-image migration; independently review storage/RLS and security. Generate actual database types from the reviewed local schema.
