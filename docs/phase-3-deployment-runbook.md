@@ -214,7 +214,7 @@ node scripts/promote-migrations.mjs
 npm run check:migrations
 ```
 
-**Expected:** `Wrote 13 migration(s)` then `29 check(s) passed, 0 failed.`
+**Expected:** `Wrote 14 migration(s)` then `30 check(s) passed, 0 failed.`
 
 The promotion script is deterministic — it re-reads the frozen design sources and
 regenerates the executable package. Running it twice produces identical bytes. If
@@ -227,7 +227,7 @@ audited.
 > green. `.gitattributes` now pins SQL to LF, and the guard normalises regardless,
 > so `git status` and the guard agree on either platform.
 
-Optionally verify by hash. This is the manifest hash of all 13 files concatenated
+Optionally verify by hash. This is the manifest hash of all 14 files concatenated
 in sorted order:
 
 ```powershell
@@ -235,7 +235,7 @@ Get-ChildItem .\supabase\migrations\*.sql | Sort-Object Name |
   Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" }
 ```
 
-**Expected file set — exactly these 13, in this order.** If any other `.sql` file
+**Expected file set — exactly these 14, in this order.** If any other `.sql` file
 appears in `supabase/migrations/`, the guard would have failed above.
 
 | # | File | What it does |
@@ -251,11 +251,12 @@ appears in `supabase/migrations/`, the guard would have failed above.
 | 9 | `20261115000009_ownership_and_grants.sql` | `ff_migration_owner`, explicit grants |
 | 10 | `20261115000010_definer_ownership_transfer.sql` | transfers every definer to that role |
 | 11 | `20261115000011_application_api.sql` | the 40 client-callable `ff_*` RPCs |
-| 12 | `20261115000012_privilege_verification.sql` | **asserts** privileges; aborts push if wrong |
-| 13 | `20261115000013_api_surface_verification.sql` | **asserts** the API surface; aborts push if wrong |
+| 12 | `20261115000012_definer_actor_identity.sql` | forward-only repair: definers stop resolving `auth.uid()` (hosted Supabase cannot grant `USAGE` on `auth`) |
+| 13 | `20261115000013_privilege_verification.sql` | **asserts** privileges; aborts push if wrong |
+| 14 | `20261115000014_api_surface_verification.sql` | **asserts** the API surface; aborts push if wrong |
 
-> **Note the order.** 10 runs before 12, and 11 before 12/13, because 12 and 13 are
-> assertions about what 10 and 11 did. Filenames sort correctly by timestamp, so
+> **Note the order.** 10 runs before 13, 11 before 13/14, and 12 before 13, because
+> 13 and 14 are assertions about what 10, 11 and 12 did. Filenames sort correctly by timestamp, so
 > the CLI applies them in this order without extra flags.
 
 ---
@@ -268,14 +269,14 @@ supabase db push --dry-run --remote
 ```
 
 **Expected for `migration list`:** a `LOCAL │ REMOTE │ TIME` table where the
-`REMOTE` column is **empty** for all 13 rows (nothing applied yet), and every one
-of the 13 timestamps appears in `LOCAL`.
+`REMOTE` column is **empty** for all 14 rows (nothing applied yet), and every one
+of the 14 timestamps appears in `LOCAL`.
 
 **Expected for `db push --dry-run`:** a `Target: project … (<ref>) · production`
-line, then a list of the 13 migrations above, in that order.
+line, then a list of the 14 migrations above, in that order.
 
 **Stop and report if:**
-- the dry run lists **fewer than 13** (some are already recorded as applied),
+- the dry run lists **fewer than 14** (some are already recorded as applied),
 - the dry run lists **anything not in the table above**,
 - `Target:` names a project you did not intend.
 
@@ -298,7 +299,7 @@ The CLI prints the target and **asks once, defaulting to No**. Read the list, th
 answer `y`. Do **not** add `--yes` for this first run — you want to read the prompt.
 
 **Expected output:** `Applying migration 20261115000001_schema.sql…` through
-`…00013_api_surface_verification.sql`, then `Finished supabase db push.`
+`…00014_api_surface_verification.sql`, then `Finished supabase db push.`
 
 ### Two outcomes you must expect
 
@@ -310,11 +311,13 @@ answer `y`. Do **not** add `--yes` for this first run — you want to read the p
 This is **by design and fail-closed**: the bucket exists with no policy, so nobody
 can read or write it. Continue to §7.
 
-**2. A HARD FAILURE in migrations 12 or 13 — expected behaviour, not a bug.**
+**2. A HARD FAILURE in migration 13 or 14 — expected behaviour, not a bug.**
 
 Those two migrations are assertions. They abort the push if the privilege or API
-surface drifted. When that happens, migration 12/13 rolls back; **1–11 stay
-applied**. Do **not** retry blindly. Run the read-only check below, then §8.
+surface drifted. When that happens, the failing migration rolls back; **the
+earlier ones stay applied**. Note that 13 also asserts the storage policy, so on a
+first push it aborts there for that reason — see §6a, which is the expected path.
+Do **not** retry blindly. Run the read-only check below, then §8.
 
 ```powershell
 supabase migration list --remote
@@ -330,7 +333,7 @@ console scrollback.
 ## 6a. THE CRITICAL ORDERING PROBLEM — read before you run §6
 
 **On a standard Supabase project, `supabase db push` will almost certainly FAIL at
-migration 12, and that is the designed behaviour — not a bug and not something to
+migration 13, and that is the designed behaviour — not a bug and not something to
 improvise around.**
 
 Here is the chain, verified by simulation:
@@ -338,22 +341,22 @@ Here is the chain, verified by simulation:
 1. Migration **3** tries to create the `player-images` policy. `storage.objects` is
    owned by `supabase_storage_admin`, which the migration role is not a member of,
    so it cannot. Migration 3 **skips** the policy with a WARNING (fail-closed).
-2. Migration **12** asserts the policy exists. It does not. Migration 12 raises
+2. Migration **13** asserts the policy exists. It does not. Migration 13 raises
    `42501: storage policy player_images_member_read is missing or not SELECT-only`.
-3. The push aborts. Migrations **1–11 remain applied**; 12 and 13 do not.
+3. The push aborts. Migrations **1–12 remain applied**; 13 and 14 do not.
 
 So the correct sequence is **not** "push, then fix storage". It is:
 
 | Step | Action | Result |
 |---|---|---|
-| A | `supabase db push --remote` | applies 1–11, aborts at 12 with the storage error |
-| B | `supabase migration list --remote` | confirms 1–11 applied, 12–13 not |
+| A | `supabase db push --remote` | applies 1–12, aborts at 13 with the storage error |
+| B | `supabase migration list --remote` | confirms 1–12 applied, 13–14 not |
 | C | §7: create the policy in the SQL Editor | policy now exists |
-| D | `supabase db push --remote` again | applies 12 and 13, skips 1–11 |
+| D | `supabase db push --remote` again | applies 13 and 14, skips 1–12 |
 
 **This is the expected path. It is not a failure you need to report as a bug.**
 The re-run in step D is safe: the CLI skips migrations already recorded as applied,
-and 12/13 are pure assertions that mutate nothing.
+and 13/14 are pure assertions that mutate nothing.
 
 > If you would rather avoid the aborted run entirely, do §7 **before** §6. The
 > policy creation does not depend on the application schema, so creating it first
@@ -442,9 +445,9 @@ You do **not** need to reset, re-run 1–9, or mark anything applied.
 | 1 | Dashboard → SQL Editor → run the **read-only** diagnostic in 6b.4 | see 6b.5 |
 | 2 | `supabase migration list --remote` | 1–9 applied, 10–13 pending |
 | 3 | `supabase db push --dry-run --remote` | lists 10–13 only |
-| 4 | `supabase db push --remote` | 10 now passes the pre-flight; aborts at 12 with the **storage** error — see 6a, that is expected |
-| 5 | §7 (storage owner step), then `supabase db push --remote` again | 12 and 13 apply |
-| 6 | `supabase migration list --remote` | all 13 applied |
+| 4 | `supabase db push --remote` | 10-12 now apply; aborts at 13 with the **storage** error — see 6a, that is expected |
+| 5 | §7 (storage owner step), then `supabase db push --remote` again | 13 and 14 apply |
+| 6 | `supabase migration list --remote` | all 14 applied |
 
 > Do **not** use `supabase migration repair`, and do **not** edit an already-applied
 > migration (1–9 cannot be changed remotely; the CLI would refuse to re-run them).
@@ -519,7 +522,7 @@ select pg_has_role('postgres', 'ff_migration_owner', 'set')                     
 
 Both must be `true`. Then continue at 6b.3 step 2.
 
-### 6b.7 Optional tidy-up, after all 13 are applied
+### 6b.7 Optional tidy-up, after all 14 are applied
 
 The membership is not required at runtime — only `ALTER OWNER` needed it. You may
 remove it once the deployment is verified, and it is safe to do so:
@@ -534,6 +537,154 @@ into it. `admin_option` remains (Postgres keeps the creator's admin path), so th
 does not fully erase the relationship — do not claim otherwise. Leaving the
 membership in place is also acceptable; `ff_migration_owner` is NOLOGIN and owns
 no relation, so the membership grants no reachable authority.
+
+---
+
+## 6c. The `auth`-schema trap — **unfixable by GRANT; repaired by migration**
+
+> **Fixed forward-only in executable migration 12 (`definer_actor_identity`).**
+> Read this if your push aborted at the privilege verification with
+> `ff_migration_owner needs USAGE on schema auth to call auth.uid()`, and to
+> understand why no GRANT can solve it.
+
+### 6c.1 Why the grant in 009 cannot work
+
+On hosted Supabase:
+
+* the `auth` **schema** is owned by `supabase_admin`;
+* the **tables and functions** inside it are owned by `supabase_auth_admin`;
+* `postgres` holds `USAGE` on `auth` **without the grant option**, and is **not a
+  member** of either owner role — membership in them is reserved to superusers,
+  and `postgres` is `NOSUPERUSER`.
+
+PostgreSQL lets a role grant a privilege only if it holds that privilege **WITH
+GRANT OPTION**. `postgres` does not, so migration 009's
+
+```sql
+grant usage on schema auth to ff_migration_owner;
+```
+
+**does not fail — it silently succeeds and changes nothing.** Postgres logs only:
+
+```
+WARNING:  no privileges were granted for "auth"
+```
+
+`has_schema_privilege('ff_migration_owner','auth','USAGE')` stays `false`.
+
+This is not a bug in the migration; it is the platform's privilege model, and
+Supabase documents it: see *"Permission errors when granting custom roles access
+to the auth schema"* in the Supabase knowledge base. That page also states that
+`postgres` cannot become `supabase_auth_admin`, so **there is no role available to
+the deployment that can perform this grant.**
+
+### 6c.2 Why the assertion was still right
+
+It was not cosmetic. With `auth` unreachable, every SECURITY DEFINER function that
+calls `auth.uid()` failed **at runtime** with `42501 permission denied for schema
+auth`. In the deployment harness, all client RPCs failed this way: migrations
+001–011 applied cleanly and produced a database whose API was unusable. The
+verification aborting was the correct outcome.
+
+### 6c.3 What migration 12 does instead
+
+`auth.uid()` is only a thin reader of the request JWT claims, which Supabase sets
+as ordinary GUCs. Reading those GUCs needs **no privilege on the `auth` schema**.
+Migration 12:
+
+1. creates `ff_private.current_actor_id()`, whose body is *textually the same
+   expression* as `auth.uid()`:
+   `nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`.
+   It has no second branch and reads no other input, so there is no request state
+   in which it reports an identity that `auth.uid()` does not;
+2. repoints the **46** definer functions that called `auth.uid()` at it, rewriting
+   only that token via `pg_get_functiondef`;
+3. keeps every other property identical, and asserts it.
+
+This is Supabase's own recommended remedy for this exact situation ("Option 2:
+read the user ID from the JWT claims").
+
+> **On "identical semantics".** An earlier revision of the helper also fell back
+> to `request.jwt.claims ->> 'sub'`. That was **not** equivalent and has been
+> removed in security review: when the `sub` GUC is empty or absent but the
+> aggregate claims carry a `sub`, `auth.uid()` returns `NULL` while the fallback
+> returned that UUID — i.e. it could authenticate a caller the platform considers
+> anonymous. The helper is now a single expression with a single input.
+> `supabase/design/tests/phase3-definer-identity.test.mjs` covers all claim
+> states (present, empty, absent, aggregate-only, conflicting, malformed UUID,
+> malformed JSON, unauthenticated) and asserts the helper and `auth.uid()` agree
+> in every one, including a structural check that the body never reads the
+> aggregate claims GUC.
+
+**Not chosen, and why:**
+
+| Alternative | Why rejected |
+|---|---|
+| Grant `authenticated` to `ff_migration_owner` (Supabase "Option 3") | Makes the definer inherit SELECT on all 40 public tables and membership in a client role. 013 assertion 9 forbids a client role in the definer's membership chain; it also widens a BYPASSRLS role. |
+| Drop 013's assertion | Ships a database whose API returns 42501 on every call. |
+| Ask for an owner-authorised superuser grant | Not available on hosted Supabase (6c.1). |
+
+**Unchanged:** no privilege is granted on `auth`, `auth.users`, or any auth
+function; no auth object is altered or re-owned; `ff_migration_owner` keeps
+NOLOGIN, NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, BYPASSRLS; RLS policies
+still call `auth.uid()` directly and are untouched (they run as the querying
+role, which always could).
+
+### 6c.4 Recovery from the aborted push
+
+Migrations **001–011 are applied**; **012–014 are pending**. Nothing to repair.
+
+| Step | Command / action | Expected |
+|---|---|---|
+| 1 | `supabase migration list --remote` | 001–011 applied, **012–014 pending** |
+| 2 | `supabase db push --dry-run --remote` | lists **three** pending migrations: 012 definer actor identity, 013 privilege verification, 014 API surface verification |
+| 3 | `supabase db push --remote` | 012 (the repair) applies; 013 then aborts on the **storage** assertion — see 6a, expected |
+| 4 | §7 storage owner step, then `supabase db push --remote` again | 013 and 014 apply |
+| 5 | `supabase migration list --remote` | **all 14 applied** |
+
+> **On the renumbering.** The repair had to run *before* the assertion that
+> polices it, and the CLI applies migrations in version order. The two old
+> assertion migrations (previously 012 and 013) were never recorded as applied on
+> the hosted project, so they are renumbered rather than edited in place: the
+> repair occupies `12`, and the two assertions become `13` and `14`. Applied
+> migrations 001–011 keep their versions and are untouched.
+
+### 6c.5 Verification (read-only)
+
+```sql
+-- 1. Must be 0: no definer owned by ff_migration_owner still calls auth.uid().
+select count(*) as definers_using_auth_uid
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname in ('public','ff_private') and p.prosecdef
+  and pg_get_userbyid(p.proowner) = 'ff_migration_owner'
+  and position('auth.uid()' in p.prosrc) > 0;
+
+-- 2. The helper exists, the definer can call it, clients cannot.
+select has_function_privilege('ff_migration_owner','ff_private.current_actor_id()','execute') as definer_can_call,
+       has_function_privilege('authenticated','ff_private.current_actor_id()','execute')   as client_can_call;
+
+-- 3. Unchanged: still no USAGE on auth, and it no longer matters.
+select has_schema_privilege('ff_migration_owner','auth','USAGE') as usage_on_auth;
+
+-- 4. The definer still owns everything and still has BYPASSRLS.
+select count(*) as definers,
+       count(*) filter (where pg_get_userbyid(p.proowner) = 'ff_migration_owner') as owned_by_definer
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname in ('public','ff_private') and p.prosecdef;
+
+select rolcanlogin, rolinherit, rolsuper, rolbypassrls
+from pg_roles where rolname = 'ff_migration_owner';
+```
+
+Expected: `definers_using_auth_uid = 0`; `definer_can_call = true`,
+`client_can_call = false`; `usage_on_auth = false` (and that is fine — it is no
+longer used); `definers = owned_by_definer`; and the role still NOLOGIN with
+`rolbypassrls = true`.
+
+**The real proof is a live API call.** From the app (or the dashboard with a
+signed-in session), call any RPC. Before the repair it returned
+`42501 permission denied for schema auth`; after it, it returns data or a
+domain-level refusal. That single call is worth more than every row above.
 
 ---
 
@@ -644,7 +795,7 @@ supabase db query --remote --read-only --file supabase/design/verify/remote-chec
 | 18 | no `ff_*` executable by `PUBLIC` | unauthenticated RPC access |
 
 Check 07 is not theoretical: it failed the first time it ran locally, catching a
-definer left owned by `postgres`. Migration 12 now transfers ownership
+definer left owned by `postgres`. Migration 10 now transfers ownership
 structurally and migration 13 asserts it.
 
 **Report back:** the full 18-row output. A single `FAIL` row is enough to stop.
@@ -710,7 +861,7 @@ supabase migration repair <VERSION> --status applied --remote
 |---|---|
 | SQL is valid on PostgreSQL 17.6 | **Verified** — native PG 17.6 runs, Phase 2B.5 |
 | All 13 apply in order on a clean database | **Verified** against a mocked Supabase bootstrap (roles, `auth.uid()`, storage tables simulated) |
-| Privilege model is as asserted | **Verified** — migrations 12 and 13 fail loudly if not |
+| Privilege model is as asserted | **Verified** — migrations 13 and 14 fail loudly if not |
 | Authorization is enforced server-side | **Verified** — 26 end-to-end API tests, each action tested allowed *and* refused |
 | The app builds, typechecks and renders | **Verified** — build clean, 48 unit/render tests |
 | Pre-deployment security audit | **Done** — 2 defects found and fixed (silent empty-data, cross-league fixture) |

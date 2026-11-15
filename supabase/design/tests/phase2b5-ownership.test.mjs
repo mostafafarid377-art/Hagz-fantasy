@@ -267,6 +267,10 @@ test('an anon caller still cannot reach any helper after the transfer', async ()
 });
 
 test('010 still passes after the transfer, and still rejects a BYPASSRLS-less owner', async () => {
+  // 010 now also asserts that no definer calls auth.uid(): hosted Supabase cannot
+  // grant USAGE on the auth schema, so such a function 42501s at runtime. Apply
+  // the repair first, which is what the deployment does.
+  await load('../migrations/014_definer_actor_identity.sql');
   await load('../migrations/010_privilege_verification.sql');
   await db.exec('alter role ff_migration_owner nobypassrls');
   await assert.rejects(load('../migrations/010_privilege_verification.sql'),

@@ -26,7 +26,8 @@ const PKG = [
   '20261115000006_revision_lineage', '20261115000007_correction_attempts',
   '20261115000008_result_fork_idempotency', '20261115000009_ownership_and_grants',
   '20261115000010_definer_ownership_transfer', '20261115000011_application_api',
-  '20261115000012_privilege_verification', '20261115000013_api_surface_verification',
+  '20261115000012_definer_actor_identity',
+  '20261115000013_privilege_verification', '20261115000014_api_surface_verification',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);

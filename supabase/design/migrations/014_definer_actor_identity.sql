@@ -1,0 +1,233 @@
+-- PHASE 3 FORWARD-ONLY REPAIR. Authored as design draft 014, promoted to the
+-- executable migration 20261115000012_definer_actor_identity.
+--
+-- WHY THIS EXISTS
+--   Migrations 001-011 deployed successfully to hosted Supabase, but the
+--   deployed API was NOT usable: every SECURITY DEFINER function that calls
+--   auth.uid() failed at runtime with
+--       42501: permission denied for schema auth
+--   and the privilege verification (then executable 012, now 013) refused to
+--   certify that state, aborting the push with
+--       'ff_migration_owner needs USAGE on schema auth to call auth.uid()'.
+--
+--   That assertion is correct. The privilege it asks for is unobtainable.
+--
+-- WHY 009's GRANT CANNOT WORK (measured, and documented by Supabase)
+--   On hosted Supabase:
+--     * the `auth` schema is owned by `supabase_admin`;
+--     * the tables and functions inside it are owned by `supabase_auth_admin`;
+--     * `postgres` holds USAGE on `auth` WITHOUT the grant option, and is NOT a
+--       member of either owner role (membership in them is reserved to
+--       superusers, and `postgres` is NOSUPERUSER).
+--   PostgreSQL lets a role grant a privilege only if it holds it WITH GRANT
+--   OPTION. Since `postgres` does not, 009's
+--       grant usage on schema auth to ff_migration_owner;
+--   does not fail — it silently succeeds and changes nothing. Postgres logs only
+--   `WARNING: no privileges were granted for "auth"`. Reproduced in the Phase 3
+--   deployment harness: the statement returns without error and
+--   has_schema_privilege('ff_migration_owner','auth','USAGE') stays false.
+--
+--   There is no role available to the deployment that can fix this. Naming
+--   `supabase_admin` or `supabase_auth_admin` as the grantor is not possible:
+--   `grant supabase_auth_admin to postgres` fails with 'role memberships are
+--   reserved, only superusers can grant them', and `set role supabase_auth_admin`
+--   is denied. Escalating to a superuser would require dashboard support access
+--   and would violate the deployment's own privilege model.
+--
+-- WHY THIS REPAIR AND NOT THE ALTERNATIVES
+--   * Granting `authenticated` to `ff_migration_owner` would make it inherit
+--     SELECT on every public table and membership in a client role. The
+--     privilege verification (013) assertion 9 explicitly forbids a client role
+--     being in the definer's
+--     membership chain, and it would widen a BYPASSRLS role. Rejected.
+--   * Dropping that assertion would ship a database whose API returns 42501 on
+--     every call. Rejected: the assertion is the only thing that caught this.
+--   * Leaving auth.uid() in place and asking for an owner-authorised grant is
+--     not available on hosted Supabase at all (see above).
+--
+--   Instead: `auth.uid()` is only a thin reader of the request JWT claims, which
+--   Supabase sets as ordinary GUCs. Reading those GUCs needs NO privilege on the
+--   `auth` schema. This migration adds one helper that reads them with the same
+--   semantics as auth.uid(), and repoints the 46 definer functions at it.
+--
+--   This is Supabase's own documented remedy for exactly this situation
+--   ("Option 2: read the user ID from the JWT claims"), chosen because the caller
+--   already is a definer owned by ff_migration_owner.
+--
+-- SEMANTICS: EXACTLY auth.uid(), BY CONSTRUCTION
+--   Supabase defines auth.uid() verbatim as:
+--       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
+--   The helper below is that expression, textually, with no other branch. The
+--   whole point is that no caller can be authenticated as somebody they were not
+--   already: there is exactly one input, and it is the one auth.uid() reads.
+--
+--   An earlier revision of this file additionally fell back to
+--   `request.jwt.claims ->> 'sub'` when the per-claim setting was absent or
+--   empty. That is NOT equivalent, and it was removed in security review:
+--       * when request.jwt.claim.sub is empty and request.jwt.claims contains a
+--         sub, auth.uid() returns NULL while the fallback returned that UUID;
+--       * so the fallback could synthesise an identity in a state where the
+--         platform's own function says "unauthenticated" - i.e. it widened
+--         access relative to auth.uid(), which is exactly what this migration
+--         must not do.
+--   Measured, not reasoned: the four claim states are covered by
+--   supabase/design/tests/phase3-definer-identity.test.mjs, which asserts the
+--   helper and auth.uid() agree in every one of them, including the divergence
+--   case that removal fixed.
+--
+--   No fallback is needed in practice. auth.uid() resolves for the client roles
+--   on hosted Supabase (it is EXECUTE-granted to PUBLIC), and the GUC it reads is
+--   set by PostgREST. If a deployment ever populated only the aggregate claims
+--   GUC, auth.uid() itself would return NULL there too - and this helper now
+--   matches that, rather than silently disagreeing with it.
+--
+-- WHAT IS NOT TOUCHED
+--   * No privilege is granted on the `auth` schema, on any auth table, or on any
+--     auth function. Nothing in `auth` is altered or re-owned.
+--   * ff_migration_owner keeps NOLOGIN, NOINHERIT, NOSUPERUSER, NOCREATEDB,
+--     NOCREATEROLE, BYPASSRLS. It gains EXECUTE on one function in a schema it
+--     already uses.
+--   * Ownership of the rewritten functions is unchanged and asserted at the end.
+--   * RLS policies are untouched: policies run as the querying role, which
+--     continues to call auth.uid() directly and needs no change.
+--
+-- ORDERING
+--   Executable 012. Runs after executable 010 (ownership transfer, draft 011),
+--   which owns the functions to ff_migration_owner, and BEFORE executable 013
+--   (privilege verification), which asserts the repair happened. On the hosted
+--   project, 001-011 are applied and 012-014 are pending, so a plain re-push
+--   applies this migration and then the two assertions.
+
+-- 1. The actor-id helper. SECURITY INVOKER (the default) is deliberate: it must
+--    be callable BY ff_migration_owner after re-owning, and it must grant nobody
+--    else any new authority. It is EXECUTE-granted to ff_migration_owner only.
+create or replace function ff_private.current_actor_id() returns uuid
+language sql
+stable
+set search_path = pg_catalog, pg_temp
+as $$
+  -- Byte-for-byte the body of Supabase's auth.uid(). One input, one branch.
+  -- Do not add a fallback here: any second source of identity is a way to
+  -- authenticate as somebody the platform does not consider signed in.
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+$$;
+
+revoke all on function ff_private.current_actor_id() from public, anon, authenticated;
+grant execute on function ff_private.current_actor_id() to ff_migration_owner;
+
+-- Own it with the definer, matching every other ff_private function. Executable
+-- 013 asserts that NO function in ff_private is owned by anyone else, because a
+-- helper owned by a superuser-ish role is an escalation surface. Creating it
+-- as the migrating role and then handing it over keeps that invariant intact.
+-- The ALTER runs as the creating role, because ALTER OWNER requires the
+-- executing role to own the object. 011 already granted CREATE on ff_private to
+-- ff_migration_owner, which is the other precondition.
+alter function ff_private.current_actor_id() owner to ff_migration_owner;
+
+-- 2. Repoint every SECURITY DEFINER function owned by ff_migration_owner that
+--    still calls auth.uid(). Rewriting is done with pg_get_functiondef so the
+--    body is reproduced exactly; only the auth.uid() / auth . uid ( ) token is
+--    replaced, so nothing else in a function can drift.
+--
+--    Executed AS ff_migration_owner: a non-superuser cannot CREATE OR REPLACE a
+--    function it does not own, and every target function is owned by that role.
+--    This keeps the DDL authority where 011 already put it.
+-- Record the ownership baseline so the post-condition can prove no drift.
+do $$
+declare v_before int;
+begin
+  select count(*) into v_before
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'ff_private') and p.prosecdef
+    and pg_get_userbyid(p.proowner) = 'ff_migration_owner';
+  perform set_config('ff.definer_owned_before', v_before::text, false);
+end $$;
+
+set role ff_migration_owner;
+
+do $$
+declare
+  v_fn    record;
+  v_strip text;
+  v_new   text;
+  v_count int := 0;
+begin
+  for v_fn in
+    select p.oid,
+           p.oid::regprocedure::text as signature
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname in ('public', 'ff_private')
+      and p.prosecdef
+      and pg_get_userbyid(p.proowner) = 'ff_migration_owner'
+      and position('auth.uid()' in p.prosrc) > 0
+  loop
+    v_strip := regexp_replace(
+      pg_get_functiondef(v_fn.oid),
+      'auth[[:space:]]*\.[[:space:]]*uid[[:space:]]*\([[:space:]]*\)',
+      'ff_private.current_actor_id()',
+      'g');
+    v_new := v_strip;
+    execute v_new;
+    v_count := v_count + 1;
+  end loop;
+
+  raise notice 'definer actor identity: repointed % function(s) from auth.uid() to ff_private.current_actor_id()', v_count;
+end $$;
+
+reset role;
+
+-- 3. Post-conditions. Each of these would have caught a half-applied repair, so
+--    a failure here aborts the migration rather than leaving a mixed state.
+do $$
+declare
+  v_remaining  int;
+  v_owned_before int;
+  v_owned_after  int;
+begin
+  -- Baseline, read from the value the rewrite block recorded.
+  v_owned_before := coalesce(nullif(current_setting('ff.definer_owned_before', true), ''), '0')::int;
+  select count(*) into v_owned_after
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'ff_private') and p.prosecdef
+    and pg_get_userbyid(p.proowner) = 'ff_migration_owner';
+  -- The helper must exist and be executable by the definer.
+  if not has_function_privilege('ff_migration_owner', 'ff_private.current_actor_id()', 'execute') then
+    raise exception 'ff_migration_owner cannot execute ff_private.current_actor_id(); the repair would not work'
+      using errcode = '42501';
+  end if;
+
+  -- No definer driven by ff_migration_owner may still reference auth.uid().
+  select count(*) into v_remaining
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'ff_private') and p.prosecdef
+    and pg_get_userbyid(p.proowner) = 'ff_migration_owner'
+    and position('auth.uid()' in p.prosrc) > 0;
+  if v_remaining <> 0 then
+    raise exception 'definer actor identity: % function(s) still call auth.uid()', v_remaining
+      using errcode = '42501';
+  end if;
+
+  -- Ownership must not DRIFT. This block's job is the auth.uid() rewrite, not the
+  -- ownership transfer: executable 010 owns that, and 013 asserts it exhaustively. Stated
+  -- relatively so this migration is also correct in a context where the transfer
+  -- has not run yet.
+  if v_owned_after <> v_owned_before then
+    raise exception 'definer actor identity: ownership drifted across the rewrite (% -> % functions owned by ff_migration_owner)',
+      v_owned_before, v_owned_after using errcode = '42501';
+  end if;
+
+  -- The definer role's security attributes must be untouched.
+  if exists (select 1 from pg_roles
+             where rolname = 'ff_migration_owner'
+               and (rolcanlogin or rolinherit or rolsuper or rolcreatedb or rolcreaterole or not rolbypassrls)) then
+    raise exception 'ff_migration_owner no longer has its reviewed attributes' using errcode = '42501';
+  end if;
+
+  -- The repair must not have widened anything: the definer holds EXECUTE on the
+  -- helper and nothing else new, and no client role may reach the helper.
+  if has_function_privilege('anon', 'ff_private.current_actor_id()', 'execute')
+     or has_function_privilege('authenticated', 'ff_private.current_actor_id()', 'execute') then
+    raise exception 'ff_private.current_actor_id() must not be executable by a client role' using errcode = '42501';
+  end if;
+end $$;
