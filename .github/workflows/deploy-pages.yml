@@ -27,10 +27,21 @@ jobs:
         id: pages
       - run: npm ci
       - run: npm test
+      # Fail before building if the Supabase configuration is missing or malformed.
+      # Without this the workflow happily publishes a Demo-only bundle and the live
+      # site cannot sign anyone in. The script reports which variable is wrong and
+      # never prints the values.
+      - name: Validate Supabase configuration
+        run: node scripts/check-pages-env.mjs
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
       - run: npm run build
         env:
           VITE_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           VITE_ROUTER_MODE: hash
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test -c playwright.pages.config.ts
         env:
