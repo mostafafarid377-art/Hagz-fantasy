@@ -114,11 +114,16 @@ export async function getSession(): Promise<Session | null> {
  * caller can restore state on mount without a second round-trip, then on every
  * sign-in, sign-out and token refresh.
  */
-export function onAuthChange(callback: (session: Session | null, user: User | null) => void): () => void {
+export function onAuthChange(
+  callback: (session: Session | null, user: User | null, event: string) => void,
+): () => void {
   const supabase = getSupabase();
-  if (!supabase) { callback(null, null); return () => {}; }
-  const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-    callback(session, session?.user ?? null);
+  if (!supabase) { callback(null, null, 'SIGNED_OUT'); return () => {}; }
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    // The event name matters, not just the session: `SIGNED_OUT` is the client
+    // telling us explicitly that the user logged out, which must be distinguished
+    // from a stale/racing read that merely *looks* like "no session".
+    callback(session, session?.user ?? null, event);
   });
   return () => data.subscription.unsubscribe();
 }
