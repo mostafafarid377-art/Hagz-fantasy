@@ -343,6 +343,10 @@ test('010 requires BYPASSRLS on the definer owner, because ownership change is o
   await db.exec('grant create on schema ff_private to ff_migration_owner');
   await db.exec(`grant ff_migration_owner to current_user with set true`);
   await db.exec(await readFile(new URL('../migrations/014_definer_actor_identity.sql', import.meta.url), 'utf8'));
+  // Forward-only repair #2: 014 installed the per-claim-only helper, which is the
+  // LOCAL auth.uid(). 015 restores the hosted definition. Apply both so this suite
+  // exercises the package as `db push` would leave it.
+  await db.exec(await readFile(new URL('../migrations/015_actor_identity_claim_fallback.sql', import.meta.url), 'utf8'));
   // Re-run the reviewed verification. Under model C it must pass.
   await db.exec(await readFile(new URL('../migrations/010_privilege_verification.sql', import.meta.url), 'utf8'));
   // Under a nobypassrls owner it must fail, otherwise the assertion is decorative.

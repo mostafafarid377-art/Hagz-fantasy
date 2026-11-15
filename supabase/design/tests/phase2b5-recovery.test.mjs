@@ -47,7 +47,7 @@ async function freshDb() {
     create schema auth;
     create table auth.users(id uuid primary key, email text);
     create function auth.uid() returns uuid language sql stable
-      as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
+      as $$ select nullif(coalesce(current_setting('request.jwt.claim.sub',true),(current_setting('request.jwt.claims',true)::jsonb->>'sub')),'')::uuid $$;  -- hosted definition
     create schema storage;
     create table storage.buckets(id text primary key, name text, public boolean,
       file_size_limit bigint, allowed_mime_types text[]);

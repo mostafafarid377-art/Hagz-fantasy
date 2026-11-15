@@ -28,6 +28,7 @@
  *   012      definer actor identity  (draft 014)  <- forward-only repair
  *   013      privilege verification  (draft 010)
  *   014      API surface verification(draft 013)
+ *   015      actor identity claim fallback (draft 015)  <- forward-only repair #2
  *
  * One draft cannot be promoted byte-for-byte, and this is deliberate:
  *   003_storage.sql ends with `create policy ... on storage.objects`. On hosted
@@ -131,12 +132,20 @@ const PACKAGE = [
   ['20261115000012', '014_definer_actor_identity.sql', 'definer_actor_identity'],
   // Draft 010: asserts the base privilege posture after the repair and API layer.
   ['20261115000013', '010_privilege_verification.sql', 'privilege_verification'],
-  // Draft 013 last: asserts the API surface itself did not drift.
+  // Draft 013: asserts the API surface itself did not drift.
   ['20261115000014', '013_api_surface_verification.sql', 'api_surface_verification'],
+  // Post-verification repair, applied AFTER every assertion. Draft 015 restores the
+  // aggregate-claims fallback in the actor helper: 012's body was the LOCAL
+  // auth.uid() definition, but hosted PostgREST sets only request.jwt.claims, so
+  // the helper returned NULL and every repointed definer raised 42501. This is the
+  // one sanctioned exception to "the verification runs last": it changes a
+  // function BODY only, and the signature, owner and ACL that 013/014 assert are
+  // identical before and after (015 asserts that itself).
+  ['20261115000015', '015_actor_identity_claim_fallback.sql', 'actor_identity_claim_fallback'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);

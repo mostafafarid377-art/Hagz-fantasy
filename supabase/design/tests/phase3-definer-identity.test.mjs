@@ -48,8 +48,24 @@ await db.exec(`
 
   create schema auth authorization supabase_admin;
   create table auth.users(id uuid primary key);
+  -- The HOSTED definition, verbatim (supabase/auth migration
+  -- 20211202183645_update_auth_uid.up.sql). The local/CLI auth.uid() is the shorter
+  -- per-claim-only form; using that one here would hide the exact production bug
+  -- this suite exists to catch, because the two disagree whenever PostgREST has set
+  -- only the aggregate request.jwt.claims GUC.
+  --
+  -- The outer nullif is load-bearing: per-claim '' + aggregate sub -> NULL.
   create function auth.uid() returns uuid language sql stable
-    as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+    as $$
+      select
+        nullif(
+          coalesce(
+            current_setting('request.jwt.claim.sub', true),
+            (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+          ),
+          ''
+        )::uuid
+    $$;
   alter function auth.uid() owner to supabase_auth_admin;
   grant usage on schema auth to authenticated, anon, deployer;   -- NO grant option
   grant execute on function auth.uid() to authenticated, anon, deployer;
@@ -152,68 +168,131 @@ test('the actor helper is reachable by the definer only, never by a client role'
 
 // --- Caller identity: the helper must agree with auth.uid() in EVERY state ---
 //
-// The security requirement is not "usually the same". It is that there is no
-// input state in which the helper yields an identity that auth.uid() does not,
-// because that would authenticate a caller the platform considers anonymous.
-// An earlier revision fell back to `request.jwt.claims ->> 'sub'` and failed
-// exactly that test; these cases are the regression guard for it.
+// The security requirement is not "usually the same". It is that there is no input
+// state in which the helper yields an identity that auth.uid() does not, because
+// that would authenticate a caller the platform considers anonymous -- and,
+// symmetrically, no state in which the platform considers a caller authenticated
+// while the helper says NULL, because that is a live outage. It was: executable
+// 012 shipped the per-claim-only helper, hosted PostgREST populates only the
+// aggregate request.jwt.claims GUC, every repointed definer saw NULL, and
+// ff_bootstrap answered 42501 "authentication required" to signed-in users.
+//
+// Two distinctions this suite must keep apart, because conflating them is what hid
+// the bug:
+//   * UNSET vs EMPTY. current_setting(guc, true) returns NULL only when the
+//     setting was never touched. `set_config(guc, '', false)` stores an EMPTY
+//     STRING, which is present, so coalesce() stops there and the outer nullif()
+//     yields NULL. PostgREST never sets request.jwt.claim.sub at all, which is the
+//     UNSET case -- the one the runtime takes, and the one that needs a fresh
+//     backend to reproduce.
+//   * hosted vs local/CLI auth.uid(). Only the local one is per-claim-only. The
+//     harness above now models the hosted definition.
+//
+// HISTORY of these assertions: they previously required the helper to return NULL
+// whenever the per-claim GUC was empty or absent, and required the body never to
+// read request.jwt.claims. Both encoded the wrong platform. They are inverted here
+// against the real definition in supabase/auth migration
+// 20211202183645_update_auth_uid.up.sql.
 
 const A = '11111111-2222-3333-4444-555555555555';
 const B = '99999999-9999-9999-9999-999999999999';
 
+/** Set both claim GUCs. `undefined` leaves the current value alone. */
 const setClaims = async (sub, claims) => {
-  await db.query(`select set_config('request.jwt.claim.sub', $1, false)`, [sub]);
-  await db.query(`select set_config('request.jwt.claims', $1, false)`, [claims]);
+  if (sub !== undefined) await db.query(`select set_config('request.jwt.claim.sub', $1, false)`, [sub]);
+  if (claims !== undefined) await db.query(`select set_config('request.jwt.claims', $1, false)`, [claims]);
 };
 const both = async () => (await q(`select auth.uid() as a, ff_private.current_actor_id() as h`)).rows[0];
 
-test('identity: individual claim present -> both return it', async () => {
-  await setClaims(A, JSON.stringify({ sub: A }));
-  assert.deepEqual(await both(), { a: A, h: A });
-});
+/**
+ * The four states reachable in THIS session, where both settings are always
+ * present once touched. Each is asserted as strict parity with auth.uid().
+ */
+const CLAIM_STATES = [
+  { name: 'both settings empty (no token)',        sub: '', claims: '',                              expect: null },
+  { name: 'both settings present and identical',   sub: A,  claims: JSON.stringify({ sub: A, role: 'authenticated' }), expect: A },
+  { name: 'per-claim empty, aggregate has a sub',  sub: '', claims: JSON.stringify({ sub: A }),      expect: null },
+  { name: 'conflicting per-claim and aggregate',   sub: A,  claims: JSON.stringify({ sub: B }),      expect: A },
+  { name: 'aggregate present without a sub key',   sub: '', claims: JSON.stringify({ role: 'anon' }), expect: null },
+];
 
-test('identity: individual claim empty -> both return null (no aggregate rescue)', async () => {
-  // THE case the removed fallback got wrong: auth.uid() says unauthenticated.
+for (const state of CLAIM_STATES) {
+  test(`identity parity: ${state.name}`, async () => {
+    await setClaims(state.sub, state.claims);
+    const r = await both();
+    assert.deepEqual({ a: r.a, h: r.h }, { a: state.expect, h: state.expect },
+      `helper and auth.uid() must both resolve to ${state.expect}`);
+  });
+}
+
+test('identity: per-claim empty must NOT be rescued by the aggregate claims (widening guard)', async () => {
+  // The binding security property behind state 3. The inner-nullif variant
+  //   coalesce(nullif(sub,''), nullif(claims,'')::jsonb ->> 'sub')
+  // returns A here, authenticating a caller the platform treats as anonymous.
+  // The outer-nullif form -- what 015 installs -- returns NULL. This is the one
+  // behavioural difference between the two circulating definitions, so it is
+  // asserted on its own rather than buried in the table.
   await setClaims('', JSON.stringify({ sub: A }));
   const r = await both();
-  assert.equal(r.a, null);
-  assert.equal(r.h, null, 'helper must not synthesise an identity from request.jwt.claims');
+  assert.equal(r.a, null, 'hosted auth.uid() refuses to fall back past an empty setting');
+  assert.equal(r.h, null, 'the helper must refuse too; otherwise it widens access relative to the platform');
 });
 
-test('identity: individual claim absent -> both return null', async () => {
-  // Simulate "never set" via a fresh session-level reset to empty, which is the
-  // state auth.uid() treats identically (current_setting(..., true) -> NULL/'').
-  await db.query(`reset request.jwt.claim.sub`);
-  await db.query(`select set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: A })]);
-  const r = await both();
-  assert.equal(r.a, null);
-  assert.equal(r.h, null, 'helper must not derive an identity when the sub GUC is unset');
+test('identity: per-claim GUC genuinely unset -> both fall back to the aggregate claims', async () => {
+  // THE production state, and the only way to exercise the coalesce branch.
+  // PostgREST sets request.jwt.claims only, so request.jwt.claim.sub is NULL, not
+  // ''. That cannot be produced in this session (RESET and set_config(...,'') both
+  // leave a present empty string), so it is reproduced in a fresh backend that
+  // loads the deployed helper definition verbatim via pg_get_functiondef.
+  const helperDef = await scalar(
+    `select pg_get_functiondef('ff_private.current_actor_id()'::regprocedure)`);
+
+  const fresh = await PGlite.create();
+  try {
+    // The hosted auth.uid(), same expression as the harness above.
+    await fresh.exec(`
+      create schema if not exists auth;
+      create function auth.uid() returns uuid language sql stable as $$
+        select
+          nullif(
+            coalesce(
+              current_setting('request.jwt.claim.sub', true),
+              (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+            ),
+            ''
+          )::uuid
+      $$;
+      create schema if not exists ff_private;
+    `);
+    // Exactly the function the migrations deployed -- not a hand-copied restatement.
+    await fresh.exec(helperDef);
+
+    // PostgREST request: only the aggregate claim set; per-claim never touched.
+    await fresh.query(`select set_config('request.jwt.claims', $1, false)`,
+      [JSON.stringify({ sub: A, role: 'authenticated' })]);
+
+    const r = (await fresh.query(
+      `select auth.uid() as a, ff_private.current_actor_id() as h`)).rows[0];
+    assert.equal(r.a, A, 'hosted auth.uid() resolves the user from the aggregate claims');
+    assert.equal(r.h, A,
+      'the helper must resolve the same identity from the aggregate claims (executable 015); '
+      + 'returning NULL here is the 42501 regression');
+  } finally {
+    await fresh.close();
+  }
 });
 
-test('identity: aggregate claim present only -> both return null', async () => {
-  await setClaims('', JSON.stringify({ sub: A, role: 'authenticated' }));
-  const r = await both();
-  assert.equal(r.a, null);
-  assert.equal(r.h, null);
-});
-
-test('identity: conflicting individual and aggregate claims -> both prefer the individual', async () => {
-  await setClaims(A, JSON.stringify({ sub: B }));
-  const r = await both();
-  assert.deepEqual(r, { a: A, h: A }, 'the per-claim GUC is authoritative; the aggregate must not override it');
-});
-
-test('identity: malformed UUID -> both raise rather than returning an identity', async () => {
+test('identity: malformed UUID in the per-claim setting raises, it does not fall back', async () => {
   await setClaims('not-a-uuid', '');
   await assert.rejects(q(`select auth.uid()`), (e) => e.code === '22P02');
   await assert.rejects(q(`select ff_private.current_actor_id()`), (e) => e.code === '22P02');
 });
 
-test('identity: malformed JSON in aggregate claims is irrelevant to both', async () => {
-  // The helper must never parse request.jwt.claims. auth.uid() ignores it too,
-  // so neither may fail or succeed because of its contents.
+test('identity: malformed aggregate JSON only matters when it is actually parsed', async () => {
+  // Per-claim present: the aggregate JSON is never consulted, so garbage is inert.
   await setClaims(A, '{not json');
   assert.deepEqual(await both(), { a: A, h: A });
+  // Per-claim empty: still inert -- the outer nullif rejects '' before any parse.
   await setClaims('', '{not json');
   assert.deepEqual(await both(), { a: null, h: null });
 });
@@ -221,20 +300,45 @@ test('identity: malformed JSON in aggregate claims is irrelevant to both', async
 test('identity: unauthenticated request -> null, never a bogus identity', async () => {
   await setClaims('', '');
   assert.deepEqual(await both(), { a: null, h: null });
-  // An empty JSON object is equally unauthenticated.
   await setClaims('', '{}');
+  assert.deepEqual(await both(), { a: null, h: null });
+  await setClaims('', JSON.stringify({ role: 'anon' }));
   assert.deepEqual(await both(), { a: null, h: null });
 });
 
-test('the helper body reads exactly one source and has no aggregate-claims fallback', async () => {
-  // Structural guarantee, so a future edit cannot quietly reintroduce a second
-  // identity source that the behavioural tests above might not enumerate.
+test('the helper body reads both claim sources, per-claim first (structural)', async () => {
+  // Structural guarantee, so a future edit cannot quietly drop the aggregate
+  // fallback again. Behavioural tests alone did not catch it, because the harness
+  // modelled the wrong platform.
   const src = await scalar(`select prosrc from pg_proc
     where oid = 'ff_private.current_actor_id()'::regprocedure`);
-  assert.match(src, /request\.jwt\.claim\.sub/);
-  assert.doesNotMatch(src, /request\.jwt\.claims/, 'must not read the aggregate claims GUC');
-  assert.doesNotMatch(src, /->>|jsonb?/i, 'must not parse JSON');
-  assert.doesNotMatch(src, /coalesce/i, 'no second branch may supply an identity');
+  assert.match(src, /request\.jwt\.claim\.sub/, 'must read the per-claim setting');
+  assert.match(src, /request\.jwt\.claims/, 'must fall back to the aggregate claims GUC');
+  assert.match(src, /coalesce/i, 'the fallback must be a coalesce');
+  assert.ok(src.indexOf('request.jwt.claim.sub') < src.indexOf('request.jwt.claims'),
+    'the per-claim setting must be consulted before the aggregate claims, so it always shadows them');
+});
+
+test('the helper expression is identical in semantics to the hosted auth.uid()', async () => {
+  // Strongest form of the parity claim: normalise both bodies and require an exact
+  // match. Guards against reintroducing the shorter local/CLI definition.
+  const helper = await scalar(`select prosrc from pg_proc
+    where oid = 'ff_private.current_actor_id()'::regprocedure`);
+  const hosted = await scalar(`select prosrc from pg_proc where oid = 'auth.uid()'::regprocedure`);
+  const norm = (t) => t.replace(/--[^\n]*/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  assert.equal(norm(helper), norm(hosted),
+    'the helper must be the hosted auth.uid() expression, not the per-claim-only local one');
+});
+
+test('the helper keeps SECURITY INVOKER, ff_migration_owner ownership and a pinned search_path', async () => {
+  const r = (await q(`
+    select p.prosecdef, pg_get_userbyid(p.proowner) as owner, p.proconfig
+    from pg_proc p where p.oid = 'ff_private.current_actor_id()'::regprocedure`)).rows[0];
+  assert.equal(r.prosecdef, false, 'must stay SECURITY INVOKER');
+  assert.equal(r.owner, 'ff_migration_owner', 'ownership must not change in the body repair');
+  assert.ok((r.proconfig || []).some((c) => c.startsWith('search_path=')
+      && /pg_catalog/.test(c) && /pg_temp/.test(c)),
+    `search_path must stay pinned to pg_catalog, pg_temp; got ${JSON.stringify(r.proconfig)}`);
 });
 
 test('the deployed API is callable by authenticated with no USAGE on auth', async () => {

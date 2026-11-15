@@ -1,0 +1,239 @@
+-- PHASE 3 FORWARD-ONLY REPAIR (second). Authored as design draft 015, promoted to
+-- the executable migration 20261115000015_actor_identity_claim_fallback.
+--
+-- WHY THIS EXISTS
+--   Executable 012 (draft 014) removed the aggregate-claims fallback from
+--   ff_private.current_actor_id() on the stated grounds that the helper should be
+--   "byte-for-byte the body of Supabase's auth.uid()". That premise was wrong.
+--
+--   The body 012 installed is
+--       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
+--   which is the LOCAL/CLI definition of auth.uid() (supabase/postgres,
+--   migrations/db/init-scripts/00000000000001-auth-schema.sql line 94). It is NOT
+--   the definition GoTrue installs on hosted projects.
+--
+--   The hosted definition is supabase/auth migration
+--   20211202183645_update_auth_uid.up.sql, verbatim:
+--       select
+--         nullif(
+--           coalesce(
+--             current_setting('request.jwt.claim.sub', true),
+--             (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+--           ),
+--           ''
+--         )::uuid
+--
+--   The difference is not cosmetic, because PostgREST does not populate the
+--   per-claim GUC at all. PostgREST's PreQuery.hs builds its session setup as
+--       claimsSql = [setConfigWithConstantName ("request.jwt.claims", ...)]
+--   (src/library/PostgREST/Query/PreQuery.hs, "gucHeaders/claimsSql"), i.e. it
+--   sets ONLY the aggregate `request.jwt.claims` JSON. The legacy per-claim GUCs
+--   were dropped in PostgREST 10.
+--
+--   Consequence on the hosted project, which is the live failure this migration
+--   repairs: every request carries ONLY request.jwt.claims, so the 012 helper
+--   returned NULL while the platform's own auth.uid() returned the user. All 46
+--   definers repointed by 012 therefore treated a signed-in caller as anonymous
+--   and raised
+--       42501: authentication required
+--   from public.ff_bootstrap — reproduced end to end in a 14-migration replay.
+--
+-- WHAT THIS MIGRATION DOES
+--   Exactly one thing: restores the helper body to the hosted definition above,
+--   character for character, so the helper and the platform's auth.uid() agree in
+--   every request state. The definers already call the helper (012 repointed them)
+--   and need no change here.
+--
+-- WHY NOT THE ALTERNATIVE, INNER-NULLIF FORM
+--   A widely-quoted variant moves the nullif inside:
+--       coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+--                (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))
+--   That is NOT the hosted definition and it diverges in one state. With the
+--   per-claim GUC present but empty, plus aggregate claims carrying a sub:
+--       hosted  : nullif(coalesce('', sub), '')  -> nullif('', '')  -> NULL
+--       inner   : coalesce(nullif('', ''), sub)  -> nullif(NULL… -> sub) -> UUID
+--   i.e. the inner form authenticates a caller the platform considers anonymous —
+--   precisely the widening that 012's security review was trying to prevent. The
+--   outer-nullif form is used here for that reason, not merely for textual
+--   fidelity. Measured in supabase/design/tests/phase3-definer-identity.test.mjs.
+--
+--   The per-claim GUC still wins whenever it is set: coalesce() takes its first
+--   non-NULL argument, so a per-claim value always shadows the aggregate claims.
+--   This migration therefore cannot authenticate anyone the platform would not.
+--
+-- SECURITY POSTURE: UNCHANGED, AND ASSERTED BELOW
+--   * Function stays SECURITY INVOKER (the default). It must be callable BY
+--     ff_migration_owner after re-owning, and it grants no new authority.
+--   * Owner stays ff_migration_owner. `create or replace` preserves ownership, but
+--     it is re-asserted because a helper owned by a superuser-ish role would be an
+--     escalation surface.
+--   * search_path stays pinned to `pg_catalog, pg_temp`; the body resolves only
+--     pg_catalog functions and operators, so a pinned path cannot be hijacked.
+--   * Grants are re-issued explicitly rather than inherited from the replace:
+--     EXECUTE to ff_migration_owner only, revoked from PUBLIC/anon/authenticated.
+--   * NO change to any RLS policy, to any other function, to any table grant, or
+--     to the ff_migration_owner role. Nothing in the `auth` schema is read,
+--     granted, altered or re-owned — the whole point is that reading these GUCs
+--     needs no privilege on `auth`.
+--
+-- ORDERING
+--   Executable 015, applied last. 001-014 are already applied on the hosted
+--   project, so this is the only forward path: 012 cannot be edited in place
+--   without rewriting remote migration history, which is forbidden.
+--
+--   Running after executable 014 (API surface verification) is safe because that
+--   migration asserts the *surface* — function signatures, ownership and EXECUTE
+--   grants — and none of those change here. The helper's signature, owner and ACL
+--   are identical before and after; only its body changes. The guard treats 015 as
+--   an explicitly allowlisted post-verification repair for this reason.
+--
+--   History note: executable 012 and draft 014 are left byte-for-byte unchanged.
+--   Their header comment describes the superseded premise; this file is the
+--   correction of record, and editing the earlier artefacts instead would both
+--   rewrite an applied migration and invalidate its pinned review hash.
+
+-- 1. Replace the body. Runs AS ff_migration_owner because a non-superuser cannot
+--    CREATE OR REPLACE a function it does not own, and 011 already owns every
+--    ff_private function to that role. `create or replace` preserves the existing
+--    owner, so no re-owning is required (contrast 012, which created the function
+--    and therefore had to hand it over explicitly).
+set role ff_migration_owner;
+
+create or replace function ff_private.current_actor_id() returns uuid
+language sql
+stable
+set search_path = pg_catalog, pg_temp
+as $$
+  -- The hosted Supabase definition of auth.uid(), verbatim
+  -- (supabase/auth 20211202183645_update_auth_uid.up.sql).
+  --
+  -- The outer nullif is load-bearing: with the per-claim GUC present but empty
+  -- and the aggregate claims carrying a sub, this correctly yields NULL, matching
+  -- auth.uid(). Moving the nullif inside the coalesce would rescue that state and
+  -- authenticate a caller the platform considers anonymous.
+  --
+  -- coalesce() returns its first non-NULL argument, so a per-claim value always
+  -- shadows the aggregate claims. That ordering is the platform's, and it is
+  -- asserted behaviourally in supabase/design/tests/phase3-definer-identity.test.mjs.
+  select
+    nullif(
+      coalesce(
+        current_setting('request.jwt.claim.sub', true),
+        (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+      ),
+      ''
+    )::uuid
+$$;
+
+-- 2. Re-assert the ACL deterministically instead of inheriting it. CREATE OR
+--    REPLACE keeps the existing ACL, but stating it makes the intended posture
+--    readable at the point of change and makes a future drift obvious.
+revoke all on function ff_private.current_actor_id() from public, anon, authenticated;
+grant execute on function ff_private.current_actor_id() to ff_migration_owner;
+
+reset role;
+
+-- 3. Post-conditions. Any failure aborts the migration rather than leaving the
+--    project in a half-repaired state (which is exactly the state it is fixing).
+do $$
+declare
+  v_src        text;
+  v_owner      text;
+  v_secdef     boolean;
+  v_config     text[];
+  v_definers   int;
+  v_wrong_owner int;
+begin
+  select p.prosrc, pg_get_userbyid(p.proowner), p.prosecdef, p.proconfig
+    into v_src, v_owner, v_secdef, v_config
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'ff_private' and p.proname = 'current_actor_id'
+    and p.pronargs = 0;
+
+  if v_src is null then
+    raise exception 'actor identity claim fallback: ff_private.current_actor_id() is missing'
+      using errcode = '42883';
+  end if;
+
+  -- (a) The body must read BOTH claim sources, per-claim first. If the aggregate
+  --     fallback silently disappears again, this is what catches it on the hosted
+  --     project instead of at the first sign-in.
+  if position('request.jwt.claim.sub' in v_src) = 0 then
+    raise exception 'actor identity claim fallback: helper no longer reads the per-claim JWT setting'
+      using errcode = '42501';
+  end if;
+  if position('request.jwt.claims' in v_src) = 0 then
+    raise exception 'actor identity claim fallback: helper does not read request.jwt.claims; hosted PostgREST populates only that GUC, so every call would be unauthenticated'
+      using errcode = '42501';
+  end if;
+  if position('coalesce' in lower(v_src)) = 0 then
+    raise exception 'actor identity claim fallback: helper has no coalesce; the per-claim setting could not fall back to the aggregate claims'
+      using errcode = '42501';
+  end if;
+
+  -- (b) SECURITY INVOKER only. A definer-owned SECURITY DEFINER helper would let
+  --     it be executed as the BYPASSRLS owner by anyone who can reach it.
+  if v_secdef then
+    raise exception 'actor identity claim fallback: helper must remain SECURITY INVOKER'
+      using errcode = '42501';
+  end if;
+
+  -- (c) Ownership must stay with the definer, matching every other ff_private
+  --     function and the invariant executable 013 asserts exhaustively.
+  if v_owner <> 'ff_migration_owner' then
+    raise exception 'actor identity claim fallback: helper is owned by %, expected ff_migration_owner', v_owner
+      using errcode = '42501';
+  end if;
+
+  -- (d) search_path must stay pinned, so no caller can prepend a schema that
+  --     shadows current_setting or the jsonb operators. Matched on the setting's
+  --     key/value parts rather than on exact spelling, because PostgreSQL
+  --     re-renders proconfig (quoting an entry only when it needs to).
+  if v_config is null
+     or not exists (
+       select 1 from unnest(v_config) c
+       where split_part(c, '=', 1) = 'search_path'
+         and position('pg_catalog' in split_part(c, '=', 2)) > 0
+         and position('pg_temp'   in split_part(c, '=', 2)) > 0
+     ) then
+    raise exception 'actor identity claim fallback: helper search_path is not pinned to pg_catalog, pg_temp (found %)',
+      coalesce(array_to_string(v_config, ', '), '<none>') using errcode = '42501';
+  end if;
+
+  -- (e) The definer must still be able to call it, and no client role may reach
+  --     it. Both directions matter: the first is the live outage, the second is an
+  --     escalation.
+  if not has_function_privilege('ff_migration_owner', 'ff_private.current_actor_id()', 'execute') then
+    raise exception 'actor identity claim fallback: ff_migration_owner cannot execute the helper; the definer would have no usable caller identity'
+      using errcode = '42501';
+  end if;
+  if has_function_privilege('anon', 'ff_private.current_actor_id()', 'execute')
+     or has_function_privilege('authenticated', 'ff_private.current_actor_id()', 'execute') then
+    raise exception 'actor identity claim fallback: helper must not be executable by a client role'
+      using errcode = '42501';
+  end if;
+
+  -- (f) The definers must still be pointed at the helper, all of them, still owned
+  --     by the definer. This migration changes a body, not a call graph; if the
+  --     call graph drifted, the repair would not take effect.
+  select count(*) into v_definers
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'ff_private') and p.prosecdef
+    and position('ff_private.current_actor_id()' in p.prosrc) > 0;
+  if v_definers = 0 then
+    raise exception 'actor identity claim fallback: no SECURITY DEFINER function calls the helper; executable 012 did not apply'
+      using errcode = '42501';
+  end if;
+
+  select count(*) into v_wrong_owner
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname in ('public', 'ff_private') and p.prosecdef
+    and position('ff_private.current_actor_id()' in p.prosrc) > 0
+    and pg_get_userbyid(p.proowner) <> 'ff_migration_owner';
+  if v_wrong_owner <> 0 then
+    raise exception 'actor identity claim fallback: % helper caller(s) are not owned by ff_migration_owner', v_wrong_owner
+      using errcode = '42501';
+  end if;
+
+  raise notice 'actor identity claim fallback: helper restored to hosted auth.uid() semantics; % definer(s) call it', v_definers;
+end $$;

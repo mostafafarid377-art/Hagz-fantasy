@@ -28,6 +28,10 @@ const PKG = [
   '20261115000010_definer_ownership_transfer', '20261115000011_application_api',
   '20261115000012_definer_actor_identity',
   '20261115000013_privilege_verification', '20261115000014_api_surface_verification',
+  // Forward-only repair #2: restores the aggregate-claims fallback in the actor
+  // helper. Hosted PostgREST sets only request.jwt.claims, so without it every
+  // definer sees an anonymous caller.
+  '20261115000015_actor_identity_claim_fallback',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);

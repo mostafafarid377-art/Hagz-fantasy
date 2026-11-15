@@ -214,7 +214,7 @@ node scripts/promote-migrations.mjs
 npm run check:migrations
 ```
 
-**Expected:** `Wrote 14 migration(s)` then `30 check(s) passed, 0 failed.`
+**Expected:** `Wrote 15 migration(s)` then `32 check(s) passed, 0 failed.`
 
 The promotion script is deterministic — it re-reads the frozen design sources and
 regenerates the executable package. Running it twice produces identical bytes. If
@@ -227,7 +227,7 @@ audited.
 > green. `.gitattributes` now pins SQL to LF, and the guard normalises regardless,
 > so `git status` and the guard agree on either platform.
 
-Optionally verify by hash. This is the manifest hash of all 14 files concatenated
+Optionally verify by hash. This is the manifest hash of all 15 files concatenated
 in sorted order:
 
 ```powershell
@@ -235,7 +235,7 @@ Get-ChildItem .\supabase\migrations\*.sql | Sort-Object Name |
   Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" }
 ```
 
-**Expected file set — exactly these 14, in this order.** If any other `.sql` file
+**Expected file set — exactly these 15, in this order.** If any other `.sql` file
 appears in `supabase/migrations/`, the guard would have failed above.
 
 | # | File | What it does |
@@ -254,10 +254,20 @@ appears in `supabase/migrations/`, the guard would have failed above.
 | 12 | `20261115000012_definer_actor_identity.sql` | forward-only repair: definers stop resolving `auth.uid()` (hosted Supabase cannot grant `USAGE` on `auth`) |
 | 13 | `20261115000013_privilege_verification.sql` | **asserts** privileges; aborts push if wrong |
 | 14 | `20261115000014_api_surface_verification.sql` | **asserts** the API surface; aborts push if wrong |
+| 15 | `20261115000015_actor_identity_claim_fallback.sql` | forward-only repair #2: helper reads `request.jwt.claims` too (hosted PostgREST sets only that GUC) |
 
 > **Note the order.** 10 runs before 13, 11 before 13/14, and 12 before 13, because
 > 13 and 14 are assertions about what 10, 11 and 12 did. Filenames sort correctly by timestamp, so
 > the CLI applies them in this order without extra flags.
+>
+> **15 runs after the assertions, deliberately.** It changes a function *body* only —
+> the signature, owner, `SECURITY INVOKER` marker, pinned `search_path` and EXECUTE
+> ACL that 13 and 14 certify are identical before and after. It also *has* to run
+> last: 13 and 14 are already recorded as applied on the hosted project, so a file
+> sorting before them would never be picked up. The guard enforces this with an
+> explicit allowlist (`POST_VERIFICATION_REPAIRS` in
+> `scripts/check-migration-package.mjs`) plus a check that such a migration contains
+> no surface DDL.
 
 ---
 
@@ -269,11 +279,11 @@ supabase db push --dry-run --remote
 ```
 
 **Expected for `migration list`:** a `LOCAL │ REMOTE │ TIME` table where the
-`REMOTE` column is **empty** for all 14 rows (nothing applied yet), and every one
+`REMOTE` column is **empty** for all 15 rows (nothing applied yet), and every one
 of the 14 timestamps appears in `LOCAL`.
 
 **Expected for `db push --dry-run`:** a `Target: project … (<ref>) · production`
-line, then a list of the 14 migrations above, in that order.
+line, then a list of the 15 migrations above, in that order.
 
 **Stop and report if:**
 - the dry run lists **fewer than 14** (some are already recorded as applied),
@@ -447,7 +457,7 @@ You do **not** need to reset, re-run 1–9, or mark anything applied.
 | 3 | `supabase db push --dry-run --remote` | lists 10–13 only |
 | 4 | `supabase db push --remote` | 10-12 now apply; aborts at 13 with the **storage** error — see 6a, that is expected |
 | 5 | §7 (storage owner step), then `supabase db push --remote` again | 13 and 14 apply |
-| 6 | `supabase migration list --remote` | all 14 applied |
+| 6 | `supabase migration list --remote` | all 15 applied |
 
 > Do **not** use `supabase migration repair`, and do **not** edit an already-applied
 > migration (1–9 cannot be changed remotely; the CLI would refuse to re-run them).
@@ -522,7 +532,7 @@ select pg_has_role('postgres', 'ff_migration_owner', 'set')                     
 
 Both must be `true`. Then continue at 6b.3 step 2.
 
-### 6b.7 Optional tidy-up, after all 14 are applied
+### 6b.7 Optional tidy-up, after all 15 are applied
 
 The membership is not required at runtime — only `ALTER OWNER` needed it. You may
 remove it once the deployment is verified, and it is safe to do so:
@@ -592,29 +602,68 @@ verification aborting was the correct outcome.
 as ordinary GUCs. Reading those GUCs needs **no privilege on the `auth` schema**.
 Migration 12:
 
-1. creates `ff_private.current_actor_id()`, whose body is *textually the same
-   expression* as `auth.uid()`:
-   `nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`.
-   It has no second branch and reads no other input, so there is no request state
-   in which it reports an identity that `auth.uid()` does not;
-2. repoints the **46** definer functions that called `auth.uid()` at it, rewriting
-   only that token via `pg_get_functiondef`;
-3. keeps every other property identical, and asserts it.
+1. creates `ff_private.current_actor_id()` and points the **46** definer functions
+   that called `auth.uid()` at it, rewriting only that token via
+   `pg_get_functiondef`;
+2. keeps every other property identical, and asserts it.
 
 This is Supabase's own recommended remedy for this exact situation ("Option 2:
 read the user ID from the JWT claims").
 
-> **On "identical semantics".** An earlier revision of the helper also fell back
-> to `request.jwt.claims ->> 'sub'`. That was **not** equivalent and has been
-> removed in security review: when the `sub` GUC is empty or absent but the
-> aggregate claims carry a `sub`, `auth.uid()` returns `NULL` while the fallback
-> returned that UUID — i.e. it could authenticate a caller the platform considers
-> anonymous. The helper is now a single expression with a single input.
-> `supabase/design/tests/phase3-definer-identity.test.mjs` covers all claim
-> states (present, empty, absent, aggregate-only, conflicting, malformed UUID,
-> malformed JSON, unauthenticated) and asserts the helper and `auth.uid()` agree
-> in every one, including a structural check that the body never reads the
-> aggregate claims GUC.
+> **Correction — 6c.3 originally described the wrong helper body. Read this
+> before touching the helper.** Migration 12 installed
+> `nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`, on the
+> stated grounds that this is "byte-for-byte the body of Supabase's `auth.uid()`".
+> That is the **local/CLI** definition (`supabase/postgres`,
+> `migrations/db/init-scripts/00000000000001-auth-schema.sql`). The definition
+> GoTrue installs on **hosted** projects is
+> (`supabase/auth`, `migrations/20211202183645_update_auth_uid.up.sql`):
+>
+> ```sql
+> select
+>   nullif(
+>     coalesce(
+>       current_setting('request.jwt.claim.sub', true),
+>       (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+>     ),
+>     ''
+>   )::uuid
+> ```
+>
+> The difference is not cosmetic. PostgREST does not populate the per-claim GUC at
+> all — `src/library/PostgREST/Query/PreQuery.hs` sets **only**
+> `request.jwt.claims` — so on the hosted project the migration-12 helper returned
+> `NULL` while the platform's own `auth.uid()` returned the user. Every rewritten
+> definer then treated a signed-in caller as anonymous and `public.ff_bootstrap`
+> answered `42501 authentication required` to users who had logged in
+> successfully. That was a live outage, not a theoretical divergence.
+>
+> **Migration 15 repairs it** (draft
+> `supabase/design/migrations/015_actor_identity_claim_fallback.sql`) by restoring
+> the hosted expression above, character for character. Nothing else changes: same
+> signature, same `ff_migration_owner` owner, same `SECURITY INVOKER`, same pinned
+> `search_path`, same EXECUTE grants, no RLS or table-privilege change. Migration 12
+> and draft 14 are left byte-for-byte unchanged, because 12 is applied and its
+> review hash is history.
+>
+> **Why the `nullif` sits OUTSIDE the `coalesce`.** A widely-quoted variant nests
+> it:
+> `coalesce(nullif(sub,''), nullif(claims,'')::jsonb ->> 'sub')`. That version
+> **widens access**: with the per-claim setting present but empty and the aggregate
+> claims carrying a `sub`, it returns that UUID, while hosted `auth.uid()` returns
+> `NULL` — it authenticates a caller the platform considers anonymous. The
+> outer-`nullif` form returns `NULL` in that state and is the one deployed. Test
+> `identity: per-claim empty must NOT be rescued by the aggregate claims` asserts
+> exactly this, and `supabase/design/tests/phase3-definer-identity.test.mjs` covers
+> all five request states plus the genuinely-unset case (which needs a fresh
+> backend, because `RESET` leaves `''`, not `NULL`).
+>
+> **A note on how this was missed.** The identity tests used to model the *local*
+> `auth.uid()`, so they "proved" the per-claim-only helper agreed with the platform
+> — while production disagreed on every request. The harness now models the hosted
+> definition (`tests/setup.sql`, `phase2b5-recovery.test.mjs`,
+> `phase3-definer-identity.test.mjs`), and one test loads the *deployed* helper
+> definition into a fresh backend and calls it the way PostgREST does.
 
 **Not chosen, and why:**
 
@@ -632,7 +681,12 @@ role, which always could).
 
 ### 6c.4 Recovery from the aborted push
 
-Migrations **001–011 are applied**; **012–014 are pending**. Nothing to repair.
+> **Current state (2026-11-15):** this section is historical. Migrations **001–014
+> are applied** on the hosted project; only **015 is pending**. Deploy it with
+> §6c.6.
+>
+> The original state, for reference: migrations **001–011 were applied** and
+> **012–014 pending**. Nothing to repair.
 
 | Step | Command / action | Expected |
 |---|---|---|
@@ -640,7 +694,7 @@ Migrations **001–011 are applied**; **012–014 are pending**. Nothing to repa
 | 2 | `supabase db push --dry-run --remote` | lists **three** pending migrations: 012 definer actor identity, 013 privilege verification, 014 API surface verification |
 | 3 | `supabase db push --remote` | 012 (the repair) applies; 013 then aborts on the **storage** assertion — see 6a, expected |
 | 4 | §7 storage owner step, then `supabase db push --remote` again | 013 and 014 apply |
-| 5 | `supabase migration list --remote` | **all 14 applied** |
+| 5 | `supabase migration list --remote` | **all 15 applied** |
 
 > **On the renumbering.** The repair had to run *before* the assertion that
 > polices it, and the CLI applies migrations in version order. The two old
@@ -674,19 +728,88 @@ where n.nspname in ('public','ff_private') and p.prosecdef;
 
 select rolcanlogin, rolinherit, rolsuper, rolbypassrls
 from pg_roles where rolname = 'ff_migration_owner';
+
+-- 5. The helper body must read BOTH claim GUCs (executable 015). Without the
+--    aggregate fallback it returns NULL on every hosted request, and all 46
+--    definers answer 42501 "authentication required".
+select proname,
+       position('request.jwt.claim.sub' in prosrc) > 0 as reads_per_claim,
+       position('request.jwt.claims'     in prosrc) > 0 as reads_aggregate
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'ff_private' and p.proname = 'current_actor_id';
 ```
 
 Expected: `definers_using_auth_uid = 0`; `definer_can_call = true`,
 `client_can_call = false`; `usage_on_auth = false` (and that is fine — it is no
-longer used); `definers = owned_by_definer`; and the role still NOLOGIN with
-`rolbypassrls = true`.
+longer used); `definers = owned_by_definer`; the role still NOLOGIN with
+`rolbypassrls = true`; and **both** `reads_per_claim` and `reads_aggregate` are
+`true`. Before executable 015, `reads_aggregate` is `false` — that is the outage.
 
 **The real proof is a live API call.** From the app (or the dashboard with a
-signed-in session), call any RPC. Before the repair it returned
-`42501 permission denied for schema auth`; after it, it returns data or a
-domain-level refusal. That single call is worth more than every row above.
+signed-in session), call any RPC. It failed twice for two different reasons:
+first `42501 permission denied for schema auth` (before migration 12), then
+`42501 authentication required` from `ff_bootstrap` (after 12, before 15). With
+15 applied it returns data or a domain-level refusal. That single call is worth more than every row above.
 
 ---
+
+
+### 6c.6 Deploying migration 15 (the actor-identity claim fallback)
+
+This is the only migration not yet applied. It is forward-only: **do not** use
+`supabase migration repair`, do **not** edit migration 12, and do **not** reset
+remote history.
+
+```powershell
+# 1. Confirm 001-014 are recorded and 015 is the only pending migration.
+supabase migration list --remote
+
+# 2. Dry run. Expect exactly one pending file: 20261115000015_actor_identity_claim_fallback.
+supabase db push --dry-run --remote
+
+# 3. Apply it.
+supabase db push --remote
+```
+
+**Expected output of step 3:** the CLI applies
+`20261115000015_actor_identity_claim_fallback.sql`, then prints
+
+```
+NOTICE:  actor identity claim fallback: helper restored to hosted auth.uid() semantics; 46 definer(s) call it
+Finished supabase db push.
+```
+
+**Expected output of step 1 afterwards:** all **15** rows have a `REMOTE` value.
+
+If migration 15 aborts, **stop**. Every post-condition in it is a deliberate
+precondition failure, and the message names which one:
+
+| Message fragment | Meaning | Action |
+|---|---|---|
+| `helper does not read request.jwt.claims` | the body did not take | do not retry blindly; re-run step 2 and report |
+| `helper is owned by …` | ownership drifted | investigate 011/012 state with §6c.5 before anything else |
+| `helper search_path is not pinned` | the `search_path` clause was lost | same |
+| `helper must not be executable by a client role` | ACL widened | treat as a security incident, do not proceed |
+| `no SECURITY DEFINER function calls the helper` | 012 did not apply | `supabase migration list --remote` |
+| `% helper caller(s) are not owned by ff_migration_owner` | ownership drifted | investigate before proceeding |
+
+**Then verify the live fix (read-only):**
+
+```sql
+select proname, prosrc
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'ff_private' and p.proname = 'current_actor_id';
+```
+
+`prosrc` must contain **both** `request.jwt.claim.sub` **and** `request.jwt.claims`.
+Then sign in as a real user and confirm `public.ff_bootstrap` returns data instead
+of `42501 authentication required`.
+
+> If you must roll back — you should not need to — the previous body is
+> `select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`. Doing
+> so restores the outage. There is no destructive fallback here, and none is
+> offered.
+
 
 ## 7. Storage: the owner-authorised step — **⚠️ REMOTE WRITE, NEEDS YOUR APPROVAL**
 
