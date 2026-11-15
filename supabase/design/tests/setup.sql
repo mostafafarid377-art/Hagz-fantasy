@@ -3,7 +3,10 @@ create role anon nologin;
 create role authenticated nologin;
 create schema auth;
 create table auth.users(id uuid primary key);
-create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
+-- The HOSTED auth.uid() definition (supabase/auth 20211202183645_update_auth_uid.up.sql),
+-- not the shorter local/CLI one. Hosted PostgREST sets only request.jwt.claims, so a
+-- per-claim-only stand-in makes the harness disagree with production.
+create function auth.uid() returns uuid language sql stable as $$ select nullif(coalesce(current_setting('request.jwt.claim.sub',true),(current_setting('request.jwt.claims',true)::jsonb->>'sub')),'')::uuid $$;
 grant usage on schema auth to authenticated, anon;
 grant execute on function auth.uid() to authenticated, anon;
 create schema storage;

@@ -271,6 +271,9 @@ test('010 still passes after the transfer, and still rejects a BYPASSRLS-less ow
   // grant USAGE on the auth schema, so such a function 42501s at runtime. Apply
   // the repair first, which is what the deployment does.
   await load('../migrations/014_definer_actor_identity.sql');
+  // 015 is the forward-only repair restoring the hosted auth.uid() semantics;
+  // the deployment applies it, so the suite must too.
+  await load('../migrations/015_actor_identity_claim_fallback.sql');
   await load('../migrations/010_privilege_verification.sql');
   await db.exec('alter role ff_migration_owner nobypassrls');
   await assert.rejects(load('../migrations/010_privilege_verification.sql'),

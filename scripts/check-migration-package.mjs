@@ -52,6 +52,10 @@ const DESIGN_MIGRATIONS = {
   '011_definer_ownership_transfer.sql': '1c1ede4d303699a52ce33d58bc09a2506db3dc60fb43ccdce7e83b7bb6ac8ba6',
   // Phase 3 forward-only repair (promoted to executable 012).
   '014_definer_actor_identity.sql': 'a9cdca655aea2ca57810aba0426b4c8a58df8e216d338ae4b91184f70c26e915',
+  // Phase 3 forward-only repair #2 (promoted to executable 015). Supersedes the
+  // helper BODY installed by 014; 014 itself stays byte-for-byte unchanged because
+  // it is an applied migration and its review hash is history.
+  '015_actor_identity_claim_fallback.sql': '491ab3157c285ebdec7d33a3d18af8194cb815e413021c9ae89d486c23413605',
 };
 
 /** Sources authored for publication in Phase 3, under supabase/design/api/. */
@@ -79,7 +83,23 @@ const PACKAGE = [
   ['20261115000012_definer_actor_identity.sql', 'design/migrations/014_definer_actor_identity.sql'],
   ['20261115000013_privilege_verification.sql', 'design/migrations/010_privilege_verification.sql'],
   ['20261115000014_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
+  ['20261115000015_actor_identity_claim_fallback.sql', 'design/migrations/015_actor_identity_claim_fallback.sql'],
 ];
+
+/**
+ * Repairs sanctioned to run AFTER the final verification.
+ *
+ * The rule "the API surface verification runs last" exists so that nothing can
+ * mutate the surface after it has been certified. A function-BODY repair is not a
+ * surface change, and 015 cannot be ordered before 014 anyway: 014 and 013 are
+ * already recorded as applied on the hosted project, so any file that sorts before
+ * them would never be picked up by `db push`.
+ *
+ * Allowlisting is deliberately explicit and permanent rather than a "skip the last
+ * file" rule: a new post-verification migration must be added here by review, and
+ * 015 asserts its own invariants (signature, owner, ACL, search_path) at runtime.
+ */
+const POST_VERIFICATION_REPAIRS = ['20261115000015_actor_identity_claim_fallback.sql'];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
 const MANUAL_ONLY = ['003b_storage_policy_owner_step.sql', 'verify_storage_setup.sql'];
@@ -212,8 +232,33 @@ if (!(await exists(execDir))) {
 
   if (!(api < apiVerify)) fail('migration order', 'the API layer must be created before its surface is verified');
   else ok('API layer precedes API verification', `#${api + 1} before #${apiVerify + 1}`);
-  if (apiVerify !== expectedNames.length - 1) fail('migration order', 'the API surface verification must run last');
-  else ok('API surface verification runs last', `#${apiVerify + 1}`);
+  const trailing = expectedNames.slice(apiVerify + 1);
+  const unlisted = trailing.filter((n) => !POST_VERIFICATION_REPAIRS.includes(n));
+  if (unlisted.length) {
+    fail('migration order',
+      `the API surface verification must run last, except for reviewed post-verification repairs; unlisted: ${unlisted.join(', ')}`);
+  } else {
+    ok('API surface verification precedes only sanctioned repairs',
+      trailing.length ? `#${apiVerify + 1}, then ${trailing.join(', ')}` : `#${apiVerify + 1} (last)`);
+  }
+
+  // A post-verification repair must not touch the surface it runs after. That is a
+  // source-level property: 015 may only replace a function body.
+  for (const repair of POST_VERIFICATION_REPAIRS) {
+    const i = expectedNames.indexOf(repair);
+    if (i < 0) { fail('post-verification repair list', `${repair} is not in the package`); continue; }
+    if (i <= apiVerify) { fail('post-verification repair list', `${repair} is not after the API verification`); continue; }
+    const [, source] = PACKAGE.find(([n]) => n === repair);
+    const body = await readFile(path.join(root, 'supabase', source), 'utf8');
+    const stripped = body.replace(/--[^\n]*/g, '');
+    const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
+    if (surfaceDdl) {
+      fail(`post-verification repair ${repair}`,
+        `must not change the certified surface, found "${surfaceDdl[0].trim().split(/\s+/).slice(0, 3).join(' ')}"`);
+    } else {
+      ok(`post-verification repair ${repair} is body-only`, path.basename(source));
+    }
+  }
 
   // --- 4. Executables are exactly what the promoter generates --------------
   // Re-derive each file's expected content from its source and compare.
