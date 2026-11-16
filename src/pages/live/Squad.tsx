@@ -142,9 +142,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   return (
     <>
       <PageTitle eyebrow="YOUR TEAM" title={builder ? 'Squad Builder' : 'My Squad'}
-        description={`${ordered.length}/15 · ${formatMoney(remaining)} ${t('remaining')}`}>
-        <Link className="button button-outline" to="/transfers">{t('Make a transfer')}</Link>
-      </PageTitle>
+        description={`${ordered.length}/15 · ${formatMoney(remaining)} ${t('remaining')}`} />
 
       {live.error && <ErrorNote message={live.error} />}
       {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
@@ -158,6 +156,13 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             <div className="stat-foot">{t('Position limit')}</div>
           </div>
         ))}
+      </div>
+
+      {/* Actions below the squad, not in the header: opening this screen should
+          show the team first. */}
+      <div className="squad-actions">
+        <Link className="button button-outline" to="/transfers">{t('Make a transfer')}</Link>
+        <Link className="button" to="/market"><UserPlus size={15} /> {t('Add players')}</Link>
       </div>
 
       {ordered.length === 0 ? (

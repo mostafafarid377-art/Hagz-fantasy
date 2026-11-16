@@ -10,10 +10,12 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trash2, Trophy, UsersRound, X,
 } from 'lucide-react';
-import { Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
+import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
+import { Pitch } from '../Dashboard';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { useAuth } from '../../hooks/useAuth';
+import type { Formation } from '../../types';
 
 export function Loading({ label = 'Loading…' }: { label?: string }) {
   const { t } = useTranslation();
@@ -117,62 +119,185 @@ export function LiveDashboard() {
 
   const nextMatch = [...live.matches].sort((a, b) => +new Date(a.starts_at) - +new Date(b.starts_at))[0];
   const squadSize = live.squad?.players.length ?? 0;
+  const budgetLeft = (live.squad?.budget ?? 0) - (live.squad?.spent ?? 0);
 
+  // The table, ranked by fantasy points only - the same rule as /standings.
+  const ranked = [...live.standings].sort((a, b) =>
+    (b.fantasy_points ?? 0) - (a.fantasy_points ?? 0) || a.team_name.localeCompare(b.team_name));
+  const myTeamId = live.squad?.team?.id;
+
+  // The pitch takes the demo Pitch component, which is typed against the demo
+  // Player shape. Map the live squad onto it, using league_player_id as the id so
+  // click handlers keep referring to the market row.
+  const pitchPlayers = (live.squad?.players ?? []).slice(0, 11).map((p) => ({
+    id: p.league_player_id, leagueId: live.leagueId ?? '', name: p.name,
+    position: p.position, price: p.price, rating: p.rating,
+    attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 },
+    image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5',
+  }));
+
+  /**
+   * The home page mirrors the demo dashboard's structure deliberately.
+   *
+   * Live and demo previously looked like different products: live was four bare
+   * stat cards plus a text panel, demo was a welcome row, a hero, a pitch and a
+   * two-column dashboard. A user switching between the two should see the same
+   * page with different data, so the layout, section order and headings now match.
+   *
+   * Where live has no data for a panel, the panel is omitted or says so - it is
+   * never filled with placeholder figures.
+   */
   return (
     <>
       <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
-      {live.isLeader && (
-        // A leader who cannot reach their own tools assumes they were never granted
-        // the role. Make the server-derived role visible instead of leaving it to a
-        // menu that may be empty because of a failed read.
-        <p className="notice">{t('You are the league leader of this league.')}</p>
-      )}
-      <PageTitle eyebrow="YOUR DASHBOARD" title="Welcome back"
-        description={`${live.league.name} · ${t(live.league.role === 'leader' ? 'League Leader' : 'Fantasy manager')}`} />
 
+      <div className="welcome-row">
+        <div>
+          <div className="eyebrow"><span className="live-dot" /> {t('YOUR LEAGUE')} <span className="slash">/</span> {live.league.name}</div>
+          <h1>{t('Welcome back')}, {(auth.profile?.display_name ?? '').split(' ')[0] || t('there')} <span>✌</span></h1>
+          <p>{t('Ready for another gameweek?')}</p>
+        </div>
+        <Link to="/league" className="button button-outline desktop-only">
+          <Shield size={16} /> {t('View league')} <ArrowUpRight size={15} />
+        </Link>
+      </div>
+
+      <p className="notice dashboard-notice">
+        {t('Live data from your league. Only approved results count towards points.')}
+      </p>
+
+      <div className="overview-heading">
+        <SectionHead eyebrow="YOUR LEAGUE" title="Team overview" />
+        <span>{t('Your season at a glance')}</span>
+      </div>
       <div className="stat-grid">
         <div className="stat-card">
-          <div className="stat-top"><span>{t('SQUAD')}</span><span className="stat-icon"><UsersRound size={15} /></span></div>
+          <div className="stat-top"><span>{t('SQUAD')}</span><div className="stat-icon"><UsersRound size={17} /></div></div>
           <div className="stat-number">{squadSize}<small>/15</small></div>
           <div className="stat-foot">{t(live.squad?.status === 'confirmed' ? 'Lineup confirmed' : 'Draft lineup')}</div>
+          <div className="stat-number-bg">01</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('BUDGET LEFT')}</span><span className="stat-icon"><Shield size={15} /></span></div>
-          <div className="stat-number">{formatMoney((live.squad?.budget ?? 0) - (live.squad?.spent ?? 0))}</div>
+          <div className="stat-top"><span>{t('BUDGET LEFT')}</span><div className="stat-icon"><Shield size={17} /></div></div>
+          <div className="stat-number">{formatMoney(budgetLeft)}</div>
           <div className="stat-foot">{t('Spent')} {formatMoney(live.squad?.spent ?? 0)}</div>
+          <div className="stat-number-bg">02</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('MEMBERS')}</span><span className="stat-icon"><Trophy size={15} /></span></div>
+          <div className="stat-top"><span>{t('MEMBERS')}</span><div className="stat-icon"><Trophy size={17} /></div></div>
           <div className="stat-number">{live.members.length}</div>
           <div className="stat-foot">{live.league.market_open ? t('Market open') : t('Market closed')}</div>
+          <div className="stat-number-bg">03</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('MATCHES')}</span><span className="stat-icon"><CalendarDays size={15} /></span></div>
+          <div className="stat-top"><span>{t('MATCHES')}</span><div className="stat-icon"><CalendarDays size={17} /></div></div>
           <div className="stat-number">{live.matches.length}</div>
-          <div className="stat-foot">
-            {nextMatch ? `${nextMatch.team_a} vs ${nextMatch.team_b}` : t('No fixtures yet')}
-          </div>
+          <div className="stat-foot">{nextMatch ? `${nextMatch.team_a} vs ${nextMatch.team_b}` : t('No fixtures yet')}</div>
+          <div className="stat-number-bg">04</div>
         </div>
       </div>
 
-      <div className="two-column section-spacer">
-        <div className="panel">
-          <SectionHead eyebrow="LIVE DATA" title="Your league" />
-          <p className="section-description">
-            {t('This league is stored in the database and shared with its members.')}
-          </p>
-          <div className="settings-row"><span>{t('Signed in as')}</span><strong>{auth.profile?.display_name}</strong></div>
-          <div className="settings-row"><span>{t('Your role')}</span><Badge kind="lime">{t(live.isLeader ? 'League Leader' : 'Manager')}</Badge></div>
-          {live.isOrganizer && <div className="settings-row"><span>{t('Match Organizer')}</span><Badge kind="lime">{t('Yes')}</Badge></div>}
-          <div className="settings-row"><span>{t('Invite code')}</span><InviteCode /></div>
+      <div className="dashboard-grid">
+        <section className="panel squad-panel">
+          <SectionHead eyebrow="YOUR TEAM" title="Your starting XI" action="Edit squad" to="/squad-builder" />
+          <div className="panel-subline">
+            <span>{t(live.squad?.status === 'confirmed' ? 'Confirmed lineup' : 'Draft lineup')}</span>
+            <span className="formation">{t('FORMATION')} <strong>{live.squad?.formation ?? '—'}</strong></span>
+          </div>
+          {pitchPlayers.length > 0 ? (
+            <Pitch players={pitchPlayers} formation={(live.squad?.formation ?? '4-3-3') as Formation} />
+          ) : (
+            <Empty title="Your squad is empty"
+              description="Add players from the league market to build your 15."
+              to="/market" action="Player Market" />
+          )}
+          <div className="pitch-footer">
+            <span><i /> {t('Starting XI')}</span>
+            <Link to="/squad">{t('View squad')} <ArrowUpRight size={15} /></Link>
+          </div>
+        </section>
+
+        <div className="dashboard-right">
+          <section className="panel fixture-panel">
+            <SectionHead eyebrow="UP NEXT" title="Next fixture" action="View fixtures" to="/fixtures" />
+            {nextMatch ? (
+              <div className="match-card">
+                <div className="match-tag"><span className="live-dot" /> {new Date(nextMatch.starts_at).toLocaleString()}</div>
+                <div className="match-teams">
+                  <div>
+                    <div className="team-crest crest-lime"><Shield size={26} /></div>
+                    <strong>{nextMatch.team_a}</strong>
+                  </div>
+                  <div className="versus">VS</div>
+                  <div>
+                    <div className="team-crest crest-orange"><Shield size={26} /></div>
+                    <strong>{nextMatch.team_b}</strong>
+                  </div>
+                </div>
+                {nextMatch.venue && (
+                  <div className="match-info"><span>{nextMatch.venue}</span></div>
+                )}
+              </div>
+            ) : (
+              <Empty title="No fixtures yet" description="Fixtures appear here once a match is scheduled."
+                to="/fixtures" action="View fixtures" />
+            )}
+          </section>
+
+          <section className="panel standings-panel">
+            <SectionHead eyebrow="THE TABLE" title="League standings" action="View all" to="/standings" />
+            {ranked.length > 0 ? (
+              <div className="mini-table">
+                <div className="mini-head"><span>#</span><span>{t('TEAM')}</span><span>{t('Fantasy pts')}</span></div>
+                {ranked.slice(0, 4).map((row, i) => (
+                  <div className={`mini-row ${row.team_id === myTeamId ? 'my-row' : ''}`} key={row.team_id}>
+                    <span className="rank">{String(i + 1).padStart(2, '0')}</span>
+                    <div className="mini-team">
+                      <div className={`mini-crest c${i}`}><Shield size={14} /></div>
+                      <strong>{row.team_name}</strong>
+                    </div>
+                    <strong>{row.fantasy_points}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty title="No standings yet"
+                description="Standings are calculated from approved results." to="/standings" action="View all" />
+            )}
+          </section>
         </div>
-        <div className="panel">
+      </div>
+
+      <div className="lower-grid">
+        <section className="panel performers">
+          <SectionHead eyebrow="IN FORM" title="Top performers" action="See all" to="/market" />
+          <p className="section-description">{t('The players making moves')}</p>
+          {live.players.length > 0 ? (
+            <div className="performer-list">
+              {[...live.players].slice(0, 3).map((p, i) => (
+                <Link to={`/players/${p.id}`} className="performer" key={p.id}>
+                  <span className="rank">0{i + 1}</span>
+                  <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                  <div><strong>{p.name}</strong><small>{p.position} · {formatMoney(p.price)}</small></div>
+                  <div className="performer-points"><strong>{p.rating}</strong><small>{t('OVR')}</small></div>
+                  <ArrowUpRight size={16} />
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <Empty title="No players yet" description="The league market is empty."
+              to="/market" action="Player Market" />
+          )}
+        </section>
+
+        <section className="panel">
           <SectionHead eyebrow="QUICK LINKS" title="Quick actions" />
           {[['Player Market', '/market'], ['Suggest Player', '/suggest'], ['My Squad', '/squad'],
             ['Standings', '/standings'], ['Match Center', '/match-center']].map(([label, to]) => (
             <Link className="settings-row" to={to} key={to}>{t(label)}<ArrowUpRight size={16} /></Link>
           ))}
-        </div>
+          <div className="settings-row"><span>{t('Invite code')}</span><InviteCode /></div>
+        </section>
       </div>
     </>
   );
