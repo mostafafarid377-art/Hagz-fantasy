@@ -130,3 +130,35 @@ test('forged object path and cross-user cancellation are denied',async()=>{
   await assert.rejects(()=>rpc(a,'ff_image_cancel',league.id,'suggestion',s.id,path),e=>e.code==='42501');
   await rpc(b,'ff_image_cancel',league.id,'suggestion',s.id,path);
 });
+
+test('approval committing first prevents a concurrent author image removal',async()=>{
+  const {s,path}=await initialImage('Approval first removal');
+  await sql(a,'begin');
+  const approved=await approval(s);
+  // Query starts on a second connection while approval holds the suggestion lock.
+  // Attach a handler immediately so a fast failure is never an unhandled rejection.
+  const removal=rpc(b,'ff_image_set',league.id,'suggestion',s.id,path,null).then(
+    value=>({value}), error=>({error}));
+  const pid=(await sql(admin,"select pid from pg_stat_activity where application_name='hagz-race-author' and datname=current_database()")).rows[0].pid;
+  await assertBlocked(pid); await sql(a,'commit');
+  const result=await removal;
+  assert.ok(result.error,'removal after committed approval must be rejected');
+  assert.ok(['23514','42501'].includes(result.error.code), `unexpected error ${result.error.code}`);
+  const profile=(await rpc(a,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id);
+  assert.equal(profile.image_path,path,'approved player retains the image selected by this unversioned request');
+});
+
+test('FINDING: a stale null-path removal clears a newer URL in a separate session',async()=>{
+  const p=await rpc(a,'ff_market_upsert_player',league.id,'Concurrent URL','MID',1000000,75);
+  await actor(b,alice);
+  await sql(a,'begin');
+  await rpc(a,'ff_market_upsert_player',league.id,'Concurrent URL','MID',1000000,75,true,null,'https://example.test/new.png',p.player_id);
+  const stale=rpc(b,'ff_image_set',league.id,'player',p.player_id,null,null).then(value=>({value}),error=>({error}));
+  const pid=(await sql(admin,"select pid from pg_stat_activity where application_name='hagz-race-author' and datname=current_database()")).rows[0].pid;
+  await assertBlocked(pid); await sql(a,'commit');
+  const result=await stale;
+  assert.ok(!result.error,'current API accepts stale null-path request');
+  const after=(await rpc(a,'ff_market_players',league.id)).find(row=>row.id===p.id);
+  assert.equal(after.image_url,null,'current draft loses the concurrently updated URL');
+  await actor(b,bob);
+});
