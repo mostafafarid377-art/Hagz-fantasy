@@ -35,6 +35,7 @@ const PKG = [
   '20261115000012_definer_actor_identity',
   '20261115000013_privilege_verification', '20261115000014_api_surface_verification',
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
+  '20261115000017_squad_captaincy',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
