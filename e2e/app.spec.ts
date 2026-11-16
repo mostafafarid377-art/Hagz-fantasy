@@ -6,6 +6,9 @@ test('application loads and desktop navigation works',async({page})=>{
   await expect(page.getByRole('heading',{name:/Welcome back/})).toBeVisible();
   // The Market tab was removed from navigation, so the market is reached by URL.
   // The dashboard's hero button now goes to the squad tab ("Build your squad").
+  // This spec runs against the DEV server, which uses BrowserRouter, so the path
+  // form is correct here. The GitHub Pages build uses HashRouter instead - see
+  // e2e-pages/pages.spec.ts, which navigates with the hash.
   await page.goto('/market');
   await expect(page.getByRole('heading',{name:'Player Market'})).toBeVisible();
   await page.goto('/squad-builder');await expect(page.getByRole('heading',{name:'Squad Builder'})).toBeVisible();

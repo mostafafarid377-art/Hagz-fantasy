@@ -17,7 +17,9 @@ test('GitHub Pages build loads under a project subdirectory and survives a route
   await expect(page.getByRole('heading', { name: /Welcome back/ })).toBeVisible();
   // The Market tab was removed from navigation, so the market is reached by URL.
   // The dashboard's hero button now goes to the squad tab ("Build your squad").
-  await page.goto('/market');
+  // The app uses HashRouter, and a bare '/market' also drops the GitHub Pages base
+  // path, so navigate with the hash and a relative base.
+  await page.goto('./#/market');
   await expect(page.getByRole('heading', { name: 'Player Market' })).toBeVisible();
   expect(errors).toEqual([]);
 });
