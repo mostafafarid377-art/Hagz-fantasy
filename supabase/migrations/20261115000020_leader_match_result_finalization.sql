@@ -16,6 +16,33 @@ begin;
 alter table public.official_match_results
   add column finalized_by uuid,
   add column finalized_at timestamptz;
+
+-- The migration backfills finalizer metadata from the immutable approval event.
+-- 005's existing BEFORE UPDATE trigger would otherwise interpret this metadata
+-- update as an attempt to supersede an official result and require a live Leader.
+-- Temporarily replace that trigger body with a narrowly scoped bootstrap guard:
+-- it accepts only an update from NULL metadata to the exact actor/time on the
+-- linked approval, with every other official-result field unchanged. The normal
+-- runtime guard is restored below before this migration commits.
+create or replace function ff_private.guard_official_result() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+  if tg_op='UPDATE'
+     and old.finalized_by is null and old.finalized_at is null
+     and new.finalized_by is not null and new.finalized_at is not null
+     and (new.id,new.league_id,new.match_id,new.revision_id,new.approval_id,new.is_current,new.decision,new.kind)
+       is not distinct from
+         (old.id,old.league_id,old.match_id,old.revision_id,old.approval_id,old.is_current,old.decision,old.kind)
+     and exists(select 1 from public.match_approvals a
+       where a.league_id=new.league_id and a.match_id=new.match_id and a.id=new.approval_id
+         and a.revision_id=new.revision_id and a.kind='result' and a.decision='approved'
+         and a.reviewed_by=new.finalized_by and a.reviewed_at=new.finalized_at) then
+    return new;
+  end if;
+  raise exception 'official-result migration backfill may only copy its linked approval actor and timestamp'
+    using errcode='23514';
+end $$;
+
 update public.official_match_results o
    set finalized_by = a.reviewed_by,
        finalized_at = a.reviewed_at
