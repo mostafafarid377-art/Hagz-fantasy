@@ -1,27 +1,31 @@
-# Live player images: audit and remaining work
+# Live player images: security design and deployment review
 
-This is an **incomplete, read-only** step toward live uploads. No write policies are enabled by this change.
+## Status
 
-## Current behavior
+This branch implements an authenticated client upload flow and a forward-only SQL design. **It has not been applied or verified on hosted Supabase.** Keep the PR in draft until the SQL, Storage permissions and hosted behavior are reviewed and tested. Applied migrations 001–015 are unchanged. The Demo continues to use IndexedDB and `local-image:` references.
 
-- Demo `ImagePicker` validates and decodes files, stores blobs in IndexedDB and stores `local-image:` references in local demo state. This is intentionally browser-local.
-- Live management's image picker currently validates a file for preview only. `uploadPlayerImage` is deliberately blocked. Live suggestions can submit an HTTP(S) image URL; an image file is not saved.
-- `player_profiles` and `player_suggestions` each have `image_path` and `image_url`. The market, squad and suggestion RPCs return the path. Approval copies the suggestion path into the new profile. Existing live views used only `image_url`, so paths were never rendered.
-- The `player-images` bucket is private, limits objects to 5 MiB and permits JPEG, PNG and WebP MIME types. `ff_private.can_read_image(name)` allows reads only for a matching league-scoped path referenced by a profile or an authorized suggestion. Paths in the existing contract are `<league UUID>/players/<object UUID>.<ext>`.
-- A signed URL is needed for a private object. The read change in this branch obtains a short-lived signed URL using the authenticated client and refreshes it, while missing or forbidden objects fall back to initials.
+## Existing configuration and cause
 
-## Why writes remain disabled
+The private `player-images` bucket is configured for a 5 MiB limit and JPEG, PNG and WebP declared MIME types. The existing SELECT policy calls `ff_private.can_read_image` and allows league members to read referenced published player images, while suggestion images are private to their submitter and the leader. `player_profiles` and `player_suggestions` have `image_path` and `image_url`; approval copies the suggestion path to the profile. Previously live upload was explicitly blocked and views ignored `image_path`.
 
-Enabling a policy on a league prefix alone would let a manager upload arbitrary player images rather than **only their own pending suggestion**, and deleting by prefix could remove an object still referenced by a player or another suggestion. The existing suggestion creation RPC accepts an `image_path` before a suggestion ID exists, and the existing player upsert uses `coalesce`, so it cannot clear an image. A safe change must coordinate object ownership, target records and lifecycle, not merely add a broad Storage policy.
+## New flow and policy model
 
-The hosted `storage.objects` table may be owned by `supabase_storage_admin` rather than the migration role. The project already uses an owner-authorized manual step for its read policy; any write policy must account for that split and be tested against actual hosted permissions before deployment. Do not overwrite the existing read policy or assume the migration role can create policies on the hosted table.
+- A leader first creates or edits a player; a manager first creates a suggestion. `ff_image_reserve` checks the caller against the actual target and creates a one-hour, random, immutable league-scoped path in a private reservation table. It permits a leader for a published player or the author of their own pending suggestion; other users cannot write reservations directly.
+- The authenticated client validates size, declared MIME, magic bytes and browser decoding, previews the image, and uses the authenticated Storage endpoint with upload progress. Storage still enforces its bucket size and declared MIME restrictions. `ff_image_set` uses a compare-and-swap, confirms the object exists, checks reservation and authorization, and updates the record path (or explicitly clears it). Triggers prevent the old APIs from attaching arbitrary paths. Approval carries the suggestion image forward.
+- `018_player_image_uploads.sql` adds the private reservations, target checks, reference guards and RPCs. The original read policy remains unchanged. Replacements use new object names; there is **no UPDATE policy** for changing existing object bytes.
+- The owner-assisted step adds INSERT for an active reservation; a separate SELECT for the reservation owner to see their own staged/retired object; and DELETE only for the owner's retired, unreferenced object. No anonymous write is granted. Staged objects cannot be deleted by clients, to avoid racing an attachment. Objects created by other actors, previously referenced by suggestions, or abandoned during failure may remain as orphans and require a separately reviewed operator cleanup. Deleting a record image unlinks it immediately; physical cleanup is best effort.
+- Private paths are resolved through authenticated signed URLs, refreshed before expiration. Missing/unreadable objects use the existing initials fallback. Signed URLs are bearer links until they expire, including after membership changes; do not share them.
 
-## Required implementation and review
+## Storage owner-assisted step
 
-1. Add forward-only, reviewed authorization for a narrowly scoped, authenticated upload reservation tied to a specific existing player or own pending suggestion. Leaders manage published player images; managers only their own pending suggestions. Reject foreign-league IDs, forged paths, anonymous callers, and stale/approved suggestions. Control the legacy RPC image-path parameters too, so callers cannot bypass the new checks.
-2. Add narrowly scoped Storage INSERT and safe orphan cleanup/DELETE rules. Enforce exact UUID path shape, bucket, role, reservation ownership and state; never allow deletion while an object is referenced. Account for Storage RLS SELECT requirements, races, cancellation and failure cleanup. Keep the current read policy intact. MIME metadata is client-controlled; 5 MiB and declared MIME restrictions alone do not establish byte-level safety. Review server-side file validation before enabling writes.
-3. Provide a record update operation that explicitly replaces **or clears** `image_path` and `image_url`, with transactional authorization and concurrency checks. Ensure approval preserves the intended image and orphaned files are handled without deleting shared references.
-4. Upload using the authenticated client with preview, real progress reporting, retry/error states and explicit cleanup. Resolve private paths on all surfaces, including after refresh and on another device. Test expiration and denied/missing fallbacks.
-5. Exercise role/league isolation, crafted paths, unauthorized attachment/deletion, concurrent replacement, approved suggestion behavior, failure cleanup and the real Storage owner/role setup. Browser tests must cover mobile and Demo regression.
+`supabase/migrations/20261115000018_player_image_uploads.sql` is the forward-only application migration. Do not run it remotely before review. On a hosted project, `storage.objects` is generally owned by a Supabase-managed role; a normal migration role may not be able to create policies on it. **An authorized operator, acting as the actual owner of `storage.objects` and able to create functions in `storage`, must review and execute the exact SQL in `supabase/design/storage/018_image_write_owner_step.sql` after migration 018.** It leaves the original read policy intact and creates a restricted owner-executed existence helper plus the three named policies. It fails closed if RLS is disabled or the executor does not have the required ownership. It does not alter table ownership or grant a service role to the client.
 
-No hosted Supabase changes or hosted upload tests were performed. This audit and the signed-read work do not satisfy the requested upload definition of done.
+Before enabling, verify there are no existing broad or conflicting INSERT, UPDATE or DELETE policies: PostgreSQL permissive policies combine with OR. Verify the bucket is private, has the 5 MiB and MIME settings above, and verify the owner/helper grants on the actual project. The helper grants only EXECUTE to the non-login `ff_migration_owner`. No hosted SQL was run.
+
+## Security limitations requiring review
+
+Bucket MIME enforcement checks the declared content type, which is controlled by the uploader. Client-side signature and decoding validation can be bypassed by a direct HTTP caller. The design therefore does **not** prove server-side byte-level validation or malware safety. Review a trusted server-side image validation/re-encoding pipeline before considering untrusted uploads fully safe. The Storage service's actual RLS behavior, auth headers, object metadata, owner permissions, signing, concurrent replacement/removal and expired session behavior require hosted verification; local PGlite and mocked browser/service tests do not establish these properties.
+
+## Required hosted verification (not performed)
+
+After approval, an authorized operator should deploy the forward-only migration and owner step using the established Supabase process, then test leader and manager success, other-manager and cross-league denial, anonymous denial, forged paths, stale writes, references surviving refresh and a second device, private signed reads, failed uploads, replacements/removal, and the project's actual bucket restrictions. No remote upload, migration, SQL execution, merge or deployment was performed by this work.

@@ -1,0 +1,90 @@
+// Local PGlite authorization tests only; this is not a hosted Storage test.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { PGlite } from '@electric-sql/pglite';
+const db = await PGlite.create();
+const load = async f => db.exec(await readFile(new URL(f, import.meta.url), 'utf8'));
+await load('setup.sql');
+for (const file of ['01_schema','02_security','03_storage','04_integrity_workflows','05_concurrency_hardening','06_revision_lineage','07_correction_attempts','08_result_fork_idempotency','09_ownership_and_grants','10_definer_ownership_transfer','11_application_api','12_definer_actor_identity','13_privilege_verification','14_api_surface_verification','15_actor_identity_claim_fallback','16_league_archive','18_player_image_uploads']) await load(`../../migrations/202611150000${file}.sql`);
+await load('../storage/018_image_write_owner_step.sql');
+await db.exec('grant insert,delete on storage.objects to authenticated');
+after(() => db.close());
+const q = (sql, args=[]) => db.query(sql,args);
+const alice='00000000-0000-0000-0000-000000000001', bob='00000000-0000-0000-0000-000000000002', mallory='00000000-0000-0000-0000-000000000003';
+await q('insert into auth.users(id) values ($1),($2),($3)',[alice,bob,mallory]);
+async function as(user, cb) {
+  await q("select set_config('request.jwt.claim.sub',$1,false)",[user]);
+  await db.exec('set role authenticated');
+  try { return await cb(); } finally { await db.exec('reset role'); }
+}
+const rpc=(user,name,...args)=>as(user,async()=> (await q(`select public.${name}(${args.map((_,i)=>`$${i+1}`).join(',')}) v`,args)).rows[0].v);
+const insert=(user,path)=>as(user,()=>q("insert into storage.objects(bucket_id,name) values ('player-images',$1)",[path]));
+const remove=(user,path)=>as(user,()=>q("delete from storage.objects where bucket_id='player-images' and name=$1 returning name",[path]));
+const denied=async (fn,code='42501')=>assert.rejects(fn,e=>e.code===code);
+for(const [user,name] of [[alice,'Alice'],[bob,'Bob'],[mallory,'Mallory']]) await rpc(user,'ff_bootstrap',name);
+const league=await rpc(alice,'ff_league_create','Test League',100000000);
+await rpc(bob,'ff_league_join',league.code);
+const other=await rpc(mallory,'ff_league_create','Other League',100000000);
+const player=await rpc(alice,'ff_market_upsert_player',league.id,'Image Player','MID',1000000,75);
+const suggestion=await rpc(bob,'ff_suggestion_submit',league.id,'Suggested Player','MID');
+
+test('leaders reserve and upload for their player; outsiders and managers cannot',async()=>{
+  await denied(()=>rpc(bob,'ff_image_reserve',league.id,'player',player.player_id,'png'));
+  await denied(()=>rpc(mallory,'ff_image_reserve',league.id,'player',player.player_id,'png'));
+  await denied(()=>rpc(alice,'ff_image_reserve',other.id,'player',player.player_id,'png'));
+  await denied(()=>rpc(alice,'ff_image_reserve',league.id,'player',player.player_id,'../png'),'23514');
+  const {path}=await rpc(alice,'ff_image_reserve',league.id,'player',player.player_id,'png');
+  await denied(()=>insert(bob,path));
+  await denied(()=>insert(mallory,path));
+  await denied(()=>insert(alice,path.replace('/players/','/../players/')));
+  await insert(alice,path);
+  assert.equal((await remove(alice,path)).rowCount,0,'a staged upload cannot race with attachment');
+  await rpc(alice,'ff_image_set',league.id,'player',player.player_id,null,path);
+  assert.equal((await rpc(alice,'ff_market_players',league.id))[0].image_path,path);
+  assert.equal((await as(bob,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,1);
+  assert.equal((await as(mallory,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0);
+  assert.equal((await remove(alice,path)).rowCount,0,'referenced image cannot be deleted');
+  assert.equal((await remove(bob,path)).rowCount,0);
+  globalThis.playerPath=path;
+});
+
+test('replacement and removal prevent unauthorized users and stale writes',async()=>{
+  const old=globalThis.playerPath;
+  await denied(()=>rpc(bob,'ff_image_set',league.id,'player',player.player_id,old,null));
+  await denied(()=>rpc(mallory,'ff_image_set',league.id,'player',player.player_id,old,null));
+  const next=(await rpc(alice,'ff_image_reserve',league.id,'player',player.player_id,'webp')).path;
+  await denied(()=>rpc(alice,'ff_image_set',league.id,'player',player.player_id,old,next),'23514');
+  await insert(alice,next);
+  await denied(()=>rpc(alice,'ff_image_set',league.id,'player',player.player_id,'wrong',next),'40001');
+  await rpc(alice,'ff_image_set',league.id,'player',player.player_id,old,next);
+  assert.equal((await remove(alice,old)).rowCount,1,'unreferenced own old object can be cleaned up');
+  await rpc(alice,'ff_image_set',league.id,'player',player.player_id,next,null);
+  assert.equal((await remove(alice,next)).rowCount,1);
+});
+
+test('manager uploads only to own pending suggestion; approval preserves it',async()=>{
+  await denied(()=>rpc(alice,'ff_image_reserve',league.id,'suggestion',suggestion.id,'jpg'));
+  await denied(()=>rpc(mallory,'ff_image_reserve',league.id,'suggestion',suggestion.id,'jpg'));
+  const path=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',suggestion.id,'jpg')).path;
+  await insert(bob,path);
+  await rpc(bob,'ff_image_set',league.id,'suggestion',suggestion.id,null,path);
+  await denied(()=>rpc(alice,'ff_image_set',league.id,'suggestion',suggestion.id,path,null));
+  await denied(()=>rpc(bob,'ff_suggestion_submit',league.id,'Bad Path','MID',null,path));
+  const approved=await rpc(alice,'ff_suggestion_review',league.id,suggestion.id,'approved',null,1000000,75,null);
+  assert.ok(approved.league_player_id);
+  assert.equal((await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id).image_path,path);
+  await denied(()=>rpc(bob,'ff_image_reserve',league.id,'suggestion',suggestion.id,'png'));
+  assert.equal((await remove(bob,path)).rowCount,0);
+});
+
+test('anonymous and cross-tenant callers cannot reserve or attach a forged path', async () => {
+  await db.exec('set role anon');
+  try { await assert.rejects(()=>q('select public.ff_image_reserve($1,$2,$3,$4)',[league.id,'player',player.player_id,'png']),e=>e.code==='42501'); }
+  finally { await db.exec('reset role'); }
+  const forged=`${other.id}/players/00000000-0000-0000-0000-000000000001.png`;
+  await denied(()=>rpc(alice,'ff_image_set',league.id,'player',player.player_id,null,forged));
+  await denied(()=>rpc(bob,'ff_suggestion_submit',league.id,'Forged','MID',null,forged));
+  await denied(()=>rpc(alice,'ff_market_upsert_player',league.id,'Forged Player','MID',1000000,75,true,forged,null),'23514');
+  await denied(()=>insert(mallory,forged));
+});

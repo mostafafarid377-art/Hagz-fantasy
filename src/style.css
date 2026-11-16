@@ -86,3 +86,6 @@ button.pitch-player{border:0;background:transparent;color:inherit;cursor:pointer
    usable. Distinct from .error-panel so it reads as a caveat, not a blocker. */
 .partial-panel{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 .partial-detail{margin-top:.35rem;font-size:.74rem;color:var(--muted);word-break:break-word}
+/* Management forms must stay above the mobile navigation and scroll inside the viewport. */
+.player-form-dialog { max-height: min(90dvh, 850px); overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.player-form-dialog .form-panel { padding-bottom: max(16px, env(safe-area-inset-bottom)); }

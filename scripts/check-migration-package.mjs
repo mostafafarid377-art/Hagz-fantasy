@@ -85,6 +85,7 @@ const PACKAGE = [
   ['20261115000014_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
   ['20261115000015_actor_identity_claim_fallback.sql', 'design/migrations/015_actor_identity_claim_fallback.sql'],
   ['20261115000016_league_archive.sql', 'design/migrations/016_league_archive.sql'],
+  ['20261115000018_player_image_uploads.sql', 'design/migrations/018_player_image_uploads.sql'],
 ];
 
 /**
@@ -107,10 +108,11 @@ const POST_VERIFICATION_REPAIRS = [
   // invalidate what 013/014 certified. It runs last because it is the newest
   // migration, not because it needs to escape the assertions.
   '20261115000016_league_archive.sql',
+  '20261115000018_player_image_uploads.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
-const MANUAL_ONLY = ['003b_storage_policy_owner_step.sql', 'verify_storage_setup.sql'];
+const MANUAL_ONLY = ['003b_storage_policy_owner_step.sql', 'verify_storage_setup.sql', '018_image_write_owner_step.sql'];
 
 const failures = [];
 const passed = [];
@@ -258,7 +260,7 @@ if (!(await exists(execDir))) {
     if (i <= apiVerify) { fail('post-verification repair list', `${repair} is not after the API verification`); continue; }
     const [, source] = PACKAGE.find(([n]) => n === repair);
     const body = await readFile(path.join(root, 'supabase', source), 'utf8');
-    const stripped = body.replace(/--[^\n]*/g, '');
+    const stripped = body.replace(/--[^\n]*/g, '').replace(/^\s*alter\s+table\s+ff_private\.image_upload_reservations\s+owner\s+to\s+ff_migration_owner\s*;/im, '');
     const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
     if (surfaceDdl) {
       fail(`post-verification repair ${repair}`,

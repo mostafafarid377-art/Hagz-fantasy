@@ -66,9 +66,9 @@ interface LiveContextValue extends LiveState {
   setOrganizer: (userId: string, enabled: boolean) => Promise<void>;
   transferLeadership: (userId: string) => Promise<void>;
   /** Market + suggestions */
-  savePlayer: (input: api.UpsertPlayerInput) => Promise<void>;
-  suggestPlayer: (input: Parameters<typeof api.submitSuggestion>[1]) => Promise<void>;
-  reviewSuggestion: (id: string, decision: 'approved' | 'rejected', opts?: Parameters<typeof api.reviewSuggestion>[3]) => Promise<void>;
+  savePlayer: (input: api.UpsertPlayerInput) => Promise<ApiPlayer>;
+  suggestPlayer: (input: Parameters<typeof api.submitSuggestion>[1]) => Promise<ApiSuggestion>;
+  reviewSuggestion: (id: string, decision: 'approved' | 'rejected', opts?: Parameters<typeof api.reviewSuggestion>[3]) => Promise<ApiSuggestion>;
   /** Squad */
   buy: (marketPlayerId: string) => Promise<void>;
   sell: (marketPlayerId: string) => Promise<void>;
@@ -256,9 +256,9 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     setMember: (userId2, role, status) => mutate(() => api.setMember(require(leagueId), userId2, role, status)),
     setOrganizer: (userId2, enabled) => mutate(() => api.setOrganizer(require(leagueId), userId2, enabled)),
     transferLeadership: (userId2) => mutate(() => api.transferLeadership(require(leagueId), userId2)),
-    savePlayer: (input) => mutate(() => api.upsertMarketPlayer(require(leagueId), input)),
-    suggestPlayer: (input) => mutate(() => api.submitSuggestion(require(leagueId), input)),
-    reviewSuggestion: (id, decision, opts) => mutate(() => api.reviewSuggestion(require(leagueId), id, decision, opts)),
+    savePlayer: (input) => api.upsertMarketPlayer(require(leagueId), input),
+    suggestPlayer: (input) => api.submitSuggestion(require(leagueId), input),
+    reviewSuggestion: (id, decision, opts) => api.reviewSuggestion(require(leagueId), id, decision, opts),
     buy: (id) => mutate(() => api.buyPlayer(require(leagueId), id)),
     sell: (id) => mutate(() => api.sellPlayer(require(leagueId), id)),
     transfer: (outId, inId) => mutate(() => api.transferPlayer(require(leagueId), outId, inId)),
