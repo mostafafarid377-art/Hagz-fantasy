@@ -49,9 +49,28 @@ const STARTING_XI = [
 export const STARTING_XI_TOTAL = STARTING_XI
   .reduce((sum, name) => sum + (lastPointsByName[name] ?? 0), 0);
 
-/** The player's points in the most recent gameweek, not their season total. */
-export function lastGameweekPoints(name: string): number {
-  return lastPointsByName[name] ?? 0;
+/**
+ * The player's points in the MOST RECENT COMPLETED AND APPROVED gameweek only -
+ * never a season total, never a running sum, never an older gameweek's figure.
+ *
+ * Returns `undefined` when the player has no valid score for that match. That is
+ * the important part: a player who did not feature must render as "-" and must not
+ * inherit the previous match's points. Returning 0 here (as this did) is a
+ * fabricated score - it reads as "played, scored nothing", which is a different and
+ * equally untrue claim.
+ */
+export function lastGameweekPoints(name: string): number | undefined {
+  return lastPointsByName[name];
+}
+
+/**
+ * A player's accumulated official points across every approved match in the
+ * season. This is the OTHER figure: it backs season rankings and must never be
+ * displayed where a last-game score belongs. Kept as a separate accessor so the two
+ * cannot be swapped by accident.
+ */
+export function seasonTotalPoints(playerId: string): number | undefined {
+  return demoPlayers.find((p) => p.id === playerId)?.points;
 }
 
 /**
@@ -72,3 +91,6 @@ export function lastGameweekTeamPoints(teamName: string): number {
   };
   return byTeam[teamName] ?? 0;
 }
+
+/** True when the demo league has an approved match to report a last-game score for. */
+export const hasApprovedLastGame = true;

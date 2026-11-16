@@ -4,15 +4,15 @@
 // states are explicit: a leader with no league must see "create one", not a
 // blank panel, and a refused action must say why.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trash2, Trophy, UsersRound, X, Zap,
+  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Share2, Shield, Trash2, Trophy, UsersRound, X, Zap,
 } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { Pitch } from '../Dashboard';
-import { formatMoney } from '../../utils/format';
+import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { useAuth } from '../../hooks/useAuth';
 import type { Formation } from '../../types';
@@ -132,6 +132,33 @@ export function LiveDashboard() {
   const myStanding = live.myUserId
     ? live.standings.find((row) => row.manager_id === live.myUserId)
     : undefined;
+
+  // LAST GAME POINTS and TOTAL SEASON POINTS are deliberately separate figures read
+  // from separate fields of the points snapshot (services/points.ts). The last-game
+  // figure only ever describes the most recent officially approved match; the season
+  // figure sums every approved match. Neither falls back to the other.
+  const points = live.points;
+  const lastGamePoints = points.state === 'ready' ? points.lastGame : null;
+  const seasonPoints = points.state === 'ready' ? points.season : null;
+  const myTeamForPoints = live.squad?.team?.id;
+  const myLastGame = myTeamForPoints ? lastGamePoints?.byTeam[myTeamForPoints] : undefined;
+  const mySeasonPoints = myTeamForPoints && seasonPoints?.byTeam[myTeamForPoints] !== undefined
+    ? seasonPoints.byTeam[myTeamForPoints]
+    : myStanding?.fantasy_points;
+  /**
+   * Top performers ranks the SQUAD by total season points. It previously showed the
+   * three most expensive... no: the three first players in the market, labelled
+   * "IN FORM", ranked by nothing at all, with the RATING printed where the points
+   * belong. Ranking is by season points, and a player without an official score is
+   * excluded rather than shown as 0.
+   */
+  const topPerformers = (seasonPoints
+    ? [...(live.squad?.players ?? [])]
+        .map((p) => ({ player: p, points: seasonPoints.byPlayer[p.league_player_id] }))
+        .filter((row): row is { player: typeof row.player; points: number } => row.points !== undefined)
+        .sort((a, b) => b.points - a.points)
+        .slice(0, 3)
+    : []);
   const myRank = myStanding
     ? [...live.standings].sort((a, b) => (b.fantasy_points ?? 0) - (a.fantasy_points ?? 0))
         .findIndex((row) => row.team_id === myStanding.team_id) + 1
@@ -210,21 +237,49 @@ export function LiveDashboard() {
         </div>
         <div className="stat-card">
           <div className="stat-top"><span>{t('SQUAD VALUE')}</span><div className="stat-icon"><UsersRound size={17} /></div></div>
-          <div className="stat-number">{formatMoney(squadValue)}</div>
+          <div className="stat-number">{formatCompactMoney(squadValue)}</div>
           <div className="stat-foot">{squadSize}/15 {t('players')}</div>
           <div className="stat-number-bg">02</div>
         </div>
         <div className="stat-card">
           <div className="stat-top"><span>{t('IN THE BANK')}</span><div className="stat-icon"><Shield size={17} /></div></div>
-          <div className="stat-number">{formatMoney(budgetLeft)}</div>
+          <div className="stat-number">{formatCompactMoney(budgetLeft)}</div>
           <div className="stat-foot">{t('Budget remaining')}</div>
           <div className="stat-number-bg">03</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('TOTAL POINTS')}</span><div className="stat-icon"><Zap size={17} /></div></div>
-          <div className="stat-number">{myStanding ? <>{myStanding.fantasy_points} <small>{t('pts')}</small></> : '—'}</div>
-          <div className="stat-foot">{t('Season total · last game not available')}</div>
+          {/* LAST GAME POINTS: the latest APPROVED match only, never a season total. */}
+          <div className="stat-top"><span>{t('LAST GAME POINTS')}</span><div className="stat-icon"><Zap size={17} /></div></div>
+          <div className="stat-number">
+            {points.state === 'no-approved-match' || (points.state === 'ready' && !lastGamePoints)
+              ? '—'
+              : myLastGame !== undefined
+                ? <>{myLastGame} <small>{t('pts')}</small></>
+                : '—'}
+          </div>
+          <div className="stat-foot">
+            {points.state === 'unavailable' && t('Scoring is not available yet')}
+            {points.state === 'no-approved-match' && t('No approved match yet')}
+            {/* An approved result exists but no official scores have been produced for
+                it. Saying so is the only honest option: a dash would read as "no
+                match", and a 0 would read as "played, scored nothing". */}
+            {points.state === 'ready' && points.awaitingScoring
+              && t('Result approved · scores pending')}
+            {points.state === 'ready' && !points.awaitingScoring && lastGamePoints?.matchLabel
+              && <>{lastGamePoints.matchLabel}</>}
+          </div>
           <div className="stat-number-bg">04</div>
+        </div>
+        <div className="stat-card">
+          {/* TOTAL POINTS: the whole approved season. This is the ranking input. */}
+          <div className="stat-top"><span>{t('TOTAL POINTS')}</span><div className="stat-icon"><Trophy size={17} /></div></div>
+          <div className="stat-number">{mySeasonPoints !== undefined ? <>{mySeasonPoints} <small>{t('pts')}</small></> : '—'}</div>
+          <div className="stat-foot">
+            {points.state === 'unavailable'
+              ? t('Scoring is not available yet')
+              : t('Season total from approved matches')}
+          </div>
+          <div className="stat-number-bg">05</div>
         </div>
       </div>
 
@@ -307,23 +362,29 @@ export function LiveDashboard() {
 
       <div className="lower-grid">
         <section className="panel performers">
-          <SectionHead eyebrow="IN FORM" title="Top performers" action="See all" to="/market" />
-          <p className="section-description">{t('The players making moves')}</p>
-          {live.players.length > 0 ? (
+          <SectionHead eyebrow="TOP PERFORMANCE" title="Top performers" action="See all" to="/statistics" />
+          <p className="section-description">{t('Ranked by total season points')}</p>
+          {topPerformers.length > 0 ? (
             <div className="performer-list">
-              {[...live.players].slice(0, 3).map((p, i) => (
-                <Link to={`/players/${p.id}`} className="performer" key={p.id}>
+              {topPerformers.map(({ player, points }, i) => (
+                <Link to={`/players/${player.league_player_id}`} className="performer" key={player.league_player_id}>
                   <span className="rank">0{i + 1}</span>
-                  <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
-                  <div><strong>{p.name}</strong><small>{p.position} · {formatMoney(p.price)}</small></div>
-                  <div className="performer-points"><strong>{p.rating}</strong><small>{t('OVR')}</small></div>
+                  <Avatar name={player.name} image={player.image_url ?? undefined} size="sm" />
+                  <div><strong>{player.name}</strong><small>{player.position} · {formatCompactMoney(player.price)}</small></div>
+                  <div className="performer-points"><strong>{points}</strong><small>{t('pts')}</small></div>
                   <ArrowUpRight size={16} />
                 </Link>
               ))}
             </div>
           ) : (
-            <Empty title="No players yet" description="The league market is empty."
-              to="/market" action="Player Market" />
+            /* No approved results yet - or no points API on this deployment. Either
+               way there is no ranking to show, and printing rating here instead would
+               be passing off a different number as a points total. */
+            <Empty title="No season points yet"
+              description={live.points.state === 'unavailable'
+                ? t('Season points appear once official scoring is enabled.')
+                : t('Season points appear once a match result is approved.')}
+              to="/statistics" action="Statistics" />
           )}
         </section>
 
@@ -333,42 +394,125 @@ export function LiveDashboard() {
             ['Standings', '/standings'], ['Match Center', '/match-center']].map(([label, to]) => (
             <Link className="settings-row" to={to} key={to}>{t(label)}<ArrowUpRight size={16} /></Link>
           ))}
-          <div className="settings-row"><span>{t('Invite code')}</span><InviteCode /></div>
         </section>
       </div>
     </>
   );
 }
 
-/** Reads the invite code on demand; it never appears in the bootstrap payload. */
-function InviteCode() {
+/**
+ * The league's real invite code, read from the server on mount.
+ *
+ * Why this is a standalone card and not a row in a "Quick links" panel:
+ *   - it is the single most important piece of information on this screen for a
+ *     leader trying to get friends in, and it sat at the bottom of a link list
+ *     behind a "Show code" button, so on a phone it was below the fold and one tap
+ *     of friction away;
+ *   - the code is not in the bootstrap payload by design, so it is fetched with
+ *     ff_league_code(), which is member-scoped (ff_private.require_member). A
+ *     non-member gets 42501 and is shown that refusal - never a placeholder code.
+ *
+ * Share is offered when the platform supports the Web Share API; the button is not
+ * rendered otherwise rather than silently doing nothing.
+ */
+function InviteCodeCard() {
   const { t } = useTranslation();
   const live = useLive();
   const [code, setCode] = useState('');
-  const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [status, setStatus] = useState<'idle' | 'copied' | 'failed' | 'denied'>('idle');
+  const [loading, setLoading] = useState(true);
 
-  async function reveal() {
-    if (!live.leagueId) return;
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setCode('');
+    setStatus('idle');
+    const leagueId = live.leagueId;
+    if (!leagueId) { setLoading(false); return; }
+    (async () => {
+      try {
+        const { leagueCode } = await import('../../services/api');
+        const value = await leagueCode(leagueId);
+        if (!cancelled) setCode(value);
+      } catch (caught) {
+        if (!cancelled) {
+          // api.ts normalises 42501 (insufficient_privilege) into ApiError('forbidden'),
+          // so the SQLSTATE is no longer on the error. Treat both shapes as a refusal:
+          // the caller is not allowed to see this code.
+          const error = caught as { code?: string; detail?: string; message?: string };
+          const refused = error.code === 'forbidden' || error.code === '42501'
+            || error.detail === '42501';
+          setStatus(refused ? 'denied' : 'failed');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [live.leagueId]);
+
+  async function copy() {
+    if (!code) return;
     try {
-      const { leagueCode } = await import('../../services/api');
-      setCode(await leagueCode(live.leagueId));
+      if (!navigator.clipboard) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(code);
+      setStatus('copied');
     } catch { setStatus('failed'); }
   }
 
-  if (!code) {
-    return <button className="button button-small button-outline" onClick={() => void reveal()}>{t('Show code')}</button>;
+  async function share() {
+    if (!code) return;
+    try {
+      await navigator.share({
+        title: live.league?.name ?? t('Join my league'),
+        text: `${t('Join my league on Fantasy Friends with this code')}: ${code}`,
+      });
+    } catch { /* the user dismissed the share sheet - not an error */ }
   }
+
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
   return (
-    <span className="invite-code">
-      <strong>{code}</strong>
-      <button className="button button-small button-outline" onClick={async () => {
-        try { await navigator.clipboard.writeText(code); setStatus('copied'); }
-        catch { setStatus('failed'); }
-      }}>
-        <Copy size={14} /> {t(status === 'copied' ? 'Copied!' : 'Copy code')}
-      </button>
-      {status === 'failed' && <small className="error">{t('Copy failed. Please copy the code manually.')}</small>}
-    </span>
+    <section className="invite-card panel" aria-labelledby="invite-code-heading">
+      <div className="invite-card-head">
+        <div>
+          <div className="eyebrow">{t('YOUR COMMUNITY')}</div>
+          <h2 id="invite-code-heading">{t('Invite your friends')}</h2>
+        </div>
+        <UsersRound size={20} />
+      </div>
+      <p className="section-description">
+        {t('Share this code so friends can join your league as managers.')}
+      </p>
+
+      {loading && <p className="invite-code-loading">{t('Reading the invite code…')}</p>}
+
+      {!loading && status === 'denied' && (
+        <p className="error" role="alert">{t('You do not have access to this league\'s invite code.')}</p>
+      )}
+
+      {!loading && status !== 'denied' && code && (
+        <>
+          <div className="invite-code">
+            <strong aria-label={t('League code')}>{code}</strong>
+            <div className="invite-code-actions">
+              <button type="button" className="button button-outline" onClick={() => void copy()}>
+                <Copy size={15} /> {t(status === 'copied' ? 'Copied!' : 'Copy code')}
+              </button>
+              {canShare && (
+                <button type="button" className="button button-outline" onClick={() => void share()}>
+                  <Share2 size={15} /> {t('Share invitation')}
+                </button>
+              )}
+            </div>
+          </div>
+          {status === 'failed' && (
+            <p className="error" role="alert">{t('Copy failed. Please copy the code manually.')}</p>
+          )}
+          <p className="notice">{t('This league has its own independent player market.')}</p>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -414,16 +558,20 @@ export function LiveLeagueOverview() {
         <div>
           <div className="eyebrow">{t('Welcome to the circle')}</div>
           <h1>{live.league.name}</h1>
-          <p>{live.members.length} {t('Members')} · {formatMoney(live.league.budget)} {t('budget')}</p>
+          <p>{live.members.length} {t('Members')} · {formatCompactMoney(live.league.budget)} {t('budget')}</p>
         </div>
         <Badge kind="lime">{live.league.market_open ? t('Market open') : t('Market closed')}</Badge>
       </div>
+
+      {/* Directly under the hero: this is the reason a leader opens this screen, and
+          on a phone it must be the first thing below the league name. */}
+      <InviteCodeCard />
 
       <div className="overview-cards">
         <div className="panel"><UsersRound /><small>{t('Members')}</small><strong>{live.members.length}</strong></div>
         <div className="panel"><Trophy /><small>{t('Your role')}</small><strong>{t(live.isLeader ? 'League Leader' : 'Manager')}</strong></div>
         <div className="panel"><CalendarDays /><small>{t('Gameweeks')}</small><strong>{live.gameweeks.length}</strong></div>
-        <div className="panel"><Shield /><small>{t('Budget')}</small><strong>{formatMoney(live.league.budget)}</strong></div>
+        <div className="panel"><Shield /><small>{t('Budget')}</small><strong>{formatCompactMoney(live.league.budget)}</strong></div>
       </div>
 
       <div className="panel section-spacer">

@@ -11,7 +11,7 @@ import { Link } from 'react-router-dom';
 import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { BackLink } from '../../components/Navigation';
-import { formatMoney } from '../../utils/format';
+import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import type { Position } from '../../types/api';
@@ -114,7 +114,7 @@ export function LiveMarket() {
                   <span>{player.position} <span className="dot">·</span> {player.owned_by ?? 0} {t('managers')}</span>
                 </div>
                 <div className="player-card-bottom">
-                  <div><small>{t('PRICE')}</small><strong>{formatMoney(player.price)}</strong></div>
+                  <div><small>{t('PRICE')}</small><strong>{formatCompactMoney(player.price)}</strong></div>
                   <button
                     className={mine ? 'button button-muted' : 'button button-small'}
                     disabled={mine || !live.league!.market_open || busy === player.id
@@ -157,7 +157,7 @@ export function LivePlayerProfile() {
           <p>{live.league?.name}</p>
           <div className="profile-stats">
             <span><strong>{player.rating}</strong> {t('OVR')}</span>
-            <span><strong>{formatMoney(player.price)}</strong> {t('Price')}</span>
+            <span><strong>{formatCompactMoney(player.price)}</strong> {t('Price')}</span>
             {/* No per-player points exist in the live schema, so this figure is
                 omitted rather than shown as 0. */}
             <span><strong>{player.owned_by ?? 0}</strong> {t('managers')}</span>
@@ -205,7 +205,7 @@ export function LiveManagement() {
               <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
               <div>
                 <strong>{p.name}</strong>
-                <small>{p.position} · {p.rating} {t('OVR')} · {formatMoney(p.price)}</small>
+                <small>{p.position} · {p.rating} {t('OVR')} · {formatCompactMoney(p.price)}</small>
               </div>
               <Badge kind={p.active ? 'approved' : 'neutral'}>{t(p.active ? 'Active' : 'Inactive')}</Badge>
               {canManage && <button className="button button-muted" onClick={() => setEditing(p)}>{t('Edit')}</button>}
