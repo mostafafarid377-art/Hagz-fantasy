@@ -10,12 +10,13 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Check, Star, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
+import { Pitch } from '../Dashboard';
 import { formations, limits } from '../../services/rules';
 import type { ApiSquadPlayer } from '../../types/api';
 import type { Formation, Position } from '../../types';
@@ -25,6 +26,7 @@ const FORMATIONS = Object.keys(formations) as Formation[];
 export function LiveSquad({ builder = false, transfers = false }: { builder?: boolean; transfers?: boolean }) {
   const { t } = useTranslation();
   const live = useLive();
+  const navigate = useNavigate();
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -166,8 +168,30 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       </div>
 
       {ordered.length === 0 ? (
-        <Empty title="Your squad is empty" description="Add players from the league market to build your 15."
-          to="/market" action="Player Market" />
+        /* An empty squad shows the EMPTY PITCH, not a "your squad is empty" card.
+           The pitch is the thing the user is meant to fill, so it should be the
+           first thing they see - with an add slot in every position, exactly like
+           a partially-built squad. The old card made the page look like a dead end
+           with a link on it. */
+        <div className="panel section-spacer">
+          <SectionHead eyebrow="YOUR TEAM" title="Your squad" />
+          <p className="section-description">
+            {t('Tap an empty position to add a player. The first 11 players are starters; reorder them in My Squad.')}
+          </p>
+          <label className="formation-select">{t('Formation')}
+            <select aria-label={t('Formation')} value={formation}
+              onChange={(e) => setFormation(e.target.value as Formation)}>
+              {FORMATIONS.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+          </label>
+          <Pitch players={[]} formation={formation} squadSlots onAddPosition={() =>navigate('/market')} />
+          <div className="bench-strip">
+            <div className="bench-head"><h3>{t('Bench')}</h3></div>
+            <div className="bench-players">
+              <small>{t('No substitutes yet.')}</small>
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           <div className="panel section-spacer">
