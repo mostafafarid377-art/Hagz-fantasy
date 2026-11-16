@@ -4,9 +4,9 @@ test.beforeEach(async ({page})=>{await page.goto('/dashboard');await page.evalua
 
 test('application loads and desktop navigation works',async({page})=>{
   await expect(page.getByRole('heading',{name:/Welcome back/})).toBeVisible();
-  // The Market tab was removed from navigation; the screen is reached from the
-  // dashboard's "Explore market" action instead.
-  await page.getByRole('link',{name:'Explore market'}).click();
+  // The Market tab was removed from navigation, so the market is reached by URL.
+  // The dashboard's hero button now goes to the squad tab ("Build your squad").
+  await page.goto('/market');
   await expect(page.getByRole('heading',{name:'Player Market'})).toBeVisible();
   await page.goto('/squad-builder');await expect(page.getByRole('heading',{name:'Squad Builder'})).toBeVisible();
 });

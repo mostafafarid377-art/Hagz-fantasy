@@ -138,6 +138,14 @@ describe('the live home shows real data, not placeholders', () => {
     expect(screen.queryByText(/Mariam/)).toBeNull();
   });
 
+  it('does not print fabricated "0 pts" on the pitch', async () => {
+    await mountLiveHome();
+    // A live squad player has no points field. Rendering p.points anyway would show
+    // a zero for every player, which reads as a real result.
+    expect(document.querySelector('.pitch')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/0 pts/);
+  });
+
   it('lists the next fixture from live matches', async () => {
     await mountLiveHome();
     expect(screen.queryByText('Rivals FC')).not.toBeNull();

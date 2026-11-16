@@ -164,9 +164,11 @@ describe('a signed-in user can log out', () => {
       withLiveProvider: true,
       liveLeagues: [{ league_id: 'L1', name: 'My Real League', is_leader: true }],
     });
-    // The auth service had signOut() all along; no UI called it, so there was no
-    // way to leave a session.
-    expect(screen.getByRole('button', { name: /log out/i })).toBeTruthy();
+    // Two entry points on purpose: the sidebar button, and the icon in the top bar
+    // where the demo shows its role switch.
+    const controls = screen.getAllByRole('button', { name: /log out/i });
+    expect(controls.length).toBe(2);
+    expect(document.querySelector('.topbar [aria-label="Log out"]')).toBeTruthy();
   });
 
   it('does not offer log out in demo mode (there is no session to end)', async () => {

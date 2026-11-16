@@ -11,7 +11,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { AlertCircle, Check, UserMinus, UserPlus } from 'lucide-react';
+import { AlertCircle, Check, Shield, Trophy, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
@@ -184,9 +184,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             captainId={captainId} viceCaptainId={viceId}
             onAddPosition={() => navigate('/market')}
             squadSlots={!hasSquad || builder}
-            canAddStarting={builder || ordered.length < 11} />
+            canAddStarting={builder || ordered.length < 11}
+            showPoints={false} />
 
-          <div className="bench-strip">
+          {!builder && <div className="bench-strip">
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
             <div className="bench-players">
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
@@ -198,7 +199,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
                 </div>
               ))}
             </div>
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -301,8 +302,17 @@ export function LiveStandings() {
   return (
     <>
       <PageTitle eyebrow="THE TABLE" title="League Standings"
-        description="Ranked by fantasy points." />
+        description="The race is on" />
       {live.error && <ErrorNote message={live.error} />}
+
+      {/* The demo standings open with a scoring strip that states the ranking rule.
+          Live explained it in a notice at the BOTTOM of the page, where nobody
+          reads it before interpreting the table. */}
+      <div className="scoring-strip">
+        <Trophy size={20} />
+        <strong>{t('Ranked by fantasy points')}</strong>
+        <small>{t('Equal fantasy points share a rank.')}</small>
+      </div>
 
       {ranked.length === 0 ? (
         <Empty title="No standings yet"
@@ -317,14 +327,29 @@ export function LiveStandings() {
               </tr>
             </thead>
             <tbody>
-              {ranked.map((row, index) => (
-                <tr key={row.team_id}>
-                  <td>{String(index + 1).padStart(2, '0')}</td>
-                  <td><strong>{row.team_name}</strong></td>
-                  <td>{row.manager_name}</td>
-                  <td><strong className="lime">{row.fantasy_points}</strong></td>
-                </tr>
-              ))}
+              {ranked.map((row, index) => {
+                // Equal totals share a rank, matching the demo table.
+                const rank = ranked.findIndex((r) => r.fantasy_points === row.fantasy_points) + 1;
+                // Your row is the one you manage. Matching on team name would depend on a
+                // squad being loaded, which is not guaranteed on this screen.
+                const isMine = !!live.myUserId && row.manager_id === live.myUserId;
+                return (
+                  <tr key={row.team_id} className={isMine ? 'highlight-row' : ''}>
+                    <td>{String(rank).padStart(2, '0')}</td>
+                    <td>
+                      <div className="table-team">
+                        <div className={`mini-crest c${index % 4}`}><Shield size={14} /></div>
+                        <span>
+                          <strong>{row.team_name}</strong>
+                          <small>{row.manager_name}</small>
+                        </span>
+                      </div>
+                    </td>
+                    <td>{row.manager_name}</td>
+                    <td><strong className="lime">{row.fantasy_points}</strong></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
