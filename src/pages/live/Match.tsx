@@ -13,7 +13,8 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CalendarDays, Check, MapPin, RefreshCw, Trophy, X } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { ArrowRight, CalendarDays, Check, MapPin, RefreshCw, Shield, X, Zap } from 'lucide-react';
 import { Badge, Empty, PageTitle } from '../../components/UI';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote } from './League';
@@ -32,6 +33,9 @@ export function LiveMatchCenter() {
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
+  // The hero features the most recent match; sorted is newest-first.
+  const featured = sorted[0];
+
   return (
     <>
       <PageTitle eyebrow="MATCHDAY" title="Match Center"
@@ -48,6 +52,34 @@ export function LiveMatchCenter() {
         <Empty title="No matches yet"
           description="A league leader schedules real matches and appoints an organizer to record them." />
       ) : (
+        <>
+        {/* The demo match centre opens with a hero block for the featured match. Live
+            went straight to a table, so the screen looked like an admin list rather
+            than a matchday page. */}
+        <div className="match-center-hero panel">
+          <Badge kind={featured.revision_state === 'approved' ? 'lime' : 'neutral'}>
+            {t(featured.revision_state === 'approved' ? 'Full time' : 'Upcoming match')}
+          </Badge>
+          <div className="center-teams">
+            <div>
+              <div className="team-crest crest-lime"><Shield size={30} /></div>
+              <strong>{featured.team_a}</strong>
+            </div>
+            <div>
+              <small>{t(featured.team_a_score == null ? 'Upcoming' : 'Final score')}</small>
+              <b>{featured.team_a_score == null ? 'VS' : `${featured.team_a_score} : ${featured.team_b_score}`}</b>
+            </div>
+            <div>
+              <div className="team-crest crest-orange"><Zap size={30} /></div>
+              <strong>{featured.team_b}</strong>
+            </div>
+          </div>
+          <div className="match-info">
+            <span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span>
+            <span><MapPin size={16} /> {featured.venue}</span>
+            <span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span>
+          </div>
+        </div>
         <div className="panel table-wrap">
           <table>
             <thead>
@@ -78,6 +110,7 @@ export function LiveMatchCenter() {
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {selected && (
@@ -135,29 +168,59 @@ function eventGlyph(type: string): string {
 }
 
 export function LiveFixtures() {
+  const { t } = useTranslation();
   const live = useLive();
+  const [filter, setFilter] = useState('All');
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
+  const played = (m: { starts_at: string }) => new Date(m.starts_at).getTime() < Date.now();
+  const visible = live.matches.filter((m) =>
+    filter === 'All' ? true : filter === 'Played' ? played(m) : !played(m));
+
   return (
     <>
-      <PageTitle eyebrow="UP NEXT" title="Fixtures" description="Real matches scheduled for this league." />
-      {live.matches.length === 0
-        ? <Empty title="No fixtures yet" description="Your league leader schedules the matches." />
-        : (
-          <div className="panel">
-            {live.matches.map((m) => (
-              <div className="fixture-row" key={m.id}>
-                <div>
-                  <span className="eyebrow">GW {live.gameweeks.find((g) => g.id === m.gameweek_id)?.number ?? '—'}</span>
-                  <strong>{m.team_a} vs {m.team_b}</strong>
-                  <small>{new Date(m.starts_at).toLocaleString()} · {m.venue}</small>
-                </div>
-                <Trophy size={16} />
-              </div>
+      <PageTitle eyebrow="MATCHDAY" title="Fixtures" description="Matches scheduled for this league." />
+
+      {/* Same shape as the demo fixtures screen: filter tabs over a fixture list of
+          rows that link to the match centre. Live showed a bare panel of rows with
+          no filtering and no way through to a match. */}
+      {live.matches.length === 0 ? (
+        <Empty title="No fixtures yet" description="Your league leader schedules the matches." />
+      ) : (
+        <>
+          <div className="tabs">
+            {['All', 'Upcoming', 'Played'].map((f) => (
+              <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>
+                {t(f)}
+              </button>
             ))}
           </div>
-        )}
+          <div className="fixture-list">
+            {visible.map((m) => (
+              <Link to={`/match-center/${m.id}`} className="fixture-row panel" key={m.id}>
+                <div>
+                  <div className="eyebrow">
+                    {t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === m.gameweek_id)?.number ?? '—'}
+                  </div>
+                  <small>{new Date(m.starts_at).toLocaleString()} · {m.venue}</small>
+                </div>
+                <div className="fixture-score">
+                  <strong>{m.team_a}</strong>
+                  <span className="mini-crest c0"><Shield size={17} /></span>
+                  <b>vs</b>
+                  <span className="mini-crest c1"><Zap size={17} /></span>
+                  <strong>{m.team_b}</strong>
+                </div>
+                <Badge kind={played(m) ? 'neutral' : 'lime'}>
+                  {t(played(m) ? 'Played' : 'Upcoming')}
+                </Badge>
+                <ArrowRight size={17} />
+              </Link>
+            ))}
+          </div>
+        </>
+      )}
     </>
   );
 }

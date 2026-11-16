@@ -78,7 +78,9 @@ async function mountStandings(standings: Row[]) {
 function renderedTeams(): string[] {
   return screen.getAllByRole('row')
     .slice(1) // drop the header row
-    .map((r) => r.querySelector('td:nth-child(2)')?.textContent?.trim() ?? '');
+    // The team cell now holds the team name plus the manager beneath it, so read
+    // the team name specifically rather than the cell's whole text.
+    .map((r) => r.querySelector('td:nth-child(2) strong')?.textContent?.trim() ?? '');
 }
 
 describe('the league table is ranked by fantasy points', () => {
