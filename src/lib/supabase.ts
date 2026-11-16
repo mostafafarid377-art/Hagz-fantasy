@@ -73,5 +73,13 @@ export function getSupabase(): SupabaseClient | null {
   return client;
 }
 
+// Publishable key only, used by Storage's authenticated upload HTTP endpoint.
+export function getStorageBaseUrl(): string | null {
+  return isSupabaseConfigured ? `${url!.replace(/\/$/, '')}/storage/v1` : null;
+}
+export function getPublishableKey(): string | null {
+  return isSupabaseConfigured && !looksLikeServiceRoleKey(anonKey) ? anonKey! : null;
+}
+
 /** Supabase Storage bucket for player images. Private; see migration 003. */
 export const PLAYER_IMAGES_BUCKET = 'player-images';

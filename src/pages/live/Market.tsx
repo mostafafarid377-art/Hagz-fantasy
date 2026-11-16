@@ -1,3 +1,4 @@
+import { playerImage } from '../../services/playerImage';
 // Live player market, player management (leader), and suggestions.
 //
 // These screens are where the role rules become visible: a manager sees the
@@ -5,7 +6,7 @@
 // the approval queue. Hiding a control is a courtesy, NOT a control - the same
 // action from a manager is refused by the database (see phase3-api.test.mjs).
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
@@ -18,7 +19,9 @@ import type { Position } from '../../types/api';
 
 const positions: readonly Position[] = ['GK', 'DEF', 'MID', 'FWD'];
 import type { ApiPlayer, ApiSuggestion } from '../../types/api';
-import { inspectImage, StorageError, uploadBlocked } from '../../services/storage';
+import { inspectImage, uploadPlayerImage, removePlayerImage } from '../../services/storage';
+import { useImageSource } from '../../hooks/useImageSource';
+import { marketPlayers } from '../../services/api';
 
 const POSITION_ORDER = ['GK', 'DEF', 'MID', 'FWD'] as const;
 
@@ -107,7 +110,7 @@ export function LiveMarket() {
                     <span className="position-pill">{player.position}</span>
                     <div className="player-rating">{player.rating}<small>{t('OVR')}</small></div>
                   </div>
-                  <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
+                  <Avatar name={player.name} image={playerImage(player)} size="lg" />
                 </div>
                 <Link to={`/players/${player.id}`} className="player-name">{player.name}</Link>
                 <div className="player-meta">
@@ -149,7 +152,7 @@ export function LivePlayerProfile() {
           showed a price line only, so the two screens looked like different products
           even though every figure here is real. */}
       <div className="panel profile-hero">
-        <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
+        <Avatar name={player.name} image={playerImage(player)} size="lg" />
         <div>
           <Badge kind="lime">{player.position}</Badge>{' '}
           <Badge kind={player.active ? 'approved' : 'neutral'}>{t(player.active ? 'Active' : 'Inactive')}</Badge>
@@ -179,7 +182,6 @@ export function LiveManagement() {
   const [editing, setEditing] = useState<ApiPlayer | null>(null);
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState('');
-
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
   const canManage = live.isLeader;
@@ -202,7 +204,7 @@ export function LiveManagement() {
           {live.players.length === 0 && <Empty title="No players in this market yet." />}
           {live.players.map((p) => (
             <div className="manage-row" key={p.id}>
-              <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+              <Avatar name={p.name} image={playerImage(p)} size="sm" />
               <div>
                 <strong>{p.name}</strong>
                 <small>{p.position} · {p.rating} {t('OVR')} · {formatCompactMoney(p.price)}</small>
@@ -235,37 +237,60 @@ function PlayerDialog({ player, onClose, onSaved }: {
 }) {
   const { t } = useTranslation();
   const live = useLive();
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (dialog.current && !dialog.current.open) dialog.current.showModal(); }, []);
   const [name, setName] = useState(player?.name ?? '');
   const [position, setPosition] = useState<'GK' | 'DEF' | 'MID' | 'FWD'>(player?.position ?? 'MID');
   const [priceM, setPriceM] = useState(player ? String(player.price / 1_000_000) : '5');
   const [rating, setRating] = useState(player ? String(player.rating) : '75');
   const [active, setActive] = useState(player?.active ?? true);
   const [imageUrl, setImageUrl] = useState(player?.image_url ?? '');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [removeImage, setRemoveImage] = useState(false);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [savedId, setSavedId] = useState(player?.player_id ?? '');
+  const [currentPath, setCurrentPath] = useState(player?.image_path ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
     setError(''); setBusy(true);
+    let detailsSaved = false;
     try {
       const millions = Number(priceM);
       if (!Number.isFinite(millions) || millions <= 0) throw new Error(t('Price must be positive.'));
-      await live.savePlayer({
+      if (!live.leagueId) throw new Error(t('Select a league'));
+      let id = savedId;
+      let previousPath = currentPath;
+      // Explicitly unlink an existing image before replacing it with a URL or removing it.
+      if (id && (removeImage || (!imageFile && imageUrl !== (player?.image_url ?? ''))) && (previousPath || player?.image_url)) {
+        await removePlayerImage({ leagueId: live.leagueId, kind: 'player', targetId: id, previousPath });
+        previousPath = null; setCurrentPath(null);
+      }
+      const saved = await live.savePlayer({
         name: name.trim(), position, price: Math.round(millions * 1_000_000),
         rating: Number(rating), active,
-        imageUrl: imageUrl.trim() || null,
-        playerId: player?.player_id ?? null,
+        imageUrl: imageFile || removeImage ? null : imageUrl.trim() || null,
+        playerId: id || null,
       });
+      id = saved.player_id; setSavedId(id); detailsSaved = true;
+      if (imageFile) {
+        const path = await uploadPlayerImage({ leagueId: live.leagueId, kind: 'player', targetId: id, previousPath }, imageFile, setProgress);
+        setCurrentPath(path); setImageFile(null);
+      }
+      await live.reload();
       onSaved(t(player ? 'Player updated.' : 'Player added.'));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('Player could not be saved.'));
+      setError((detailsSaved ? t('Player details saved; the image update failed. ') : '') + (caught instanceof Error ? caught.message : t('Player could not be saved.')));
     } finally { setBusy(false); }
   }
 
   return (
-    <dialog open className="player-sheet" aria-labelledby="player-dialog-title">
+    <dialog ref={dialog} className="player-sheet player-form-dialog" aria-labelledby="player-dialog-title" onClose={onClose}>
       <div className="sheet-handle" aria-hidden="true" />
-      <button type="button" className="sheet-close" aria-label={t('Close')} onClick={onClose}><X size={20} /></button>
+      <button type="button" className="sheet-close" disabled={busy} aria-label={t('Close')} onClick={onClose}><X size={20} /></button>
       <div className="eyebrow">{t('THE MARKET')}</div>
       <h2 id="player-dialog-title">{t(player ? 'Edit player' : 'Add player')}</h2>
       <form className="form-panel" onSubmit={save}>
@@ -289,9 +314,10 @@ function PlayerDialog({ player, onClose, onSaved }: {
           <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
           {t('Active in the market')}
         </label>
-        <ImageField value={imageUrl} onChange={setImageUrl} />
+        <ImageField value={imageUrl} onChange={value => { setImageUrl(value); setRemoveImage(false); }} currentImage={!removeImage ? (currentPath ? `storage-image:${currentPath}` : imageUrl) : ''} file={imageFile} onFile={file => { setImageFile(file); setRemoveImage(false); }} onRemove={() => { setImageFile(null); setImageUrl(''); setRemoveImage(true); }} onBusyChange={setImageBusy} />
+        {progress !== null && <p role="status">{t('Uploading image')}: {progress}%</p>}
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
-        <button className="button sheet-primary" disabled={busy || !name.trim()}>
+        <button className="button sheet-primary" disabled={busy || imageBusy || !name.trim()}>
           {busy ? t('Saving…') : t('Save')}
         </button>
       </form>
@@ -299,52 +325,35 @@ function PlayerDialog({ player, onClose, onSaved }: {
   );
 }
 
-/**
- * Image input. Upload is offered but explained honestly: the bucket has no upload
- * policy yet, so the picker validates the file, shows a preview, and tells the
- * user to use a URL instead. No pretend upload.
- */
-function ImageField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+/** Live image picker: selection is local until the enclosing form is saved. */
+function ImageField({ value, onChange, currentImage, file, onFile, onRemove, onBusyChange, allowUrl = true }: {
+  value: string; onChange: (value: string) => void; currentImage?: string; file: File | null;
+  onFile: (file: File | null) => void; onRemove: () => void; onBusyChange: (busy: boolean) => void; allowUrl?: boolean;
+}) {
   const { t } = useTranslation();
   const [message, setMessage] = useState('');
   const [preview, setPreview] = useState('');
-
+  const existing = useImageSource(currentImage);
+  const sequence = useRef(0);
+  useEffect(() => () => { sequence.current++; }, []);
+  useEffect(() => { if (!file) { setPreview(''); return; } const url = URL.createObjectURL(file); setPreview(url); return () => URL.revokeObjectURL(url); }, [file]);
   async function choose(file?: File) {
     if (!file) return;
-    setMessage('');
-    try {
-      await inspectImage(file);
-      setPreview(URL.createObjectURL(file));
-      if (uploadBlocked) {
-        setMessage(t('This image is valid (under 5 MB). Upload is not enabled yet, so paste an image URL instead.'));
-      }
-    } catch (caught) {
-      setMessage(caught instanceof StorageError ? caught.message : t('Could not read this image.'));
-    }
+    const current = ++sequence.current; onBusyChange(true); setMessage('');
+    try { await inspectImage(file); if (current === sequence.current) onFile(file); }
+    catch (error) { if (current === sequence.current) setMessage(error instanceof Error ? error.message : t('Could not read this image.')); }
+    finally { if (current === sequence.current) onBusyChange(false); }
   }
-
-  return (
-    <div className="image-picker">
-      <label className="button button-outline image-file-button">
-        <Upload size={15} /> {t('Choose an image')}
-        <input className="image-file-input" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-          onChange={(e) => void choose(e.target.files?.[0])} />
-      </label>
-      <small>{t('JPG, PNG or WebP up to 5 MB.')}</small>
-      {preview && (
-        <div className="image-preview">
-          <img src={preview} alt={t('Image preview')} />
-          <button type="button" className="button button-outline" onClick={() => { setPreview(''); setMessage(''); }}>
-            {t('Remove image')}
-          </button>
-        </div>
-      )}
-      <label>{t('Image URL (optional)')}
-        <input type="url" value={value} onChange={(e) => onChange(e.target.value)} placeholder="https://" />
-      </label>
-      {message && <p className="notice" role="status">{message}</p>}
-    </div>
-  );
+  return <div className="image-picker">
+    <label className="button button-outline image-file-button"><Upload size={15} /> {t('Choose an image')}
+      <input className="image-file-input" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={e => { void choose(e.target.files?.[0]); e.target.value=''; }} />
+    </label>
+    <small>{t('JPG, PNG or WebP up to 5 MB.')}</small>
+    {(preview || existing) && <div className="image-preview"><img src={preview || existing} alt={t('Image preview')} onError={e => { e.currentTarget.hidden = true; }} />
+      <button type="button" className="button button-outline" onClick={() => { sequence.current++; onBusyChange(false); setMessage(''); onRemove(); }}>{t('Remove image')}</button></div>}
+    {allowUrl && <label>{t('Image URL (optional)')}<input type="url" value={value} onChange={e => { sequence.current++; onBusyChange(false); onFile(null); setMessage(''); onChange(e.target.value); }} placeholder="https://" /></label>}
+    {message && <p className="error" role="alert">{t(message)}</p>}
+  </div>;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +367,11 @@ export function LiveSuggestPlayer() {
   const [position, setPosition] = useState<'GK' | 'DEF' | 'MID' | 'FWD'>('MID');
   const [notes, setNotes] = useState('');
   const [imageUrl, setImageUrl] = useState('');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [createdId, setCreatedId] = useState('');
+  const [editingImage, setEditingImage] = useState<ApiSuggestion | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
@@ -367,12 +381,17 @@ export function LiveSuggestPlayer() {
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(''); setDone(''); setBusy(true);
+    let didCreate = !!createdId;
     try {
-      await live.suggestPlayer({ name: name.trim(), position, notes: notes.trim() || undefined, imageUrl: imageUrl.trim() || null });
-      setName(''); setNotes(''); setImageUrl('');
+      if (!live.leagueId) throw new Error(t('Select a league'));
+      const id = createdId || (await live.suggestPlayer({ name: name.trim(), position, notes: notes.trim() || undefined, imageUrl: imageFile ? null : imageUrl.trim() || null })).id;
+      setCreatedId(id); didCreate = true;
+      if (imageFile) await uploadPlayerImage({ leagueId: live.leagueId, kind: 'suggestion', targetId: id, previousPath: null }, imageFile, setProgress);
+      setName(''); setNotes(''); setImageUrl(''); setImageFile(null); setCreatedId(''); setProgress(null);
+      await live.reload();
       setDone(t('Suggestion submitted. Your league leader will review it.'));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('Could not submit that suggestion.'));
+      setError((didCreate ? t('Suggestion created; retry the image upload. ') : '') + (caught instanceof Error ? caught.message : t('Could not submit that suggestion.')));
     } finally { setBusy(false); }
   }
 
@@ -386,27 +405,27 @@ export function LiveSuggestPlayer() {
 
       <form className="panel form-panel" onSubmit={submit}>
         <label>{t('Player name')}
-          <input required minLength={2} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
+          <input disabled={!!createdId} required minLength={2} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <label>{t('Position')}
-          <select value={position} onChange={(e) => setPosition(e.target.value as typeof position)}>
+          <select disabled={!!createdId} value={position} onChange={(e) => setPosition(e.target.value as typeof position)}>
             {positions.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         </label>
         <label>{t('Details')}
-          <textarea maxLength={500} rows={3} value={notes} onChange={(e) => setNotes(e.target.value)}
+          <textarea disabled={!!createdId} maxLength={500} rows={3} value={notes} onChange={(e) => setNotes(e.target.value)}
             placeholder={t('Optional details for your leader')} />
         </label>
-        <label>{t('Image URL (optional)')}
-          <input type="url" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://" />
-        </label>
+        <ImageField value={imageUrl} onChange={setImageUrl} currentImage={imageUrl} file={imageFile} onFile={setImageFile} onRemove={() => { setImageUrl(''); setImageFile(null); }} onBusyChange={setImageBusy} allowUrl={!createdId} />
+        {progress !== null && <p role="status">{t('Uploading image')}: {progress}%</p>}
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
         {done && <p className="validation-panel valid" role="status"><Check size={14} /> {done}</p>}
-        <button className="button" disabled={busy || name.trim().length < 2}>
+        <button className="button" disabled={busy || imageBusy || name.trim().length < 2}>
           {busy ? t('Submitting…') : t('Submit suggestion')}
         </button>
       </form>
 
+      {editingImage && live.leagueId && <SuggestionImageEditor key={editingImage.id} suggestion={editingImage} leagueId={live.leagueId} onClose={() => setEditingImage(null)} onSaved={async () => { setEditingImage(null); await live.reload(); }} />}
       <div className="panel section-spacer">
         <SectionHead eyebrow="YOUR ACTIVITY" title="My suggestions" />
         {mine.length === 0
@@ -429,6 +448,7 @@ export function LiveSuggestPlayer() {
                         {s.status === 'rejected' && s.rejection_reason && <small>{s.rejection_reason}</small>}
                         {s.status === 'approved' && <small>{t('Added to the market')}</small>}
                         {s.status === 'pending' && <small>{t('Waiting for the leader')}</small>}
+                        {s.status === 'pending' && s.submitted_by === live.myUserId && <button type="button" className="button button-muted" onClick={() => setEditingImage(s)}>{t('Edit image')}</button>}
                       </td>
                     </tr>
                   ))}
@@ -441,6 +461,30 @@ export function LiveSuggestPlayer() {
   );
 }
 
+function SuggestionImageEditor({ suggestion, leagueId, onClose, onSaved }: { suggestion: ApiSuggestion; leagueId: string; onClose: () => void; onSaved: () => Promise<void> }) {
+  const { t } = useTranslation();
+  const [file, setFile] = useState<File | null>(null); const [removing, setRemoving] = useState(false);
+  const [validating, setValidating] = useState(false); const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null); const [error, setError] = useState('');
+  async function save() {
+    setBusy(true); setError('');
+    try {
+      const target = { leagueId, kind: 'suggestion' as const, targetId: suggestion.id, previousPath: suggestion.image_path };
+      if (file) await uploadPlayerImage(target, file, setProgress);
+      else if (removing) await removePlayerImage(target);
+      await onSaved();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : t('Could not save image.')); }
+    finally { setBusy(false); }
+  }
+  return <section className="panel section-spacer" aria-label={`${t('Edit image')}: ${suggestion.name}`}>
+    <h2>{t('Edit image')}: {suggestion.name}</h2>
+    <ImageField value="" onChange={() => {}} currentImage={removing ? '' : playerImage(suggestion)} file={file} onFile={f => { setFile(f); setRemoving(false); }} onRemove={() => { setFile(null); setRemoving(true); }} onBusyChange={setValidating} allowUrl={false} />
+    {progress !== null && <p role="status">{t('Uploading image')}: {progress}%</p>}
+    {error && <p className="error" role="alert">{error}</p>}
+    <div className="button-row"><button className="button" type="button" disabled={busy || validating || (!file && !removing)} onClick={() => void save()}>{t('Save')}</button><button className="button button-outline" disabled={busy} type="button" onClick={onClose}>{t('Cancel')}</button></div>
+  </section>;
+}
+
 export function LiveApprovals() {
   const { t } = useTranslation();
   const live = useLive();
@@ -451,6 +495,12 @@ export function LiveApprovals() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [approvedId, setApprovedId] = useState('');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageUrl, setImageUrl] = useState('');
+  const [removeImage, setRemoveImage] = useState(false);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
 
   const pending = live.suggestions.filter((s) => s.status === 'pending');
 
@@ -464,11 +514,27 @@ export function LiveApprovals() {
     if (!selected) return;
     setError(''); setBusy(true);
     try {
-      await live.reviewSuggestion(selected.id, decision, decision === 'approved'
-        ? { price: Math.round(Number(priceM) * 1_000_000), rating: Number(rating) }
-        : { reason });
+      if (!live.leagueId) throw new Error(t('Select a league'));
+      let marketId = approvedId;
+      if (!marketId) {
+        const reviewed = await live.reviewSuggestion(selected.id, decision, decision === 'approved'
+          ? { price: Math.round(Number(priceM) * 1_000_000), rating: Number(rating), imagePath: (imageFile || removeImage || imageUrl !== (selected.image_url ?? '')) ? '__remove__' : null }
+          : { reason });
+        if (decision === 'approved') { marketId = reviewed.league_player_id ?? ''; setApprovedId(marketId); }
+      }
+      if (decision === 'approved' && (imageFile || removeImage || imageUrl !== (selected.image_url ?? ''))) {
+        const published = (await marketPlayers(live.leagueId, { includeInactive: true })).find(p => p.id === marketId);
+        if (!published) throw new Error(t('Player was approved but could not be loaded. Retry the image update.'));
+        const target = { leagueId: live.leagueId, kind: 'player' as const, targetId: published.player_id, previousPath: published.image_path };
+        if (imageFile) await uploadPlayerImage(target, imageFile, setProgress);
+        else {
+          await removePlayerImage(target);
+          if (!removeImage && imageUrl.trim()) await live.savePlayer({ playerId: published.player_id, name: published.name, position: published.position, price: published.price, rating: published.rating, active: published.active, imageUrl: imageUrl.trim() });
+        }
+      }
       setNotice(t(decision === 'approved' ? 'Suggestion approved and added to the market.' : 'Suggestion rejected.'));
-      setSelected(null); setReason(''); setPriceM('5'); setRating('75');
+      setSelected(null); setReason(''); setPriceM('5'); setRating('75'); setApprovedId(''); setImageFile(null); setProgress(null);
+      await live.reload();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t('This suggestion could not be reviewed.'));
     } finally { setBusy(false); }
@@ -487,7 +553,7 @@ export function LiveApprovals() {
           <div className="panel">
             {pending.map((s) => (
               <div className="suggestion-row" key={s.id}>
-                <Avatar name={s.name} image={s.image_url ?? undefined} size="sm" />
+                <Avatar name={s.name} image={playerImage(s)} size="sm" />
                 <div>
                   <strong>{s.name}</strong>
                   <small>{s.position} · {t('Submitted by')} {s.submitted_by_name} {s.submitted_by === live.myUserId ? `(${t('you')})` : ''}</small>
@@ -495,7 +561,7 @@ export function LiveApprovals() {
                 </div>
                 <button className="button button-small" disabled={s.submitted_by === live.myUserId}
                   title={s.submitted_by === live.myUserId ? t('You cannot review your own suggestion') : undefined}
-                  onClick={() => { setSelected(s); setError(''); setNotice(''); }}>
+                  onClick={() => { setSelected(s); setImageUrl(s.image_url ?? ''); setImageFile(null); setRemoveImage(false); setApprovedId(''); setProgress(null); setError(''); setNotice(''); }}>
                   {t('Review')}
                 </button>
               </div>
@@ -508,9 +574,13 @@ export function LiveApprovals() {
           <div className="sheet-handle" aria-hidden="true" />
           <button className="sheet-close" aria-label={t('Close')} onClick={() => setSelected(null)}><X size={20} /></button>
           <div className="eyebrow">{t('NEW SUGGESTION')}</div>
+          <Avatar name={selected.name} image={playerImage(selected)} size="lg" />
           <h2 id="review-title">{selected.name}</h2>
           <p className="sheet-note">{selected.position} · {t('Submitted by')} {selected.submitted_by_name}</p>
           {selected.notes && <p className="sheet-note">{selected.notes}</p>}
+          <ImageField value={imageUrl} onChange={value => { setImageUrl(value); setRemoveImage(false); }} currentImage={removeImage ? '' : (selected.image_path ? `storage-image:${selected.image_path}` : imageUrl)} file={imageFile} onFile={file => { setImageFile(file); setRemoveImage(false); }} onRemove={() => { setImageFile(null); setImageUrl(''); setRemoveImage(true); }} onBusyChange={setImageBusy} />
+          {progress !== null && <p role="status">{t('Uploading image')}: {progress}%</p>}
+          {approvedId && <p className="notice">{t('Player approved; retry the image update before closing.')}</p>}
 
           <div className="form-row">
             <label>{t('Final price (millions)')}
@@ -525,10 +595,10 @@ export function LiveApprovals() {
           </label>
           {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
           <div className="sheet-actions">
-            <button className="button button-outline" disabled={busy || !reason.trim()} onClick={() => void decide('rejected')}>
+            <button className="button button-outline" disabled={busy || !!approvedId || !reason.trim()} onClick={() => void decide('rejected')}>
               {t('Reject suggestion')}
             </button>
-            <button className="button" disabled={busy} onClick={() => void decide('approved')}>
+            <button className="button" disabled={busy || imageBusy} onClick={() => void decide('approved')}>
               {t('Approve and publish')}
             </button>
           </div>

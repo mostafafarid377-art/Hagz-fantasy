@@ -1,3 +1,4 @@
+import { playerImage } from '../../services/playerImage';
 // Live squad builder and transfer market.
 //
 // The position distribution (2 GK / 5 DEF / 5 MID / 3 FWD), the 15-player cap,
@@ -157,7 +158,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     price: p.price,
     rating: p.rating,
     attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 },
-    image: p.image_url ?? undefined,
+    image: playerImage(p),
     active: p.active,
     points: 0,
     color: '#a9b9a5',
@@ -173,7 +174,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const ruleSquad = { leagueId: '', managerId: '', playerIds: ids, formation };
   const targets = swapSource ? substitutionTargets(ruleSquad, allPlayers, swapSource) : [];
   const selected = allPlayers.find(p => p.id === selectedId);
-  const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
+  const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: playerImage(p), active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
   const save = (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
   function selectPlayer(p: Player) {
     if (!swapSource) { setError(''); setSelectedId(p.id); return; }
@@ -255,7 +256,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
               {benchPlayers.map((p) => (
                 <button type="button" className={`bench-player ${targets.includes(p.league_player_id) ? 'swap-target' : ''} ${swapSource && !targets.includes(p.league_player_id) ? 'swap-dim' : ''}`} key={p.league_player_id} disabled={!!swapSource && !targets.includes(p.league_player_id)} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}`} onClick={() => { const player = allPlayers.find(x => x.id === p.league_player_id); if (player) selectPlayer(player); }}>
-                  <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                  <Avatar name={p.name} image={playerImage(p)} size="sm" />
                   <strong>{p.name}</strong>
                   <small>{p.position} · {lastGamePointsFor(p) != null ? `${lastGamePointsFor(p)} ${t('pts')}` : '—'}</small>
                 </button>
@@ -544,7 +545,7 @@ export function LiveStatistics() {
                   <td>{String(i + 1).padStart(2, '0')}</td>
                   <td>
                     <Link to={`/players/${p.id}`} className="table-team">
-                      <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                      <Avatar name={p.name} image={playerImage(p)} size="sm" />
                       <strong>{p.name}</strong>
                     </Link>
                   </td>

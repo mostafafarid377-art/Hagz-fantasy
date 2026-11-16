@@ -148,10 +148,11 @@ const PACKAGE = [
   // `on delete restrict` - a hard delete would need a cascade review and would
   // destroy other managers' history. See the draft header.
   ['20261115000016', '016_league_archive.sql', 'league_archive'],
+  ['20261115000018', '018_player_image_uploads.sql', 'player_image_uploads'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '018']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);
