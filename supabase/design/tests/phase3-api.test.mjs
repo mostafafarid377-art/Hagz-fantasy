@@ -732,6 +732,10 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   assert.equal(resultSubmission.state, 'official', 'a complete saved result finalizes immediately');
   assert.equal(resultSubmission.finalized_by, BOB, 'the assigned Organizer is the recorded finalizer');
   assert.ok(resultSubmission.finalized_at);
+  const replayedFinalization = await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, forked.revision_id, approved.approval_id);
+  assert.equal(replayedFinalization.submission_id, resultSubmission.submission_id, 'retrying finalization returns the same saved submission');
+  assert.equal(replayedFinalization.official_result_id, resultSubmission.official_result_id, 'retrying finalization does not create a second official result');
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, match.id]), 1);
   await expectDenied(() => rpc(BOB, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved'), '42501', 'result review/approval is removed');
   await expectDenied(() => rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved'), '42501', 'Leader cannot put a result through the obsolete review RPC');
 

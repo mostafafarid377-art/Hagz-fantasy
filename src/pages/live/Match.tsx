@@ -77,12 +77,13 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   const { t } = useTranslation();
   const live = useLive();
   const [busy, setBusy] = useState(false);
+  const actionLock = useRef(false);
   const [forkRequestId, setForkRequestId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [reason, setReason] = useState('');
   const [playersBySide, setPlayersBySide] = useState<Record<string, Record<string, 'starter' | 'substitute'>>>({});
-  const [scoreA, setScoreA] = useState(0); const [scoreB, setScoreB] = useState(0);
+  const [scoreA, setScoreA] = useState('0'); const [scoreB, setScoreB] = useState('0');
   const [eventPlayer, setEventPlayer] = useState(''); const [eventType, setEventType] = useState('goal');
   const [eventMinute, setEventMinute] = useState(''); const [relatedPlayer, setRelatedPlayer] = useState('');
   const history = match.history ?? [];
@@ -104,11 +105,12 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     const seeded: Record<string, Record<string, 'starter' | 'substitute'>> = {};
     for (const l of current?.lineups ?? []) seeded[l.team_id] = Object.fromEntries(l.players.map((p) => [p.player_id, p.selection]));
     setPlayersBySide(seeded);
-    setScoreA(current?.team_a_score ?? 0); setScoreB(current?.team_b_score ?? 0);
+    setScoreA(String(current?.team_a_score ?? 0)); setScoreB(String(current?.team_b_score ?? 0));
   }, [current?.revision_id]);
 
   async function run(action: () => Promise<unknown>, success: string) {
-    if (!live.leagueId) return;
+    if (!live.leagueId || actionLock.current) return;
+    actionLock.current = true;
     setBusy(true); setError(''); setNotice('');
     try { await action(); await live.refreshMatches(); setNotice(success); }
     catch (e) {
@@ -118,10 +120,12 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
       // server's actual state instead of hiding that committed first step.
       try { await live.refreshMatches(); } catch { /* keep the original action error visible */ }
     }
-    finally { setBusy(false); }
+    finally { actionLock.current = false; setBusy(false); }
   }
   async function openResultRevision(approvalId: string) {
     if (!live.leagueId) return;
+    if (actionLock.current) return;
+    actionLock.current = true;
     const requestId = forkRequestId ?? crypto.randomUUID();
     setForkRequestId(requestId); setBusy(true); setError(''); setNotice('');
     try {
@@ -138,7 +142,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
       // Reuse the same key after a lost response; the RPC returns the original
       // revision rather than creating a second result draft on retry.
       try { await live.refreshMatches(); } catch { /* retain the retry key */ }
-    } finally { setBusy(false); }
+    } finally { actionLock.current = false; setBusy(false); }
   }
   const togglePlayer = (team: string, id: string, checked: boolean) => setPlayersBySide((prev) => {
     const side = { ...(prev[team] ?? {}) };
@@ -157,23 +161,32 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     {canOrganize && <p className="notice">{t('League Leader and assigned active Organizer can manage this match. Organizer results publish immediately when complete; the Leader may also finalize them. Fantasy scoring remains pending until scoring rules are approved.')}</p>}
     {canOrganize && !current && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'Match record opened.')}>Open match record</button>}
     {canOrganize && current?.state === 'rejected' && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'A new immutable revision is open for correction.')}>Open new revision</button>}
-    {canEditDraft && <section className="workflow-section"><h3>Lineups · published League Market</h3><p className="muted">Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.</p>
-      {[{id:match.team_a_id,name:match.team_a},{id:match.team_b_id,name:match.team_b}].map((side) => <fieldset className="match-side-picker" key={side.id}><legend>{side.name} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'starter').length}/{match.starters_per_side} starters · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'substitute').length}/{match.max_substitutes} substitutes</legend>
-        {live.players.filter((p) => p.active).map((player) => <label className="match-player-choice" key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={!!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span>{player.name}{identityHint(player.player_id)} <small>{player.position}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} selection`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">Starter</option><option value="substitute">Substitute</option></select>}</label>)}
-        {live.players.filter((p) => p.active).length === 0 && <p className="muted">No active published Market players are available.</p>}
+    {canEditDraft && <section className="workflow-section"><h3>{t('Lineups · published League Market')}</h3><p className="muted">{t('Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.')}</p>
+      {[{id:match.team_a_id,name:match.team_a},{id:match.team_b_id,name:match.team_b}].map((side) => <fieldset className="match-side-picker" key={side.id}><legend>{side.name} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'starter').length}/{match.starters_per_side} {t('starters')} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'substitute').length}/{match.max_substitutes} {t('substitutes')}</legend>
+        {live.players.filter((p) => p.active).map((player) => <label className={`match-player-choice${selectedPlayers[side.id]?.[player.player_id] ? ' is-selected' : ''}`} key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={busy || !!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span dir="auto">{player.name}{identityHint(player.player_id)} <small>{t(player.position)}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} ${t('lineup role')}`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">{t('Starter')}</option><option value="substitute">{t('Substitute')}</option></select>}</label>)}
+        {live.players.filter((p) => p.active).length === 0 && <p className="muted">{t('No active published Market players are available.')}</p>}
       </fieldset>)}
       <button className="button button-outline" disabled={busy || live.players.filter((p) => p.active).length === 0} onClick={() => void run(async () => {
         for (const sideId of [match.team_a_id, match.team_b_id]) {
           const rows = Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({ player_id, selection, actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position, eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' } }));
           await api.setMatchLineup(live.leagueId!, current!.revision_id, sideId, rows);
         }
-      }, 'Both side lineups saved.')}>Save both lineups</button>
+        const persisted = await api.matches(live.leagueId!);
+        const savedRevision = persisted.find((row) => row.id === match.id)?.history?.find((revision) => revision.revision_id === current!.revision_id);
+        const saved = savedRevision?.lineups ?? [];
+        const matchesSelection = [match.team_a_id, match.team_b_id].every((sideId) => {
+          const actual = saved.find((lineup) => lineup.team_id === sideId)?.players ?? [];
+          const expected = Object.entries(selectedPlayers[sideId] ?? {});
+          return actual.length === expected.length && expected.every(([playerId, selection]) => actual.some((player) => player.player_id === playerId && player.selection === selection));
+        });
+        if (!matchesSelection) throw new Error('Lineups were sent but the saved server state did not match. Refresh and verify before submitting.');
+      }, 'Both lineups saved and verified on the server.')}>{t('Save both lineups')}</button>
       <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
     </section>}
     {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}
     {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>{t('Record match result')}</button>}
     {canOrganize && pendingResult && approvedLineup && current && <section className="workflow-section"><h3>{t('Saved result')}</h3><p className="muted">{t('A previously submitted result can be finalized here. Only complete saved match details will be published.')}</p><button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup.approval.id), t('Result finalized and published to the league.'))}>{t('Finalize saved result')}</button></section>}
-    {canEditDraft && isResultDraft && <section className="workflow-section"><h3>Score and match events</h3><div className="score-editor"><label>{match.team_a}<input type="number" min={0} value={scoreA} onChange={(e) => setScoreA(Number(e.target.value))} /></label><span>–</span><label>{match.team_b}<input type="number" min={0} value={scoreB} onChange={(e) => setScoreB(Number(e.target.value))} /></label><button className="button button-outline" disabled={busy} onClick={() => void run(() => api.setMatchScore(live.leagueId!, current.revision_id, scoreA, scoreB), 'Score saved.')}>Save score</button></div>
+    {canEditDraft && isResultDraft && <section className="workflow-section"><h3>{t('Score and match events')}</h3><div className="score-editor"><label>{match.team_a}<input aria-label={`${match.team_a} score`} type="number" inputMode="numeric" min={0} step={1} value={scoreA} onChange={(e) => setScoreA(e.target.value)} /></label><span aria-hidden="true">–</span><label>{match.team_b}<input aria-label={`${match.team_b} score`} type="number" inputMode="numeric" min={0} step={1} value={scoreB} onChange={(e) => setScoreB(e.target.value)} /></label><button className="button button-outline" disabled={busy || scoreA === '' || scoreB === '' || !Number.isInteger(Number(scoreA)) || !Number.isInteger(Number(scoreB)) || Number(scoreA) < 0 || Number(scoreB) < 0} onClick={() => void run(() => api.setMatchScore(live.leagueId!, current.revision_id, Number(scoreA), Number(scoreB)), 'Score saved.')}>{t('Save score')}</button></div>
       <div className="event-editor"><label>Player<select value={eventPlayer} onChange={(e) => setEventPlayer(e.target.value)}><option value="">Select lineup player</option>{eventPlayers.map((p) => <option key={p.player_id} value={p.player_id}>{p.name}{identityHint(p.player_id)}</option>)}</select></label><label>Event<select value={eventType} onChange={(e) => setEventType(e.target.value)}>{['appearance','goal','assist','clean_sheet','yellow_card','red_card','own_goal','mvp','penalty_saved','penalty_missed','substitution_out','substitution_in'].map((x) => <option key={x} value={x}>{x.replace(/_/g, ' ')}</option>)}</select></label><label>Minute<input type="number" min={0} max={130} value={eventMinute} onChange={(e) => setEventMinute(e.target.value)} /></label>{eventType.startsWith('substitution_') && <label>Related player<select value={relatedPlayer} onChange={(e) => setRelatedPlayer(e.target.value)}><option value="">Optional related player</option>{eventPlayers.filter((p) => p.player_id !== eventPlayer).map((p) => <option key={p.player_id} value={p.player_id}>{p.name}{identityHint(p.player_id)}</option>)}</select></label>}<button className="button button-outline" disabled={busy || !eventPlayer} onClick={() => void run(() => api.recordMatchEvent(live.leagueId!, current.revision_id, eventPlayer, eventType, { minute: eventMinute ? Number(eventMinute) : null, relatedPlayerId: relatedPlayer || null }), 'Event recorded.')}>Record event</button></div>
       <button className="button button-primary" disabled={busy || !approvedLineup} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup!.approval.id), t('Result finalized and published to the league.'))}>{t('Finalize and publish result')}</button>
     </section>}

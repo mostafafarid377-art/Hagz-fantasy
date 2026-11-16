@@ -52,7 +52,15 @@ Object.assign(ar, {
   'A previously submitted result can be finalized here. Only complete saved match details will be published.':'يمكن اعتماد نتيجة أُرسلت سابقاً من هنا. لن تُنشر إلا تفاصيل المباراة المكتملة والمحفوظة.',
   'Finalize saved result':'اعتماد النتيجة المحفوظة', 'ready for finalization':'جاهزة للاعتماد',
   'awaiting League Leader review':'بانتظار مراجعة مسؤول الدوري', 'Record match result':'تسجيل نتيجة المباراة',
-  'A match result is now official':'أصبحت نتيجة المباراة رسمية'
+  'A match result is now official':'أصبحت نتيجة المباراة رسمية',
+  'Lineups · published League Market':'التشكيلات · لاعبو سوق الدوري المنشور',
+  'Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.':'اختر اللاعبين لكل فريق على حدة. يعتمد الاختيار على هوية اللاعب في السوق، وليس ملكيته في الفانتازي. يتحقق الخادم من نشاط اللاعب ووجوده في سوق الدوري ومنع التكرار وحدود التشكيلة.',
+  'starters':'أساسيون', 'substitutes':'بدلاء',
+  'No active published Market players are available.':'لا يوجد لاعبون نشطون منشورون في السوق.',
+  'lineup role':'مركز التشكيلة',
+  'Both lineups saved and verified on the server.':'تم حفظ تشكيلتي الفريقين والتحقق منهما على الخادم.',
+  'Lineups were sent but the saved server state did not match. Refresh and verify before submitting.':'أُرسلت التشكيلات لكن البيانات المحفوظة على الخادم لا تطابق الاختيار. حدّث البيانات وتحقق منها قبل الإرسال.',
+  'Score and match events':'النتيجة وأحداث المباراة', 'Save score':'حفظ النتيجة', 'Save both lineups':'حفظ تشكيلتي الفريقين'
 });
 const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});
