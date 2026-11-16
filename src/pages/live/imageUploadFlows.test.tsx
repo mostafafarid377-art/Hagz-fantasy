@@ -37,6 +37,17 @@ describe('live upload workflows (mocked storage)', () => {
     await waitFor(() => expect(f.upload).toHaveBeenCalledWith(expect.objectContaining({kind:'suggestion', targetId:'suggestion'}),expect.any(File),expect.any(Function)));
     expect((f.live.suggestPlayer as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]).toBeLessThan(f.upload.mock.invocationCallOrder[0]);
   });
+  // SECURITY FINDING: approval publishes first, then removes the image. This
+  // exposes the original image during the gap; the mock only establishes ordering.
+  it('SECURITY FINDING: approval occurs before a requested image removal', async () => {
+    f.live.suggestions=[{...suggestion, image_url:'https://example.test/private.png'}];
+    mount(<LiveApprovals />); fireEvent.click(screen.getByRole('button',{name:'Review'}));
+    const dialog=screen.getByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button',{name:'Remove image'}));
+    fireEvent.click(within(dialog).getByRole('button',{name:'Approve and publish'}));
+    await waitFor(() => expect(f.remove).toHaveBeenCalled());
+    expect((f.live.reviewSuggestion as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]).toBeLessThan(f.remove.mock.invocationCallOrder[0]);
+  });
   it('uploads a leader-selected replacement after approval', async () => {
     mount(<LiveApprovals />); fireEvent.click(screen.getByRole('button',{name:'Review'}));
     const dialog=screen.getByRole('dialog'); await choose(dialog);

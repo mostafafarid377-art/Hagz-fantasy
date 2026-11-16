@@ -7,8 +7,23 @@ const db = await PGlite.create();
 const load = async f => db.exec(await readFile(new URL(f, import.meta.url), 'utf8'));
 await load('setup.sql');
 for (const file of ['01_schema','02_security','03_storage','04_integrity_workflows','05_concurrency_hardening','06_revision_lineage','07_correction_attempts','08_result_fork_idempotency','09_ownership_and_grants','10_definer_ownership_transfer','11_application_api','12_definer_actor_identity','13_privilege_verification','14_api_surface_verification','15_actor_identity_claim_fallback','16_league_archive','18_player_image_uploads']) await load(`../../migrations/202611150000${file}.sql`);
-await load('../storage/018_image_write_owner_step.sql');
-await db.exec('grant insert,delete on storage.objects to authenticated');
+// Stand-in policies in the disposable PGlite schema. This deliberately does NOT
+// execute the owner-assisted SQL file and cannot verify the hosted owner step.
+await db.exec(`
+  create function storage.ff_player_image_exists(p_name text) returns boolean
+    language sql stable security definer set search_path=pg_catalog as $$
+      select exists(select 1 from storage.objects where bucket_id='player-images' and name=p_name)
+    $$;
+  revoke all on function storage.ff_player_image_exists(text) from public, anon, authenticated;
+  grant execute on function storage.ff_player_image_exists(text) to ff_migration_owner;
+  create policy test_reserved_insert on storage.objects for insert to authenticated
+    with check (bucket_id='player-images' and ff_private.can_write_reserved_image(name,'insert'));
+  create policy test_reserved_read on storage.objects for select to authenticated
+    using (bucket_id='player-images' and ff_private.can_write_reserved_image(name,'read'));
+  create policy test_reserved_delete on storage.objects for delete to authenticated
+    using (bucket_id='player-images' and ff_private.can_write_reserved_image(name,'delete'));
+  grant insert,delete on storage.objects to authenticated;
+`);
 after(() => db.close());
 const q = (sql, args=[]) => db.query(sql,args);
 const alice='00000000-0000-0000-0000-000000000001', bob='00000000-0000-0000-0000-000000000002', mallory='00000000-0000-0000-0000-000000000003';
@@ -87,4 +102,40 @@ test('anonymous and cross-tenant callers cannot reserve or attach a forged path'
   await denied(()=>rpc(bob,'ff_suggestion_submit',league.id,'Forged','MID',null,forged));
   await denied(()=>rpc(alice,'ff_market_upsert_player',league.id,'Forged Player','MID',1000000,75,true,forged,null),'23514');
   await denied(()=>insert(mallory,forged));
+});
+
+// SECURITY FINDING (not an endorsement): the guard lets a leader attach any
+// pending suggestion image to a different published player, without approving the
+// suggestion. This reproduces a privacy bypass in the current draft. Replace this
+// test with a denial assertion when the guard is fixed.
+test('SECURITY FINDING: a leader can publish another pending suggestion image without approving it', async () => {
+  const charlie = '00000000-0000-0000-0000-000000000004';
+  await q('insert into auth.users(id) values ($1)',[charlie]);
+  await rpc(charlie,'ff_bootstrap','Charlie');
+  await rpc(charlie,'ff_league_join',league.code);
+  const privateSuggestion=await rpc(bob,'ff_suggestion_submit',league.id,'Private Pending','MID');
+  const path=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',privateSuggestion.id,'png')).path;
+  await insert(bob,path);
+  await rpc(bob,'ff_image_set',league.id,'suggestion',privateSuggestion.id,null,path);
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0,
+    'the pending suggestion image is private to the author and leader');
+  await denied(()=>rpc(charlie,'ff_image_reserve',league.id,'suggestion',privateSuggestion.id,'png'));
+  await denied(()=>rpc(charlie,'ff_image_set',league.id,'suggestion',privateSuggestion.id,path,null));
+  assert.equal((await remove(charlie,path)).rowCount,0,'another manager cannot delete the object');
+
+  const leaked=await rpc(alice,'ff_market_upsert_player',league.id,'Unrelated Player','MID',1000000,75,true,path,null);
+  assert.equal(leaked.image_path,path);
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,1,
+    'the same object is now readable by another league member without approving its suggestion');
+  assert.equal((await rpc(bob,'ff_suggestions',league.id)).find(s=>s.id===privateSuggestion.id).status,'pending');
+});
+
+// SECURITY/RELIABILITY FINDING: path-only compare-and-swap does not cover an
+// existing URL. A stale removal with expected NULL can erase a newer URL.
+test('SECURITY FINDING: a stale null-path removal erases a newer image URL', async () => {
+  const p=await rpc(alice,'ff_market_upsert_player',league.id,'URL Race','MID',1000000,75);
+  await rpc(alice,'ff_market_upsert_player',league.id,'URL Race','MID',1000000,75,true,null,'https://example.test/new.png',p.player_id);
+  await rpc(alice,'ff_image_set',league.id,'player',p.player_id,null,null);
+  const after=(await rpc(alice,'ff_market_players',league.id)).find(row=>row.id===p.id);
+  assert.equal(after.image_url,null,'current draft silently loses the newer URL');
 });

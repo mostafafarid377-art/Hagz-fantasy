@@ -1,0 +1,73 @@
+# PR 31 independent security review
+
+**Verdict: NOT safe to execute migration/owner step 018 or proceed to hosted testing of this implementation. Keep the PR in draft.** The tests below are local PGlite or mocked browser tests, not hosted Supabase tests. Nothing in this review executes hosted SQL, changes production, or modifies migrations 001–015.
+
+## Findings
+
+### Critical
+
+No critical exploit was confirmed by this review. This is not a guarantee that none exists.
+
+### High: pending-suggestion image can be published without its approval
+
+`supabase/migrations/20261115000018_player_image_uploads.sql:79–83` permits a leader to attach the image from **any** pending suggestion in the league to a profile. The existing market upsert at `supabase/migrations/20261115000011_application_api.sql:447–465` can create or update such a profile independently of reviewing the suggestion. The read helper at `supabase/migrations/20261115000003_storage.sql:18–21` then makes the image readable by all league members via its profile reference. A local PGlite test, explicitly named `SECURITY FINDING`, reproduces this: another manager cannot read the pending image before the leader calls upsert, can read it afterward, and the suggestion remains pending. The same permissive condition may also let approval of one suggestion choose another pending suggestion's path (`20261115000011_application_api.sql:631–632`). The leader already has permission to see the original; the failure is unauthorized promotion from private suggestion visibility to league-wide visibility.
+
+**Required fix:** prohibit suggestion paths in generic market upsert and bind approval's copied path to the exact locked suggestion being approved. Use a checked atomic approval operation or an equivalent narrowly scoped server-side mechanism; test both upsert and unrelated-suggestion approval denial, and successful approval of the matching suggestion. Do not weaken the read policy.
+
+### High: no trusted content validation before an object is stored or served
+
+`src/services/storage.ts:12–16` and `src/services/image.ts:29–43` validate on the user's device only; a caller can directly POST to Storage. `supabase/design/storage/018_image_write_owner_step.sql:25–27` checks a reservation but not bytes. The bucket limit and allowed MIME values (`supabase/migrations/20261115000003_storage.sql:7–8`) check size and declared content type; declared MIME is attacker-controlled. `storage.ff_player_image_exists` (`018_image_write_owner_step.sql:18–20`) checks existence, not validation. Consequently no test demonstrates that spoofed SVG, executables, polyglots, decompression bombs or other malicious/corrupt data cannot be accepted. This review does **not** assert that a spoofed SVG executes in a browser; serving and sniffing behavior has not been tested.
+
+**Required fix:** remove direct client writes to the served bucket. An authenticated, authorization-checked trusted upload service should receive a bounded request (maximum 5 MiB), verify the reservation and current target/actor, inspect the actual bytes, decode only allowlisted raster formats in an isolated, patched decoder with CPU/memory/dimension/pixel/frame limits, reject SVG/HTML/executable/polyglot/truncated content, strip metadata and re-encode into a new allowlisted raster output. Store only the sanitized output in a private serving bucket under a server-generated immutable key; bind it transactionally only after successful processing. Quarantine inputs must not be served, signed for clients, or published before validation; restrict their access to the processing service. Set authoritative MIME and safe response headers, apply retention/quotas and audit. Keep privileged credentials exclusively server-side; never trust client metadata or file extensions. Include hostile corpus, decoder-bomb, MIME-spoof, direct-write bypass and failure/cleanup tests. Antivirus or malware scanning can be added, but is not a substitute for isolated decoding and re-encoding. This architecture is a design, not an implemented or verified control.
+
+### High: approval publishes an image before a requested removal or replacement
+
+`src/pages/live/Market.tsx:520–532` approves first; the old suggestion image is copied into a published profile by `20261115000011_application_api.sql:631–635`, then the UI removes/replaces it in a separate operation. Thus a league member could read or mint a signed URL in the interval, even if the leader chose to remove the picture before approval. A mocked UI test establishes the approval-before-removal ordering; it does not establish hosted timing. If the second operation fails the unwanted image can remain published.
+
+**Required fix:** make approval and the selected final image decision atomic at the server boundary, and ensure no unvalidated image becomes readable while processing. Test removal/replacement failure and simultaneous readers.
+
+### Medium: stale edits can erase a newer URL
+
+`20261115000018_player_image_uploads.sql:103–108,124–127` compares only `image_path`, then clears `image_url`. Two URL-only states both have a null path; a stale removal can clear a newer URL. A local PGlite reproduction confirms this. Compare an image version or both path and URL atomically, including legacy upsert paths.
+
+### Medium: orphan accumulation and unbounded reservations
+
+`20261115000018_player_image_uploads.sql:34–47,54–64,129–131` has no reservation/upload quota or automatic cleanup; staged objects cannot be deleted by the client. Retired cleanup is restricted to the original actor, for one hour, and is blocked if any profile or suggestion still references the path. `src/services/storage.ts:36–38,53–59` ignores returned Storage errors, so cleanup can silently fail. A member with a permitted target can repeatedly reserve and upload 5 MiB objects, causing storage/cost exhaustion. Quotas, rate limits, expiration, observability and safe cleanup are required before enabling writes. Local tests do not prove hosted RLS behavior under concurrency.
+
+### Medium: bearer URLs and session transitions
+
+`src/services/storage.ts:61–66` creates one-hour signed URLs; `src/hooks/useImageSource.ts:17–30` renews every 45 minutes based on reference, not an explicit auth-session dependency. A previously issued signed URL can remain usable until expiry after membership revocation; cached UI behavior during account changes must be verified. The new mocked timer test confirms renewal/fallback only, not revocation or cross-account isolation. Use shorter TTLs or authenticated proxy reads where immediate revocation matters, invalidate UI state on auth changes, and test actual account switching.
+
+### Medium: partial workflow failures and races
+
+`src/pages/live/Market.tsx:257–286,385–395,520–540` creates/updates a player or suggestion or approves it before image processing is finished. Failed uploads leave committed records, and a leader may approve a pending suggestion between its creation and image attachment. Recovery depends on in-memory state and can be lost on refresh. Validate and process first into a non-serving staging area, then bind/approve atomically, with retry-safe idempotency and explicit recovery tests. The existing tests mock the service and do not prove end-to-end behavior.
+
+### Low: owner-step preflight and operational assumptions
+
+`supabase/design/storage/018_image_write_owner_step.sql:7–35` checks RLS and role membership, but does not establish the hosted role's actual privileges to create the function, the identity/owner of any pre-existing same-named function, bucket settings, or absence of broader permissive Storage policies. PostgreSQL permissive policies combine with OR. The existing owner-assisted read-policy process confirms that owner assistance can be necessary; hosted ownership was not inspected. **The step is not safe to execute as written** until the High findings are fixed, an owner reviews the actual policy set and ownership, verifies the staging/serving model, and the script gains appropriate preflight/postcondition checks. Do not run the script now.
+
+## Local test evidence and limits
+
+- `supabase/design/tests/player-image-security.test.mjs`: PGlite with mocked Supabase auth, Storage tables and stand-in policies; tests local leader/manager/outsider authorization, same-league other-manager denial, forged paths, replacement/removal, and two explicitly marked reproductions of privacy and stale-URL findings. Passing finding tests demonstrate bugs; they do **not** mean the implementation is secure.
+- `src/pages/live/imageUploadFlows.test.tsx`: mocked component/service tests for manager submission, leader approval and management upload, plus the approval/removal ordering finding. No actual Storage upload.
+- `src/hooks/useImageSource.test.tsx`: mocked signed URL/fallback/remount and 45-minute renewal behavior. No hosted expiration, revocation, login transition or second-device test.
+- `src/services/storage.test.ts` and `src/services/image.test.ts`: mocks cover progress/failure and Demo validation/IndexedDB; no trusted backend byte validation.
+- The full unit, typecheck, build, migration-check and database design verification results are recorded in the PR update. Seven database tests are intentionally skipped by the existing suite.
+
+## Exact hosted test plan, only after fixes and independent approval
+
+Use an isolated non-production Supabase project with no real personal data. Do not apply anything to the existing hosted project as part of this review. Two test accounts suffice: A creates league L1; B creates league L2 and joins L1 as a manager. Thus A is L1 leader and an L2 outsider, while B is L2 leader and L1 manager.
+
+1. Have an authorized operator inspect the actual `storage.objects` owner, RLS status, *all* effective INSERT/UPDATE/DELETE/SELECT policies and grants, bucket privacy, size and MIME settings, and absence of conflicting permissive policies. Review the revised migration and exact owner step before any execution. Install only into the isolated test project using its approved process.
+2. As B in L1, submit a synthetic PNG/JPEG/WebP suggestion. Verify progress and preview, persisted path after refresh and on another device, and that only B and A can read its private staging/pending image. Verify A can review it; test approved copy, removal, replacement, and upload failures with concurrent readers. Never use real photos.
+3. As A in L1, create a market player, upload, replace, remove and refresh; verify B sees authorized published images. Try simultaneous edits and stale URLs; ensure failures preserve the current image and do not report false success.
+4. As B in L1, attempt direct market-player reservation, attachment, replacement, object update and deletion; as A against L2, attempt the same and all reads. As B against L2, verify legitimate leader management succeeds. Try another user's pending suggestion, forged/malformed paths, cross-league object paths, anonymous requests and legacy RPC bypasses. All unauthorized attempts must fail and leave records and objects intact.
+5. Test direct writes bypassing the UI, including SVG/HTML/executable bytes labelled JPEG/PNG/WebP, invalid signatures, corrupted and polyglot files, oversized files, huge decoded dimensions and resource exhaustion. Confirm quarantined objects are never served and only re-encoded allowlisted output is published. Test quotas and rate limiting.
+6. On a second device/account and after refresh, verify authorized persistence and inaccessible missing objects use initials. Revoke membership and test new requests, cached UI and an already issued signed URL until expiry; document the expected bearer-token revocation window. Test session expiration during upload.
+7. Confirm quota/audit behavior, failed/cancelled upload recovery, repeated retries and cleanup, including a dry run with no deletion of referenced objects. Verify Demo in English and Arabic still uses browser-local storage and never uploads. Remove only synthetic test data through approved Storage APIs after an operator verifies references and retention.
+
+## Orphan cleanup requirements
+
+No automatic safe garbage collector exists. Objects can remain staged after failed uploads, bound through old reservations, referenced by approved suggestions, or retired by a different actor/after expiry. Do not directly delete rows from `storage.objects`. Design an owner-operated, logged Storage-API cleanup with retention/grace period, quotas, a dry run, checks of every profile and suggestion reference across the entire bucket, and synchronization with reservation/attachment and approval transactions; re-check references immediately before deletion. Never delete a referenced, active or in-flight object. Independently review and test the cleanup's concurrency guarantees before running it.
+
+Earlier local verification executed the owner-step SQL inside a disposable PGlite database; it was not run on hosted Supabase. The test harness now uses stand-in policies rather than executing that owner-step file.
