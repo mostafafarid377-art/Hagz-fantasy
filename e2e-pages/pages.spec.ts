@@ -15,7 +15,9 @@ test('GitHub Pages build loads under a project subdirectory and survives a route
   await expect.poll(() => new URL(page.url()).hash).toBe('#/dashboard');
   await page.reload();
   await expect(page.getByRole('heading', { name: /Welcome back/ })).toBeVisible();
-  await page.getByRole('link', { name: 'Player Market', exact: true }).click();
+  // The Market tab was removed from navigation; the screen is reached from the
+  // dashboard's "Explore market" action instead.
+  await page.getByRole('link', { name: 'Explore market' }).click();
   await expect(page.getByRole('heading', { name: 'Player Market' })).toBeVisible();
   expect(errors).toEqual([]);
 });
