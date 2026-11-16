@@ -34,10 +34,13 @@ const PKG = [
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
   '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
-  '20261116210000_phase4_market_and_transfer_gaps',
+  '20261116210000_phase4_market_and_transfer_gaps', '20261116220000_restore_real_team_name_uniqueness',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
+// The correction is deliberately safe to retry if the exact original constraint
+// was already restored or a deployment attempt is resumed.
+await load('../../migrations/20261116220000_restore_real_team_name_uniqueness.sql');
 after(() => db.close());
 
 const q = (sql, params = []) => db.query(sql, params);
@@ -328,6 +331,22 @@ test('suggestions: approval creates exactly one market player, atomically', asyn
   const created = market.find((p) => p.id === approved.league_player_id);
   assert.equal(created.name, 'Hady Wael');
   assert.equal(Number(created.price), 5000000);
+
+  // Display names are labels: a second actual player may share this name while
+  // immutable profile IDs keep their market rows distinct.
+  const sameNamePlayer = await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id,
+    created.name, 'MID', 5000000, 81);
+  assert.notEqual(sameNamePlayer.player_id, created.player_id);
+  assert.notEqual(sameNamePlayer.id, created.id);
+
+  // Updating one actual player's market entry by profile ID must not create a
+  // second entry for that same player (also enforced by UNIQUE(league_id,player_id)).
+  const updatedSamePlayer = await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id,
+    created.name, 'MID', 5100000, 82, true, null, null, created.player_id);
+  assert.equal(updatedSamePlayer.player_id, created.player_id);
+  assert.equal(updatedSamePlayer.id, created.id);
+  assert.equal(await scalar('select count(*)::int from public.league_players where league_id=$1 and player_id=$2',
+    [LEAGUE.id, created.player_id]), 1);
 
   // The suggestion cannot be reviewed twice.
   await expectDenied(() => rpc(ALICE, 'ff_suggestion_review', LEAGUE.id, SUGGESTION.id, 'rejected', 'changed my mind'), '23514', 'double review');
@@ -624,8 +643,10 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
 
   const teamA = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers');
   const teamB = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'The Invincibles');
-  const sameNamedTeam = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers');
-  assert.notEqual(sameNamedTeam.id, teamA.id, 'real-team names are labels rather than identity keys');
+  await expectDenied(
+    () => rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers'),
+    '23505', 'duplicate real-team name in one league',
+  );
   await expectDenied(() => rpc(BOB, 'ff_tournament_create', LEAGUE.id, 'Rogue FC'), '42501', 'manager creating a real team');
 
   // Create active published Market entries and deliberately do NOT register

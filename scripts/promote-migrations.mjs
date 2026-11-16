@@ -155,10 +155,11 @@ const PACKAGE = [
   ['20261115000019', '019_optional_match_gameweek.sql', 'optional_match_gameweek'],
   ['20261115000020', '020_leader_match_result_finalization.sql', 'leader_match_result_finalization'],
   ['20261116210000', '021_phase4_market_and_transfer_gaps.sql', 'phase4_market_and_transfer_gaps'],
+  ['20261116220000', '022_restore_real_team_name_uniqueness.sql', 'restore_real_team_name_uniqueness'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018', '019', '020', '021']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);
