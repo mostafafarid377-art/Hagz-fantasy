@@ -89,3 +89,11 @@ button.pitch-player{border:0;background:transparent;color:inherit;cursor:pointer
    usable. Distinct from .error-panel so it reads as a caveat, not a blocker. */
 .partial-panel{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 .partial-detail{margin-top:.35rem;font-size:.74rem;color:var(--muted);word-break:break-word}
+
+/* Live multi-suggestion forms stay legible and usable in narrow viewports. */
+.suggestion-draft{min-width:0;margin:0;padding:14px;border:1px solid #303d2d;border-radius:8px;display:grid;gap:13px}
+.suggestion-draft legend{padding:0 7px;color:#c5f43b;font-size:11px;font-weight:800}
+.suggestion-batch>.button-row{align-items:center}
+.identity-hint{display:inline-block;margin-inline-start:7px;color:#879682;font-size:9px;font-variant-numeric:tabular-nums;direction:ltr;unicode-bidi:isolate}
+.transfer-history{min-width:0}
+@media(max-width:600px){.suggestion-draft{padding:11px}.suggestion-batch>.button-row{display:grid;grid-template-columns:1fr}.suggestion-batch>.button-row .button{width:100%;justify-content:center}.transfer-history .table-wrap{margin-inline:-8px}}

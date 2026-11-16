@@ -34,6 +34,7 @@ const PKG = [
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
   '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
+  '20261116210000_phase4_market_and_transfer_gaps',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -248,6 +249,11 @@ test('market: only the leader can publish players, and writes are validated', as
   const market = await rpc(BOB, 'ff_market_players', LEAGUE.id);
   assert.equal(market.length, 1);
   assert.equal(market[0].name, 'Omar Khaled');
+  const sameDisplayName = await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Omar Khaled', 'MID', 4500000, 77, false);
+  assert.notEqual(sameDisplayName.player_id, player.player_id);
+  const all = await rpc(ALICE, 'ff_market_players', LEAGUE.id, null, null, true);
+  assert.equal(all.filter((entry) => entry.name === 'Omar Khaled').length, 2,
+    'two distinct identity IDs may share one display name');
 
   globalThis.PLAYER_GK = player;
 });
@@ -267,7 +273,7 @@ test('market: the leader can edit and deactivate an existing player', async () =
   assert.equal(active.length, 0);
   // ...but is visible when explicitly requested (the management screen).
   const all = await rpc(ALICE, 'ff_market_players', LEAGUE.id, null, null, true);
-  assert.equal(all.length, 1);
+  assert.equal(all.length, 2, 'management includes both inactive identity records');
 
   // Reactivate for the squad tests below.
   await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Omar Khaled Jr', 'GK', 6000000, 85,
@@ -281,9 +287,10 @@ test('suggestions: a manager submits, and only the leader decides', async () => 
   const submitted = await rpc(BOB, 'ff_suggestion_submit', LEAGUE.id, 'Hady Wael', 'MID', 'Great vision', null, null);
   assert.equal(submitted.status, 'pending');
 
-  // Duplicate pending suggestions (case/space insensitive) are refused before the
-  // unique index fires, so the user gets a readable error.
-  await expectDenied(() => rpc(CAROL, 'ff_suggestion_submit', LEAGUE.id, '  hady wael ', 'MID'), '23514', 'duplicate suggestion');
+  // Same-name entries are different candidate people, not identity collisions.
+  const sameName = await rpc(CAROL, 'ff_suggestion_submit', LEAGUE.id, '  hady wael ', 'MID');
+  assert.notEqual(sameName.id, submitted.id);
+  assert.equal(sameName.name.toLowerCase(), submitted.name.toLowerCase());
 
   // Bad input.
   await expectDenied(() => rpc(BOB, 'ff_suggestion_submit', LEAGUE.id, 'X', 'MID'), '23514', 'name too short');
@@ -298,9 +305,9 @@ test('suggestions: a manager submits, and only the leader decides', async () => 
   const bobs = await rpc(BOB, 'ff_suggestions', LEAGUE.id);
   assert.equal(bobs.length, 1);
   const carols = await rpc(CAROL, 'ff_suggestions', LEAGUE.id);
-  assert.equal(carols.length, 0, 'suggestions are private to their author plus the leader');
+  assert.equal(carols.length, 1, 'suggestions are private to their author plus the leader');
   const leaderQueue = await rpc(ALICE, 'ff_suggestions', LEAGUE.id, 'pending');
-  assert.equal(leaderQueue.length, 1);
+  assert.equal(leaderQueue.length, 2, 'same-name submissions remain independently reviewable');
 
   globalThis.SUGGESTION = submitted;
 });
@@ -346,12 +353,32 @@ test('suggestions: rejection records a reason and notifies the author', async ()
     'select reason from public.player_approval_logs where league_id=$1 and suggestion_id=$2', [LEAGUE.id, s.id]);
   assert.equal(reason, 'Not in our league', 'the rejection reason is preserved in the audit log');
 
-  // A rejected name may be suggested again - only *pending* duplicates are blocked.
+  // A rejected display name may be reused; display names never define player identity.
   const retry = await rpc(CAROL, 'ff_suggestion_submit', LEAGUE.id, 'Rejected Player', 'FWD');
   assert.equal(retry.status, 'pending');
 });
 
 // ---------------------------------------------------------------------------
+test('suggestions: batches are atomic while same-name decisions stay independent', async () => {
+  const { LEAGUE } = globalThis;
+  const before = await scalar("select count(*)::int from public.player_suggestions where league_id=$1 and name='Batch Twin'", [LEAGUE.id]);
+  await expectDenied(() => rpc(BOB, 'ff_suggestion_submit_batch', LEAGUE.id, [
+    { name: 'Batch Twin', position: 'MID' }, { name: 'Invalid Batch Twin', position: 'ST' },
+  ]), '23514', 'invalid batch rolls back');
+  assert.equal(await scalar("select count(*)::int from public.player_suggestions where league_id=$1 and name='Batch Twin'", [LEAGUE.id]), before);
+  const batch = await rpc(BOB, 'ff_suggestion_submit_batch', LEAGUE.id, [
+    { name: 'Batch Twin', position: 'MID' }, { name: 'Batch Twin', position: 'FWD' },
+  ]);
+  assert.equal(batch.length, 2);
+  assert.notEqual(batch[0].id, batch[1].id);
+  await rpc(ALICE, 'ff_suggestion_review', LEAGUE.id, batch[0].id, 'approved', null, 3000000, 70);
+  await rpc(ALICE, 'ff_suggestion_review', LEAGUE.id, batch[1].id, 'rejected', 'Different role');
+  const mine = await rpc(BOB, 'ff_suggestions', LEAGUE.id);
+  assert.equal(mine.find((item) => item.id === batch[0].id).status, 'approved');
+  assert.equal(mine.find((item) => item.id === batch[1].id).status, 'rejected');
+  await expectDenied(() => rpc(MALLORY, 'ff_suggestion_submit_batch', LEAGUE.id, [{ name: 'Outsider', position: 'MID' }]), '42501', 'outsider batch submit');
+});
+
 test('squad: buy enforces budget, position limits, duplicates and market state', async () => {
   const { LEAGUE, PLAYER_GK, PLAYER_MID } = globalThis;
 
@@ -511,6 +538,14 @@ test('squad: transfers are same-position and budget-checked', async () => {
   const history = await scalar(
     'select count(*)::int from public.transfers where league_id=$1 and fantasy_team_id=$2', [LEAGUE.id, confirmedSquad.team.id]);
   assert.ok(history >= 1, 'a completed transfer is written to the transfer history');
+  const ownHistory = await rpc(CAROL, 'ff_transfers', LEAGUE.id);
+  assert.ok(ownHistory.some((item) => item.out_player_id === out.league_player_id && item.in_player_id === samePosition.id));
+  assert.equal(ownHistory.find((item) => item.in_player_id === samePosition.id).manager_id, CAROL);
+  const leaderHistory = await rpc(ALICE, 'ff_transfers', LEAGUE.id);
+  assert.ok(leaderHistory.some((item) => item.in_player_id === samePosition.id), 'leader may audit the league history');
+  assert.equal((await rpc(BOB, 'ff_transfers', LEAGUE.id)).some((item) => item.in_player_id === samePosition.id), false,
+    'managers cannot read one another’s transfer rows');
+  await expectDenied(() => rpc(MALLORY, 'ff_transfers', LEAGUE.id), '42501', 'outsider transfer history');
 });
 
 // ---------------------------------------------------------------------------
@@ -589,6 +624,8 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
 
   const teamA = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers');
   const teamB = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'The Invincibles');
+  const sameNamedTeam = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers');
+  assert.notEqual(sameNamedTeam.id, teamA.id, 'real-team names are labels rather than identity keys');
   await expectDenied(() => rpc(BOB, 'ff_tournament_create', LEAGUE.id, 'Rogue FC'), '42501', 'manager creating a real team');
 
   // Create active published Market entries and deliberately do NOT register
@@ -945,7 +982,7 @@ test('fixtures: a team from another league is refused with a clear 42501', async
 
 // The additive migration replaces the bodies of existing RPCs without opening
 // new execute access to anon or changing the authenticated application surface.
-test('match RPCs retain authenticated-only execute permissions after migration 020', async () => {
+test('Phase 4 RPCs retain authenticated-only execute permissions and definer ownership', async () => {
   const create = await scalar(`select has_function_privilege('authenticated', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const anonCreate = await scalar(`select has_function_privilege('anon', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const read = await scalar(`select has_function_privilege('authenticated', 'public.ff_matches(uuid)'::regprocedure, 'execute')`);
@@ -955,4 +992,9 @@ test('match RPCs retain authenticated-only execute permissions after migration 0
   assert.equal(create, true); assert.equal(anonCreate, false);
   assert.equal(read, true); assert.equal(anonRead, false);
   assert.equal(lineup, true); assert.equal(anonLineup, false);
+  for (const signature of ['public.ff_suggestion_submit_batch(uuid,jsonb)', 'public.ff_transfers(uuid,integer)']) {
+    assert.equal(await scalar(`select has_function_privilege('authenticated', '${signature}'::regprocedure, 'execute')`), true);
+    assert.equal(await scalar(`select has_function_privilege('anon', '${signature}'::regprocedure, 'execute')`), false);
+    assert.equal(await scalar(`select pg_get_userbyid(proowner) from pg_proc where oid='${signature}'::regprocedure`), 'ff_migration_owner');
+  }
 });

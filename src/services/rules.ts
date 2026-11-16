@@ -85,13 +85,9 @@ export function transferPlayer(squad: Squad, outId: string, inId: string, player
   return { squad: { ...squad, playerIds: nextIds, captainId: squad.captainId === outId ? undefined : squad.captainId, viceCaptainId: squad.viceCaptainId === outId ? undefined : squad.viceCaptainId } };
 }
 export const canManage = (role: Role, currentLeagueId?: string, resourceLeagueId?: string) => role === 'leader' && (!resourceLeagueId || currentLeagueId === resourceLeagueId);
-export const isDuplicateName = (name: string, leagueId: string, players: Player[], suggestions: Suggestion[], excludeSuggestion?: string) => {
-  const n = name.trim().toLocaleLowerCase();
-  return players.some(p => p.leagueId === leagueId && p.name.trim().toLocaleLowerCase() === n) || suggestions.some(s => s.id !== excludeSuggestion && s.leagueId === leagueId && s.status !== 'rejected' && s.name.trim().toLocaleLowerCase() === n);
-};
-export function submitSuggestion(role: Role, suggestion: Suggestion, currentLeagueId: string, players: Player[], suggestions: Suggestion[]) {
+export function submitSuggestion(role: Role, suggestion: Suggestion, currentLeagueId: string, _players: Player[], suggestions: Suggestion[]) {
   if (role !== 'manager' || suggestion.submittedBy !== 'manager' || suggestion.leagueId !== currentLeagueId) throw new Error('forbidden');
-  if (suggestions.some(s => s.id === suggestion.id) || !positions.includes(suggestion.position) || suggestion.notes.length > 500 || !validImageValue(suggestion.image || '') || suggestion.name.trim().length < 2 || suggestion.status !== 'pending' || isDuplicateName(suggestion.name, currentLeagueId, players, suggestions)) throw new Error('duplicate');
+  if (suggestions.some(s => s.id === suggestion.id) || !positions.includes(suggestion.position) || suggestion.notes.length > 500 || !validImageValue(suggestion.image || '') || suggestion.name.trim().length < 2 || suggestion.status !== 'pending') throw new Error('duplicate');
   return [...suggestions, suggestion];
 }
 export function validPlayer(player: Player): boolean {
@@ -101,17 +97,15 @@ export function reviewSuggestion(role: Role, suggestion: Suggestion, decision: '
   const current = suggestions.find(s => s.id === suggestion.id);
   if (!current || !canManage(role, currentLeagueId, current.leagueId)) throw new Error('forbidden');
   if (current.status !== 'pending') throw new Error('already reviewed');
-  if (decision === 'approved' && (!player || player.leagueId !== currentLeagueId || !validPlayer(player) || !player.active || players.some(p => p.id === player.id) || isDuplicateName(player.name, currentLeagueId, players, suggestions, current.id))) throw new Error('duplicate');
+  if (decision === 'approved' && (!player || player.leagueId !== currentLeagueId || !validPlayer(player) || !player.active || players.some(p => p.id === player.id))) throw new Error('duplicate');
   return { suggestions: suggestions.map(s => s.id === current.id ? { ...s, status: decision, rejectionReason: decision === 'rejected' ? rejectionReason.trim() : undefined } : s), players: decision === 'approved' && player ? [...players, player] : players };
 }
 
-export function saveMarketPlayer(role: Role, currentLeagueId: string, player: Player, players: Player[], suggestions: Suggestion[]): Player[] {
+export function saveMarketPlayer(role: Role, currentLeagueId: string, player: Player, players: Player[], _suggestions: Suggestion[]): Player[] {
   if (!canManage(role, currentLeagueId, player.leagueId)) throw new Error('forbidden');
   if (!validPlayer(player)) throw new Error('invalidPlayer');
   const existing = players.find(p => p.id === player.id);
   if (existing && existing.leagueId !== currentLeagueId) throw new Error('forbidden');
-  if (players.some(p => p.id !== player.id && p.leagueId === currentLeagueId && p.name.trim().toLocaleLowerCase() === player.name.trim().toLocaleLowerCase())) throw new Error('duplicate');
-  if (!existing && isDuplicateName(player.name, currentLeagueId, players, suggestions)) throw new Error('duplicate');
   return [...players.filter(p => p.id !== player.id), player];
 }
 export function setMarketStatus(state: DemoState, leagueId: string, marketOpen: boolean): DemoState {

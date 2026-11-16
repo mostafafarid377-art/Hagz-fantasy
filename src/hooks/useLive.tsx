@@ -16,7 +16,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import * as api from '../services/api';
 import { leaguePoints, EMPTY_POINTS, type PointsSnapshot } from '../services/points';
 import { ApiError } from '../services/api';
-import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion } from '../types/api';
+import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer } from '../types/api';
 import type { Bootstrap } from '../services/api';
 
 const LEAGUE_KEY = 'ff-live-league';
@@ -31,6 +31,7 @@ export interface LiveState {
   suggestions: ApiSuggestion[];
   gameweeks: Array<{ id: string; number: number; deadline: string; season_id: string; season_name: string; rules_pinned: boolean }>;
   matches: ApiMatch[];
+  transfers: ApiTransfer[];
   standings: ApiStanding[];
   notifications: ApiNotification[];
   /**
@@ -69,6 +70,7 @@ interface LiveContextValue extends LiveState {
   savePlayer: (input: api.UpsertPlayerInput) => Promise<void>;
   setSquadCaptains: (captainId: string | null, viceCaptainId: string | null) => Promise<void>;
   suggestPlayer: (input: Parameters<typeof api.submitSuggestion>[1]) => Promise<void>;
+  suggestPlayers: (items: api.SuggestionInput[]) => Promise<void>;
   reviewSuggestion: (id: string, decision: 'approved' | 'rejected', opts?: Parameters<typeof api.reviewSuggestion>[3]) => Promise<void>;
   /** Squad */
   buy: (marketPlayerId: string) => Promise<void>;
@@ -90,7 +92,7 @@ const message = (error: unknown): string =>
 export function LiveProvider({ userId, children }: { userId: string | null; children: ReactNode }) {
   const [state, setState] = useState<LiveState>({
     loading: true, leagueId: null, leagues: [], members: [], players: [], squad: null,
-    suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+    suggestions: [], gameweeks: [], matches: [], transfers: [], standings: [], notifications: [],
     points: EMPTY_POINTS,
     error: null, partialFailures: [],
   });
@@ -110,7 +112,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
         if (mine !== generation.current) return;
         commit({
           loading: false, leagueId: null, leagues: usable, members: [], players: [], squad: null,
-          suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+          suggestions: [], gameweeks: [], matches: [], transfers: [], standings: [], notifications: [],
           points: EMPTY_POINTS,
           error: null, partialFailures: [],
         });
@@ -133,7 +135,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
           return fallback;
         }
       };
-      const [members, players, squad, suggestions, gameweeks, matches, standings, notifications] =
+      const [members, players, squad, suggestions, gameweeks, matches, transfers, standings, notifications] =
         await Promise.all([
           safe('members', api.leagueMembers(chosen), []),
           safe('players', api.marketPlayers(chosen, { includeInactive: true }), []),
@@ -141,6 +143,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
           safe('suggestions', api.suggestions(chosen), []),
           safe('gameweeks', api.gameweeks(chosen), []),
           safe('matches', api.matches(chosen), []),
+          safe('transfers', api.transfers(chosen), []),
           safe('standings', api.standings(chosen), []),
           safe('notifications', api.notifications(chosen), []),
         ]);
@@ -148,7 +151,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       if (mine !== generation.current) return;
       commit({
         loading: false, leagueId: chosen, leagues: usable, members, players, squad,
-        suggestions, gameweeks, matches, standings, notifications, points: EMPTY_POINTS,
+        suggestions, gameweeks, matches, transfers, standings, notifications, points: EMPTY_POINTS,
         error: null,
         partialFailures: failures,
       });
@@ -260,6 +263,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     savePlayer: (input) => mutate(() => api.upsertMarketPlayer(require(leagueId), input)),
     setSquadCaptains: (captainId, viceCaptainId) => mutate(() => api.setSquadCaptains(require(leagueId), captainId, viceCaptainId)),
     suggestPlayer: (input) => mutate(() => api.submitSuggestion(require(leagueId), input)),
+    suggestPlayers: (items) => mutate(() => api.submitSuggestionBatch(require(leagueId), items)),
     reviewSuggestion: (id, decision, opts) => mutate(() => api.reviewSuggestion(require(leagueId), id, decision, opts)),
     buy: (id) => mutate(() => api.buyPlayer(require(leagueId), id)),
     sell: (id) => mutate(() => api.sellPlayer(require(leagueId), id)),

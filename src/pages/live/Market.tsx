@@ -19,6 +19,7 @@ import type { Position } from '../../types/api';
 const positions: readonly Position[] = ['GK', 'DEF', 'MID', 'FWD'];
 import type { ApiPlayer, ApiSuggestion } from '../../types/api';
 import { inspectImage, StorageError, uploadBlocked } from '../../services/storage';
+import { lastGamePointsForPlayer, seasonPointsForPlayer } from '../../services/points';
 
 const POSITION_ORDER = ['GK', 'DEF', 'MID', 'FWD'] as const;
 
@@ -110,6 +111,8 @@ export function LiveMarket() {
                   <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
                 </div>
                 <Link to={`/players/${player.id}`} className="player-name">{player.name}</Link>
+                {live.players.some((other) => other.id !== player.id && other.name.trim().toLocaleLowerCase() === player.name.trim().toLocaleLowerCase()) &&
+                  <small className="identity-hint" title={t('Distinct player record')}>#{player.id.slice(0, 8)}</small>}
                 <div className="player-meta">
                   <span>{player.position} <span className="dot">·</span> {player.owned_by ?? 0} {t('managers')}</span>
                 </div>
@@ -158,8 +161,8 @@ export function LivePlayerProfile() {
           <div className="profile-stats">
             <span><strong>{player.rating}</strong> {t('OVR')}</span>
             <span><strong>{formatCompactMoney(player.price)}</strong> {t('Price')}</span>
-            {/* No per-player points exist in the live schema, so this figure is
-                omitted rather than shown as 0. */}
+            <span><strong>{lastGamePointsForPlayer(live.points, player.id) ?? '—'}</strong> {t('Last game points')}</span>
+            <span><strong>{seasonPointsForPlayer(live.points, player.id) ?? '—'}</strong> {t('Total points')}</span>
             <span><strong>{player.owned_by ?? 0}</strong> {t('managers')}</span>
           </div>
         </div>
@@ -214,6 +217,7 @@ export function LiveManagement() {
               <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
               <div>
                 <strong>{p.name}</strong>
+                {live.players.some((other) => other.id !== p.id && other.name.trim().toLocaleLowerCase() === p.name.trim().toLocaleLowerCase()) && <small className="identity-hint">#{p.id.slice(0, 8)}</small>}
                 <small>{p.position} · {p.rating} {t('OVR')} · {formatCompactMoney(p.price)}</small>
               </div>
               <Badge kind={p.active ? 'approved' : 'neutral'}>{t(p.active ? 'Active' : 'Inactive')}</Badge>
@@ -392,25 +396,27 @@ function ImageField({ value, onChange }: { value: string; onChange: (value: stri
 export function LiveSuggestPlayer() {
   const { t } = useTranslation();
   const live = useLive();
-  const [name, setName] = useState('');
-  const [position, setPosition] = useState<'GK' | 'DEF' | 'MID' | 'FWD'>('MID');
-  const [notes, setNotes] = useState('');
-  const [imageUrl, setImageUrl] = useState('');
+  type Draft = { key: number; name: string; position: 'GK' | 'DEF' | 'MID' | 'FWD'; notes: string; imageUrl: string };
+  const [drafts, setDrafts] = useState<Draft[]>([{ key: 1, name: '', position: 'MID', notes: '', imageUrl: '' }]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
 
   const mine = live.suggestions;
-
+  function update(key: number, patch: Partial<Draft>) {
+    setDrafts((current) => current.map((draft) => draft.key === key ? { ...draft, ...patch } : draft));
+  }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(''); setDone(''); setBusy(true);
     try {
-      await live.suggestPlayer({ name: name.trim(), position, notes: notes.trim() || undefined, imageUrl: imageUrl.trim() || null });
-      setName(''); setNotes(''); setImageUrl('');
-      setDone(t('Suggestion submitted. Your league leader will review it.'));
+      await live.suggestPlayers(drafts.map(({ name, position, notes, imageUrl }) => ({
+        name: name.trim(), position, notes: notes.trim() || undefined, imageUrl: imageUrl.trim() || null,
+      })));
+      setDrafts([{ key: Date.now(), name: '', position: 'MID', notes: '', imageUrl: '' }]);
+      setDone(t('Suggestions submitted. Your league leader will review each one.'));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('Could not submit that suggestion.'));
+      setError(caught instanceof Error ? caught.message : t('Could not submit those suggestions. No suggestions were saved.'));
     } finally { setBusy(false); }
   }
 
@@ -420,29 +426,45 @@ export function LiveSuggestPlayer() {
   return (
     <>
       <PageTitle eyebrow="THE MARKET" title="Suggest a player"
-        description="Propose a player for your league market. The leader sets the final price and rating." />
+        description="Propose one or more players for your league market. The leader sets the final price and rating for each." />
 
-      <form className="panel form-panel" onSubmit={submit}>
-        <label>{t('Player name')}
-          <input required minLength={2} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label>{t('Position')}
-          <select value={position} onChange={(e) => setPosition(e.target.value as typeof position)}>
-            {positions.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </label>
-        <label>{t('Details')}
-          <textarea maxLength={500} rows={3} value={notes} onChange={(e) => setNotes(e.target.value)}
-            placeholder={t('Optional details for your leader')} />
-        </label>
-        <label>{t('Image URL (optional)')}
-          <input type="url" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://" />
-        </label>
+      <form className="panel form-panel suggestion-batch" onSubmit={submit}>
+        {drafts.map((draft, index) => (
+          <fieldset className="suggestion-draft" key={draft.key}>
+            <legend>{t('Player suggestion')} {index + 1}</legend>
+            <label>{t('Player name')}
+              <input required minLength={2} maxLength={100} value={draft.name}
+                onChange={(e) => update(draft.key, { name: e.target.value })} />
+            </label>
+            <label>{t('Position')}
+              <select value={draft.position} onChange={(e) => update(draft.key, { position: e.target.value as Draft['position'] })}>
+                {positions.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+            <label>{t('Details')}
+              <textarea maxLength={500} rows={2} value={draft.notes}
+                onChange={(e) => update(draft.key, { notes: e.target.value })}
+                placeholder={t('Optional details for your leader')} />
+            </label>
+            <label>{t('Image URL (optional)')}
+              <input type="url" value={draft.imageUrl} onChange={(e) => update(draft.key, { imageUrl: e.target.value })} placeholder="https://" />
+            </label>
+            {drafts.length > 1 && <button type="button" className="button button-outline"
+              onClick={() => setDrafts((current) => current.filter((item) => item.key !== draft.key))}>{t('Remove suggestion')}</button>}
+          </fieldset>
+        ))}
+        <div className="button-row">
+          <button type="button" className="button button-outline" disabled={busy || drafts.length >= 50}
+            onClick={() => setDrafts((current) => [...current, { key: Date.now() + current.length, name: '', position: 'MID', notes: '', imageUrl: '' }])}>
+            <Plus size={16} /> {t('Add another player')}
+          </button>
+          <button className="button" disabled={busy || drafts.some((draft) => draft.name.trim().length < 2)}>
+            {busy ? t('Submitting…') : t('Submit all suggestions')}
+          </button>
+        </div>
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
         {done && <p className="validation-panel valid" role="status"><Check size={14} /> {done}</p>}
-        <button className="button" disabled={busy || name.trim().length < 2}>
-          {busy ? t('Submitting…') : t('Submit suggestion')}
-        </button>
+        <small>{t('Each suggestion is reviewed separately. The entire batch is saved together or not at all.')}</small>
       </form>
 
       <div className="panel section-spacer">
@@ -456,13 +478,11 @@ export function LiveSuggestPlayer() {
                 <tbody>
                   {mine.map((s) => (
                     <tr key={s.id}>
-                      <td><strong>{s.name}</strong></td>
+                      <td><strong>{s.name}</strong>{mine.some((other) => other.id !== s.id && other.name.trim().toLocaleLowerCase() === s.name.trim().toLocaleLowerCase()) && <small className="identity-hint">#{s.id.slice(0, 8)}</small>}</td>
                       <td>{s.position}</td>
-                      <td>
-                        <Badge kind={s.status === 'approved' ? 'lime' : s.status === 'rejected' ? 'danger' : 'neutral'}>
-                          {t(s.status === 'pending' ? 'Pending' : s.status === 'approved' ? 'Approved' : 'Rejected')}
-                        </Badge>
-                      </td>
+                      <td><Badge kind={s.status === 'approved' ? 'lime' : s.status === 'rejected' ? 'danger' : 'neutral'}>
+                        {t(s.status === 'pending' ? 'Pending' : s.status === 'approved' ? 'Approved' : 'Rejected')}
+                      </Badge></td>
                       <td>
                         {s.status === 'rejected' && s.rejection_reason && <small>{s.rejection_reason}</small>}
                         {s.status === 'approved' && <small>{t('Added to the market')}</small>}
@@ -527,7 +547,7 @@ export function LiveApprovals() {
               <div className="suggestion-row" key={s.id}>
                 <Avatar name={s.name} image={s.image_url ?? undefined} size="sm" />
                 <div>
-                  <strong>{s.name}</strong>
+                  <strong>{s.name}{pending.some((other) => other.id !== s.id && other.name.trim().toLocaleLowerCase() === s.name.trim().toLocaleLowerCase()) && <small className="identity-hint">#{s.id.slice(0, 8)}</small>}</strong>
                   <small>{s.position} · {t('Submitted by')} {s.submitted_by_name} {s.submitted_by === live.myUserId ? `(${t('you')})` : ''}</small>
                   {s.notes && <small className="muted">{s.notes}</small>}
                 </div>
@@ -546,7 +566,7 @@ export function LiveApprovals() {
           <div className="sheet-handle" aria-hidden="true" />
           <button className="sheet-close" aria-label={t('Close')} onClick={() => setSelected(null)}><X size={20} /></button>
           <div className="eyebrow">{t('NEW SUGGESTION')}</div>
-          <h2 id="review-title">{selected.name}</h2>
+          <h2 id="review-title">{selected.name}{pending.some((other) => other.id !== selected.id && other.name.trim().toLocaleLowerCase() === selected.name.trim().toLocaleLowerCase()) && <small className="identity-hint">#{selected.id.slice(0, 8)}</small>}</h2>
           <p className="sheet-note">{selected.position} · {t('Submitted by')} {selected.submitted_by_name}</p>
           {selected.notes && <p className="sheet-note">{selected.notes}</p>}
 

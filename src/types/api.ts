@@ -163,6 +163,23 @@ export interface ApiMatch {
   history: ApiMatchRevision[];
 }
 
+export interface ApiTransfer {
+  id: string;
+  team_id: string;
+  team_name: string;
+  manager_id: string;
+  manager_name: string | null;
+  gameweek_id: string;
+  gameweek_number: number;
+  out_player_id: string | null;
+  out_name: string | null;
+  in_player_id: string;
+  in_name: string;
+  out_price: number | null;
+  in_price: number;
+  created_at: string;
+}
+
 export interface ApiStanding {
   team_id: string;
   team_name: string;

@@ -13,7 +13,7 @@
 
 import { getSupabase } from '../lib/supabase';
 import type {
-  ApiLeague, ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion,
+  ApiLeague, ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer,
 } from '../types/api';
 
 /** Stable, translatable error codes. `message` is a developer fallback only. */
@@ -185,6 +185,23 @@ export const submitSuggestion = (leagueId: string, input: {
   p_notes: input.notes ?? null, p_image_path: input.imagePath ?? null,
   p_image_url: input.imageUrl ?? null,
 });
+
+export type SuggestionInput = {
+  name: string; position: 'GK' | 'DEF' | 'MID' | 'FWD'; notes?: string;
+  imagePath?: string | null; imageUrl?: string | null;
+};
+
+export const submitSuggestionBatch = (leagueId: string, items: SuggestionInput[]) =>
+  call<ApiSuggestion[]>('ff_suggestion_submit_batch', {
+    p_league: leagueId,
+    p_items: items.map((item) => ({
+      name: item.name, position: item.position, notes: item.notes ?? null,
+      image_path: item.imagePath ?? null, image_url: item.imageUrl ?? null,
+    })),
+  });
+
+export const transfers = (leagueId: string, limit = 100) =>
+  call<ApiTransfer[]>('ff_transfers', { p_league: leagueId, p_limit: limit });
 
 export const suggestions = (leagueId: string, status?: 'pending' | 'approved' | 'rejected') =>
   call<ApiSuggestion[]>('ff_suggestions', { p_league: leagueId, p_status: status ?? null });
