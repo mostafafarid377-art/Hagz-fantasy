@@ -153,12 +153,12 @@ describe('fixtures look like the demo fixtures', () => {
     expect(rows[0].getAttribute('href')).toBe('/match-center/m1');
   });
 
-  it('labels a past kick-off as Played, not Upcoming', async () => {
+  it('keeps a past unapproved fixture out of Upcoming and marks its result as awaiting review', async () => {
     await mountLive('fixtures');
     const rows = [...document.querySelectorAll('.fixture-list .fixture-row')];
     const played = rows.find((r) => r.textContent?.includes('Real League FC'));
     const upcoming = rows.find((r) => r.textContent?.includes('Antelopes'));
-    expect(played?.textContent).toMatch(/Played/);
+    expect(played?.textContent).toMatch(/Awaiting result/);
     expect(upcoming?.textContent).toMatch(/Upcoming/);
   });
 });
@@ -175,7 +175,8 @@ describe('the live match center', () => {
     expect(screen.getByText('Schedule a real match')).toBeTruthy();
     expect(screen.getByLabelText('New real team')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add team' })).toBeTruthy();
-    expect(screen.getByLabelText('Gameweek')).toBeTruthy();
+    expect(screen.getByLabelText(/Gameweek/)).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'No gameweek' })).toBeTruthy();
     expect(screen.getByLabelText('Assigned Organizer')).toBeTruthy();
     expect(screen.getByLabelText('Date & kick-off')).toBeTruthy();
     expect(screen.getByText(/does not create player profiles or affect fantasy squads/i)).toBeTruthy();

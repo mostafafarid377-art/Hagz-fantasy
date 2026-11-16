@@ -7,8 +7,8 @@ import { transferPlayer } from '../services/rules';
 import type { Player, Squad } from '../types';
 import { formatMoney } from '../utils/format';
 
-type Props = {player:Player; players:Player[]; squad:Squad; budget:number; marketOpen:boolean; builder:boolean; close:()=>void; startSwap:()=>void; canSwap:boolean; transfer:(out:string,incoming:string)=>string|null; setCaptain:(type:'captain'|'vice')=>void};
-export function PlayerSheet({player,players,squad,budget,marketOpen,builder,close,startSwap,canSwap,transfer,setCaptain}:Props) {
+type Props = {player:Player; players:Player[]; squad:Squad; budget:number; marketOpen:boolean; builder:boolean; close:()=>void; startSwap:()=>void; canSwap:boolean; transfer:(out:string,incoming:string)=>string|null; remove:()=>void; setCaptain:(type:'captain'|'vice')=>void};
+export function PlayerSheet({player,players,squad,budget,marketOpen,builder,close,startSwap,canSwap,transfer,remove,setCaptain}:Props) {
   const {t}=useTranslation(); const dialog=useRef<HTMLDialogElement>(null);
   const [replacing,setReplacing]=useState(false);const [incomingId,setIncomingId]=useState(''); const [message,setMessage]=useState('');
   useEffect(()=>{ const element=dialog.current; if(element&&!element.open)element.showModal(); },[]);
@@ -28,7 +28,7 @@ export function PlayerSheet({player,players,squad,budget,marketOpen,builder,clos
       {(result?.error||message)&&<p className="error" role="alert">{t(errors[result?.error||message]||message)}</p>}
       <button type="button" className="button sheet-primary" disabled={!result?.squad} onClick={()=>{if(!incoming)return;const error=transfer(player.id,incoming.id);if(error)setMessage(error);else close();}}>{t('Confirm replacement')}</button>
     </section>}
-    <div className="sheet-actions"><DetailLink className="button button-outline" to={`/players/${player.id}`} onClick={close}>{t('Full profile')}</DetailLink>{builder?<button type="button" className="button" onClick={()=>{setReplacing(true);setIncomingId('');}} disabled={replacing}>{t('Select replacement')}</button>:<button type="button" className="button" disabled={!canSwap} onClick={startSwap}><ArrowRightLeft size={16}/>{t('Make substitution')}</button>}</div>
+    {builder?<><DetailLink className="button button-outline full-profile-action" to={`/players/${player.id}`} onClick={close}>{t('Full profile')}</DetailLink><div className="sheet-action-row"><button type="button" className="button" onClick={()=>{setReplacing(true);setIncomingId('');}} disabled={replacing}>{t('Select replacement')}</button><button type="button" className="button button-danger" disabled={!marketOpen} onClick={remove}>{t('Remove')}</button></div></>:<div className="sheet-actions"><DetailLink className="button button-outline" to={`/players/${player.id}`} onClick={close}>{t('Full profile')}</DetailLink><button type="button" className="button" disabled={!canSwap} onClick={startSwap}><ArrowRightLeft size={16}/>{t('Make substitution')}</button></div>}
     {!builder&&!canSwap&&<p className="sheet-note">{t('No eligible swap preserves or improves your formation.')}</p>}
   </dialog>;
 }

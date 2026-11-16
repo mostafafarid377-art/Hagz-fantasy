@@ -25,6 +25,22 @@ Object.assign(ar, {
   'Squad needs attention':'الفريق يحتاج إلى تعديل', 'Squad is valid':'الفريق صالح', 'Select exactly 15 players.':'اختر ١٥ لاعباً بالضبط.', 'A player cannot be selected twice.':'لا يمكن اختيار اللاعب مرتين.', 'A selected player is not in this league.':'أحد اللاعبين المختارين ليس في هذا الدوري.', 'Squad must contain 2 GK, 5 DEF, 5 MID and 3 FWD.':'يجب أن يضم الفريق حارسين و٥ مدافعين و٥ لاعبي وسط و٣ مهاجمين.', 'Select exactly 11 starters.':'اختر ١١ لاعباً أساسياً بالضبط.', 'The starting lineup needs exactly one goalkeeper.':'تحتاج التشكيلة الأساسية إلى حارس واحد بالضبط.', 'Starting positions do not match the selected formation. Swap starters and substitutes to fix it.':'المراكز الأساسية لا تطابق التشكيل المختار. بدّل بين الأساسيين والبدلاء لإصلاحها.', 'The bench must contain exactly 4 players.':'يجب أن تضم دكة البدلاء ٤ لاعبين بالضبط.', 'Select a captain from your squad.':'اختر قائداً من فريقك.', 'Select a vice captain from your squad.':'اختر نائب قائد من فريقك.', 'Captain and vice captain must be different players.':'يجب أن يكون القائد ونائبه لاعبين مختلفين.', 'Starter':'لاعب أساسي', 'Substitute':'لاعب بديل', 'Swap players':'تبديل اللاعبين',
   'No competition data for this league':'لا توجد بيانات منافسة لهذا الدوري', 'Competition results are static demo data.':'نتائج المنافسة بيانات تجريبية ثابتة.', 'Provisional':'مقترح'
 });
+Object.assign(ar, {
+  'Schedule match':'جدولة مباراة', 'Schedule a real match':'جدولة مباراة حقيقية', 'No gameweek':'بدون جولة',
+  'No gameweek link':'غير مرتبطة بجولة', 'Optional':'اختياري', 'Show match':'عرض المباراة',
+  'Awaiting result':'بانتظار النتيجة', 'Awaiting review':'بانتظار المراجعة', 'Needs correction':'بحاجة إلى تصحيح', 'Correction in progress':'التصحيح قيد التنفيذ', 'In progress':'قيد التنفيذ', 'Full time':'انتهت المباراة',
+  'Create match':'إنشاء المباراة', 'Assigned Organizer':'المنظّم المعيّن',
+  'Choose appointed organizer':'اختر المنظّم المعيّن', 'Choose team':'اختر الفريق', 'Team A':'الفريق أ', 'Team B':'الفريق ب',
+  'Date & kick-off':'التاريخ وموعد البداية', 'Starters per side':'اللاعبون الأساسيون لكل فريق',
+  'Maximum substitutes':'الحد الأقصى للبدلاء', 'Add team':'إضافة فريق', 'New real team':'فريق حقيقي جديد',
+  'Enter real team name':'أدخل اسم الفريق الحقيقي', 'At least two active real teams are required.':'يلزم وجود فريقين حقيقيين نشطين على الأقل.',
+  'Appoint an active league member as Match Organizer in league management first.':'عيّن عضواً نشطاً منظّماً للمباريات من إدارة الدوري أولاً.',
+  'Player removed from your squad.':'تمت إزالة اللاعب من فريقك.', 'Teams could not be loaded':'تعذر تحميل الفرق',
+  'The match was created but could not be verified. Refresh the match list before scheduling another.':'تم إنشاء المباراة لكن تعذر التحقق منها. حدّث قائمة المباريات قبل جدولة مباراة أخرى.',
+  'Only published League Market players can be selected in lineups. Scheduling does not create player profiles or affect fantasy squads.':'يمكن اختيار اللاعبين المنشورين في سوق الدوري فقط. لا تنشئ الجدولة ملفات لاعبين ولا تؤثر على فرق الفانتازي.',
+  'No fixtures yet':'لا توجد مباريات بعد', 'Your league leader schedules the matches.':'مسؤول الدوري هو من يجدول المباريات.',
+  'Only the match’s assigned Organizer (or Leader) can edit its record. Fantasy scoring remains pending until scoring rules are approved.':'يمكن لمنظّم المباراة المعيّن (أو مسؤول الدوري) فقط تعديل سجلها. تبقى نقاط الفانتازي معلّقة حتى اعتماد قواعد الاحتساب.'
+});
 const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});
 Object.assign(ar, {'Captaincy updated.':'تم تحديث تعيين القائد ونائبه.','Captain and vice captain must be different players.':'يجب أن يكون القائد ونائبه لاعبين مختلفين.'});

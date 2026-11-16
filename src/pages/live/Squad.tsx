@@ -232,7 +232,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           setCaptain(nextCaptain);
           setVice(nextVice);
         }, 'Captaincy updated.');
-      }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} />}
+      }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} remove={() => void run('sell', async () => { await live.sell(selected.id); setSelectedId(''); }, 'Player removed from your squad.')} />}
       <div className="squad-layout">
         <div className="panel">
           <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !builder ? 'Starting XI' : 'Your squad'} />

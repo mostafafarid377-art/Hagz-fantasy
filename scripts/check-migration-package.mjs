@@ -41,6 +41,7 @@ const DESIGN_MIGRATIONS = {
   // Forward-only captaincy persistence and partial-squad selection support.
   '017_squad_captaincy.sql': 'd260c92899e425eccec8a501ab63e554c0588276c3539e464b5ba1ec7ca515fa',
   '018_live_match_market_workflow.sql': '1fc188f00962a3ea2fd8dd70357133d75c9c9907f94792f54eb062c13d5edc76',
+  '019_optional_match_gameweek.sql': 'c3021373a0028be016a88522c8905e53b815b14e2a0749c4ee51d4d12c7bbf15',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -90,6 +91,7 @@ const PACKAGE = [
   ['20261115000016_league_archive.sql', 'design/migrations/016_league_archive.sql'],
   ['20261115000017_squad_captaincy.sql', 'design/migrations/017_squad_captaincy.sql'],
   ['20261115000018_live_match_market_workflow.sql', 'design/migrations/018_live_match_market_workflow.sql'],
+  ['20261115000019_optional_match_gameweek.sql', 'design/migrations/019_optional_match_gameweek.sql'],
 ];
 
 /**
@@ -111,6 +113,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261115000016_league_archive.sql',
   '20261115000017_squad_captaincy.sql',
   '20261115000018_live_match_market_workflow.sql',
+  '20261115000019_optional_match_gameweek.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -289,6 +292,14 @@ if (!(await exists(execDir))) {
       else if (!deletesOnlyDraftLineup) fail(`post-verification migration ${repair}`, 'Lineup replacement may delete only the editable draft side rows');
       else if (!scopedEligibilityAlter) fail(`post-verification migration ${repair}`, 'Only the lineup eligibility-kind constraint may be expanded');
       else ok(`post-verification migration ${repair} is scoped`, 'same-league Market eligibility; existing authenticated RPC surface and grants retained');
+    } else if (repair === '20261115000019_optional_match_gameweek.sql') {
+      const alterStatements = stripped.match(/^\s*alter\s+table[^;]+;/gim) ?? [];
+      const optionalColumn = alterStatements.length === 1 && /alter\s+table\s+public\.real_matches\s+alter\s+column\s+gameweek_id\s+drop\s+not\s+null/i.test(alterStatements[0]);
+      const keepsFk = !/drop\s+constraint[^;]*gameweek/i.test(stripped);
+      const retainsRpc = /create\s+or\s+replace\s+function\s+public\.ff_match_create/i.test(stripped);
+      const conditionalValidation = /p_gameweek\s+is\s+not\s+null\s+and\s+not\s+exists/i.test(stripped);
+      if (!optionalColumn || !keepsFk || !retainsRpc || !conditionalValidation) fail(`post-verification migration ${repair}`, 'must make only the match Gameweek link nullable, retain its FK, and keep the existing create RPC with conditional validation');
+      else ok(`post-verification migration ${repair} is scoped`, 'nullable optional link; FK and RPC grants retained');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {

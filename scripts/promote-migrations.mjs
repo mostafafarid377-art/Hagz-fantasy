@@ -152,10 +152,11 @@ const PACKAGE = [
   ['20261115000016', '016_league_archive.sql', 'league_archive'],
   ['20261115000017', '017_squad_captaincy.sql', 'squad_captaincy'],
   ['20261115000018', '018_live_match_market_workflow.sql', 'live_match_market_workflow'],
+  ['20261115000019', '019_optional_match_gameweek.sql', 'optional_match_gameweek'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018', '019']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);
