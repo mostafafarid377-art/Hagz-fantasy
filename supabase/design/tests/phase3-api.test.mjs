@@ -31,7 +31,8 @@ const PKG = [
   // Forward-only repair #2: restores the aggregate-claims fallback in the actor
   // helper. Hosted PostgREST sets only request.jwt.claims, so without it every
   // definer sees an anonymous caller.
-  '20261115000015_actor_identity_claim_fallback',
+  '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
+  '20261115000017_squad_captaincy',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -369,6 +370,43 @@ test('squad: buy enforces budget, position limits, duplicates and market state',
   await rpc(ALICE, 'ff_league_set_market', LEAGUE.id, false);
   await expectDenied(() => rpc(BOB, 'ff_squad_buy', LEAGUE.id, PLAYER_MID.id), '42501', 'buying while the market is closed');
   await rpc(ALICE, 'ff_league_set_market', LEAGUE.id, true);
+});
+
+test('squad: captaincy can be changed before the squad is full', async () => {
+  const { LEAGUE, PLAYER_GK, PLAYER_MID } = globalThis;
+  const first = await rpc(BOB, 'ff_squad', LEAGUE.id);
+  assert.equal(first.players.length, 1, 'Bob has an incomplete squad');
+
+  await expectDenied(
+    () => rpc(MALLORY, 'ff_squad_set_captains', LEAGUE.id, PLAYER_GK.id, null),
+    '42501', 'outsider setting captaincy',
+  );
+  await expectDenied(
+    () => rpc(BOB, 'ff_squad_set_captains', LEAGUE.id, PLAYER_MID.id, null),
+    '23514', 'choosing a player outside the squad',
+  );
+
+  await rpc(BOB, 'ff_squad_set_captains', LEAGUE.id, PLAYER_GK.id, null);
+  const captainOnly = await rpc(BOB, 'ff_squad', LEAGUE.id);
+  assert.equal(captainOnly.captain_id, PLAYER_GK.id);
+  assert.equal(captainOnly.players.find((p) => p.league_player_id === PLAYER_GK.id).captain, true);
+  assert.equal(captainOnly.players.length, 1, 'captain selection does not require 15 players');
+
+  await rpc(BOB, 'ff_squad_buy', LEAGUE.id, PLAYER_MID.id);
+  await rpc(BOB, 'ff_squad_set_captains', LEAGUE.id, PLAYER_GK.id, PLAYER_MID.id);
+  const both = await rpc(BOB, 'ff_squad', LEAGUE.id);
+  assert.equal(both.captain_id, PLAYER_GK.id);
+  assert.equal(both.vice_captain_id, PLAYER_MID.id);
+
+  await expectDenied(
+    () => rpc(BOB, 'ff_squad_set_captains', LEAGUE.id, PLAYER_GK.id, PLAYER_GK.id),
+    '23514', 'captain and vice must differ',
+  );
+
+  await rpc(BOB, 'ff_squad_sell', LEAGUE.id, PLAYER_GK.id);
+  const afterSale = await rpc(BOB, 'ff_squad', LEAGUE.id);
+  assert.equal(afterSale.captain_id, null, 'selling a captain clears their role');
+  assert.equal(afterSale.vice_captain_id, PLAYER_MID.id);
 });
 
 test('squad: position limits and the 15-player cap are enforced server-side', async () => {

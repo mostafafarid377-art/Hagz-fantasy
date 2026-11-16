@@ -30,8 +30,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [formation, setFormation] = useState<Formation>((live.squad?.formation as Formation) ?? '4-3-3');
-  // Read-only: the pitch shows the C / VC badges for whatever the server has stored.
-  // The two selects that set them were removed from this screen on request.
+  // Captaincy is managed from each player's detail sheet and stored independently
+  // from full-lineup saves, so it also works while the squad is being assembled.
   const [captain, setCaptain] = useState<string | null>(live.squad?.captain_id ?? null);
   const [vice, setVice] = useState<string | null>(live.squad?.vice_captain_id ?? null);
 
@@ -142,8 +142,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   //
   // Layout follows the demo squad screen: the pitch is the page. The roster list
   // that used to sit under it is gone - it repeated every player the pitch already
-  // shows. Captain, vice captain and selling moved into a compact panel below the
-  // pitch so no control was lost with the list.
+  // shows. Captain and vice-captain actions live in each player's detail sheet;
+  // selling remains in the compact panel below the pitch.
   const hasSquad = ordered.length > 0;
   // The pitch is the starting XI. Rendering `ordered` drew all 15 on the pitch and
   // then drew the last 4 again in the bench strip below it, so the same players
@@ -216,7 +216,23 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
       {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
-      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={builder || editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => { const c = type === 'captain' ? selected.id : (captain === selected.id ? null : captain); const v = type === 'vice' ? selected.id : (vice === selected.id ? null : vice); void run('lineup', () => save(ids, c, v), 'Lineup saved.'); }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} />}
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={builder || editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
+        const nextCaptain = type === 'captain'
+          ? (captain === selected.id ? null : selected.id)
+          : (captain === selected.id ? null : captain);
+        const nextVice = type === 'vice'
+          ? (vice === selected.id ? null : selected.id)
+          : (vice === selected.id ? null : vice);
+        if (nextCaptain && nextVice && nextCaptain === nextVice) {
+          setError(t('Captain and vice captain must be different players.'));
+          return;
+        }
+        void run('captaincy', async () => {
+          await live.setSquadCaptains(nextCaptain, nextVice);
+          setCaptain(nextCaptain);
+          setVice(nextVice);
+        }, 'Captaincy updated.');
+      }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} />}
       <div className="squad-layout">
         <div className="panel">
           <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !builder ? 'Starting XI' : 'Your squad'} />
@@ -278,16 +294,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
         <Link className="button" to="/market"><UserPlus size={15} /> {t('Add players')}</Link>
       </div>
 
-      {/* Formation and captaincy were removed from this screen on request, matching
-          the demo squad tab, which shows neither. What remains is only what cannot be
-          expressed on the pitch: the lineup status and the sell control. The formation
-          is still stored server-side and still decides which players are starters (the
-          first 11 of the saved lineup), so no product rule is lost - only the two
-          selects that duplicated what the pitch already shows.
-
-          Saving/confirming a lineup is no longer offered here either: the demo tab has
-          no lineup form, and the pitch plus the add-player sheet is the whole
-          interaction model. */}
+      {/* The standalone formation selector and extra captaincy panel are not on this
+          screen. Formation is still stored server-side; captaincy is available from
+          each player's detail sheet and can be saved before the squad is complete.
+          The remaining panel carries status and selling controls. */}
       {hasSquad && (
         <div className="panel section-spacer">
           <SectionHead eyebrow="THE LINEUP" title="Squad status" />

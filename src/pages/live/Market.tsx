@@ -184,6 +184,15 @@ export function LiveManagement() {
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
   const canManage = live.isLeader;
 
+  async function removeFromMarket(player: ApiPlayer) {
+    if (!window.confirm(t('Remove this player from the active market? Existing squads and history will be kept.'))) return;
+    try {
+      await live.savePlayer({ name: player.name, position: player.position, price: player.price,
+        rating: player.rating, active: false, imageUrl: player.image_url, playerId: player.player_id });
+      setNotice(t('Player removed from the active market.'));
+    } catch { /* live.error shows the reason */ }
+  }
+
   return (
     <>
       <PageTitle eyebrow="LEADER TOOLS" title="Player Management"
@@ -208,7 +217,7 @@ export function LiveManagement() {
                 <small>{p.position} · {p.rating} {t('OVR')} · {formatCompactMoney(p.price)}</small>
               </div>
               <Badge kind={p.active ? 'approved' : 'neutral'}>{t(p.active ? 'Active' : 'Inactive')}</Badge>
-              {canManage && <button className="button button-muted" onClick={() => setEditing(p)}>{t('Edit')}</button>}
+              {canManage && <><button className="button button-muted" onClick={() => setEditing(p)}>{t('Edit')}</button>{p.active && <button className="button button-danger" onClick={() => void removeFromMarket(p)}>{t('Delete')}</button>}</>}
             </div>
           ))}
         </div>
@@ -219,6 +228,7 @@ export function LiveManagement() {
           player={editing}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={(message) => { setCreating(false); setEditing(null); setNotice(message); }}
+          onDeleted={(message) => { setCreating(false); setEditing(null); setNotice(message); }}
         />
       )}
     </>
@@ -230,8 +240,8 @@ export function LiveManagement() {
  * NUMERIC (a 100M budget means 100,000,000) - the conversion lives here so the
  * UI never shows a raw 8-digit number.
  */
-function PlayerDialog({ player, onClose, onSaved }: {
-  player: ApiPlayer | null; onClose: () => void; onSaved: (message: string) => void;
+function PlayerDialog({ player, onClose, onSaved, onDeleted }: {
+  player: ApiPlayer | null; onClose: () => void; onSaved: (message: string) => void; onDeleted: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const live = useLive();
@@ -243,6 +253,19 @@ function PlayerDialog({ player, onClose, onSaved }: {
   const [imageUrl, setImageUrl] = useState(player?.image_url ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  async function removeFromMarket() {
+    if (!player) return;
+    setError(''); setBusy(true);
+    try {
+      await live.savePlayer({ name: player.name, position: player.position, price: player.price,
+        rating: player.rating, active: false, imageUrl: player.image_url, playerId: player.player_id });
+      onDeleted(t('Player removed from the active market. Existing squads and history are kept.'));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t('Player could not be deleted.'));
+    } finally { setBusy(false); }
+  }
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
@@ -263,12 +286,12 @@ function PlayerDialog({ player, onClose, onSaved }: {
   }
 
   return (
-    <dialog open className="player-sheet" aria-labelledby="player-dialog-title">
+    <dialog open className="player-sheet player-edit-sheet" aria-labelledby="player-dialog-title">
       <div className="sheet-handle" aria-hidden="true" />
       <button type="button" className="sheet-close" aria-label={t('Close')} onClick={onClose}><X size={20} /></button>
       <div className="eyebrow">{t('THE MARKET')}</div>
       <h2 id="player-dialog-title">{t(player ? 'Edit player' : 'Add player')}</h2>
-      <form className="form-panel" onSubmit={save}>
+      <form className="form-panel player-editor-form" onSubmit={save}>
         <label>{t('Player name')}
           <input required minLength={2} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
         </label>
@@ -291,9 +314,15 @@ function PlayerDialog({ player, onClose, onSaved }: {
         </label>
         <ImageField value={imageUrl} onChange={setImageUrl} />
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
-        <button className="button sheet-primary" disabled={busy || !name.trim()}>
-          {busy ? t('Saving…') : t('Save')}
-        </button>
+        {confirmDelete && <div className="notice" role="alert">
+          <p>{t('This removes the player from the active market. Existing squads and history are kept.')}</p>
+          <div className="button-row"><button className="button button-danger" type="button" disabled={busy} onClick={() => void removeFromMarket()}>{busy ? t('Deleting…') : t('Confirm delete')}</button>
+            <button className="button button-outline" type="button" disabled={busy} onClick={() => setConfirmDelete(false)}>{t('Cancel')}</button></div>
+        </div>}
+        <div className="button-row player-editor-actions">
+          <button className="button sheet-primary" disabled={busy || !name.trim()}>{busy ? t('Saving…') : t('Save')}</button>
+          {player?.active && <button className="button button-danger" type="button" disabled={busy} onClick={() => setConfirmDelete(true)}>{t('Delete player')}</button>}
+        </div>
       </form>
     </dialog>
   );

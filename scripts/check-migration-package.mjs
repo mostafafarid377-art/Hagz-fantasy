@@ -38,6 +38,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  * hash must be recorded in the same reviewed commit that documents the change.
  */
 const DESIGN_MIGRATIONS = {
+  // Forward-only captaincy persistence and partial-squad selection support.
+  '017_squad_captaincy.sql': 'd260c92899e425eccec8a501ab63e554c0588276c3539e464b5ba1ec7ca515fa',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -85,20 +87,18 @@ const PACKAGE = [
   ['20261115000014_api_surface_verification.sql', 'design/api/013_api_surface_verification.sql'],
   ['20261115000015_actor_identity_claim_fallback.sql', 'design/migrations/015_actor_identity_claim_fallback.sql'],
   ['20261115000016_league_archive.sql', 'design/migrations/016_league_archive.sql'],
+  ['20261115000017_squad_captaincy.sql', 'design/migrations/017_squad_captaincy.sql'],
 ];
 
 /**
  * Repairs sanctioned to run AFTER the final verification.
  *
- * The rule "the API surface verification runs last" exists so that nothing can
- * mutate the surface after it has been certified. A function-BODY repair is not a
- * surface change, and 015 cannot be ordered before 014 anyway: 014 and 013 are
- * already recorded as applied on the hosted project, so any file that sorts before
- * them would never be picked up by `db push`.
- *
- * Allowlisting is deliberately explicit and permanent rather than a "skip the last
- * file" rule: a new post-verification migration must be added here by review, and
- * 015 asserts its own invariants (signature, owner, ACL, search_path) at runtime.
+ * The rule "the API surface verification runs last" protects the certified
+ * privilege posture. Explicit forward-only migrations may follow it: 015 repairs
+ * a function body, 016 adds one checked RPC, and 017 adds team-level captaincy
+ * columns plus one separately checked RPC. They are individually reviewed and
+ * must remain explicitly allowlisted here rather than relying on a "skip the last
+ * file" rule.
  */
 const POST_VERIFICATION_REPAIRS = [
   '20261115000015_actor_identity_claim_fallback.sql',
@@ -107,6 +107,7 @@ const POST_VERIFICATION_REPAIRS = [
   // invalidate what 013/014 certified. It runs last because it is the newest
   // migration, not because it needs to escape the assertions.
   '20261115000016_league_archive.sql',
+  '20261115000017_squad_captaincy.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -259,12 +260,22 @@ if (!(await exists(execDir))) {
     const [, source] = PACKAGE.find(([n]) => n === repair);
     const body = await readFile(path.join(root, 'supabase', source), 'utf8');
     const stripped = body.replace(/--[^\n]*/g, '');
-    const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
-    if (surfaceDdl) {
-      fail(`post-verification repair ${repair}`,
-        `must not change the certified surface, found "${surfaceDdl[0].trim().split(/\s+/).slice(0, 3).join(' ')}"`);
+    if (repair === '20261115000017_squad_captaincy.sql') {
+      const forbidden = /^\s*(drop\s+(function|policy|table)|create\s+policy|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
+      const hasScopedColumns = /alter\s+table\s+public\.fantasy_teams\s+add\s+column\s+captain_player_id\s+uuid,\s*add\s+column\s+vice_captain_player_id\s+uuid/is.test(stripped);
+      const hasAuthenticatedOnlyRpc = /revoke\s+all\s+on\s+function\s+public\.ff_squad_set_captains\(uuid,\s*uuid,\s*uuid\)\s+from\s+public,\s*anon,\s*authenticated\s*;\s*grant\s+execute\s+on\s+function\s+public\.ff_squad_set_captains\(uuid,\s*uuid,\s*uuid\)\s+to\s+authenticated/is.test(stripped);
+      if (forbidden) fail(`post-verification migration ${repair}`, `forbidden privilege or destructive DDL: ${forbidden[0].trim().split(/\s+/).slice(0, 3).join(' ')}`);
+      else if (!hasScopedColumns) fail(`post-verification migration ${repair}`, 'captaincy columns must be added only to public.fantasy_teams');
+      else if (!hasAuthenticatedOnlyRpc) fail(`post-verification migration ${repair}`, 'captaincy RPC must be revoked from PUBLIC/anon/authenticated then granted only to authenticated');
+      else ok(`post-verification migration ${repair} is scoped`, 'team columns + authenticated-only RPC; no table grants or policy changes');
     } else {
-      ok(`post-verification repair ${repair} is body-only`, path.basename(source));
+      const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
+      if (surfaceDdl) {
+        fail(`post-verification repair ${repair}`,
+          `must not change the certified surface, found "${surfaceDdl[0].trim().split(/\s+/).slice(0, 3).join(' ')}"`);
+      } else {
+        ok(`post-verification repair ${repair} is body-only`, path.basename(source));
+      }
     }
   }
 

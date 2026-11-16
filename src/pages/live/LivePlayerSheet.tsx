@@ -18,7 +18,12 @@ export function LivePlayerSheet({ player, players, ownedIds, starter, captainId,
   const dialog = useRef<HTMLDialogElement>(null);
   const [replacing, setReplacing] = useState(false);
   const [incoming, setIncoming] = useState('');
-  useEffect(() => { if (dialog.current && !dialog.current.open) dialog.current.showModal(); }, []);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element || element.open) return;
+    if (typeof element.showModal === 'function') element.showModal();
+    else element.setAttribute('open', '');
+  }, []);
   const candidates = players.filter(p => p.active && p.position === player.position && !ownedIds.includes(p.id));
   const choice = candidates.find(p => p.id === incoming);
   return <dialog ref={dialog} className="player-sheet" aria-labelledby="live-player-sheet-title" onClose={close} onClick={e => { if (e.target === e.currentTarget) close(); }}>

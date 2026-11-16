@@ -10,7 +10,7 @@
  *    which in live mode re-rendered the same squad screen, so it looked dead.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -38,19 +38,29 @@ async function mountLiveSquad(players = FULL_SQUAD) {
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
 
+  const calls: string[] = [];
+  let lineupArgs: Record<string, unknown> | undefined;
+  let captaincyArgs: Record<string, unknown> | undefined;
+  let captainId: string | null = null;
+  let viceId: string | null = null;
   const client = {
     auth: {
       getSession: async () => ({ data: { session: null }, error: null }),
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
     },
-    rpc: async (fn: string) => {
+    rpc: async (fn: string, args?: Record<string, unknown>) => {
+      calls.push(fn);
+      if (fn === 'ff_lineup_save') lineupArgs = args;
+      if (fn === 'ff_squad_set_captains') { captaincyArgs = args; captainId = (args?.p_captain as string | null) ?? null; viceId = (args?.p_vice as string | null) ?? null; }
       if (fn === 'ff_bootstrap') {
         return { data: { profile: { id: 'u1', display_name: 'Me' }, leagues: [league] }, error: null };
       }
       if (fn === 'ff_squad') {
         return { data: { team: { id: 't1', name: 'Real League FC' }, formation: '4-3-3', status: 'draft',
-          captain_id: null, vice_captain_id: null, budget: 100, spent: 10, players }, error: null };
+          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, players }, error: null };
       }
+      if (fn === 'ff_lineup_save') return { data: { lineup_id: 'lineup1', version: 1, formation: '4-3-3', status: 'draft' }, error: null };
+      if (fn === 'ff_squad_set_captains') return { data: { captain_id: captainId, vice_captain_id: viceId }, error: null };
       return { data: [], error: null };
     },
   };
@@ -73,6 +83,7 @@ async function mountLiveSquad(players = FULL_SQUAD) {
     );
   });
   for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
+  return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs };
 }
 
 describe('the live squad tab is laid out like the demo one', () => {
@@ -179,5 +190,39 @@ describe('Edit squad opens the player market', () => {
     await mountLiveSquad();
     const links = [...document.querySelectorAll('a')].map((a) => a.getAttribute('href'));
     expect(links).toContain('/market');
+  });
+});
+
+
+describe('captaincy can be set before the squad is complete', () => {
+  it('saves a captain for an incomplete squad without attempting a lineup save', async () => {
+    const app = await mountLiveSquad([
+      squadPlayer(1, 'GK'), squadPlayer(2, 'MID'), squadPlayer(3, 'MID'),
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+
+    const captainButton = screen.getByRole('button', { name: 'Captain' });
+    expect(captainButton.hasAttribute('disabled')).toBe(false);
+    await act(async () => { fireEvent.click(captainButton); });
+
+    expect(app.calls).toContain('ff_squad_set_captains');
+    expect(app.calls).not.toContain('ff_lineup_save');
+    expect(app.getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: null });
+  });
+
+  it('saves captain and vice independently, even with fewer than 15 players', async () => {
+    const app = await mountLiveSquad([
+      squadPlayer(1, 'GK'), squadPlayer(2, 'MID'), squadPlayer(3, 'MID'),
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P2' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Vice captain' })); });
+
+    expect(app.calls.filter((call) => call === 'ff_squad_set_captains')).toHaveLength(2);
+    expect(app.calls).not.toContain('ff_lineup_save');
+    expect(app.getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp2' });
   });
 });

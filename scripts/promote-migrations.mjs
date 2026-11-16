@@ -29,6 +29,8 @@
  *   013      privilege verification  (draft 010)
  *   014      API surface verification(draft 013)
  *   015      actor identity claim fallback (draft 015)  <- forward-only repair #2
+ *   016      league archive             (draft 016)
+ *   017      partial-squad captaincy    (draft 017)
  *
  * One draft cannot be promoted byte-for-byte, and this is deliberate:
  *   003_storage.sql ends with `create policy ... on storage.objects`. On hosted
@@ -148,10 +150,11 @@ const PACKAGE = [
   // `on delete restrict` - a hard delete would need a cascade review and would
   // destroy other managers' history. See the draft header.
   ['20261115000016', '016_league_archive.sql', 'league_archive'],
+  ['20261115000017', '017_squad_captaincy.sql', 'squad_captaincy'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);

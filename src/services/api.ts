@@ -147,6 +147,11 @@ export interface UpsertPlayerInput {
   playerId?: string | null;
 }
 
+export const setSquadCaptains = (leagueId: string, captainId: string | null, viceCaptainId: string | null) =>
+  call<{ captain_id: string | null; vice_captain_id: string | null }>('ff_squad_set_captains', {
+    p_league: leagueId, p_captain: captainId, p_vice: viceCaptainId,
+  });
+
 export const upsertMarketPlayer = (leagueId: string, input: UpsertPlayerInput) =>
   call<ApiPlayer>('ff_market_upsert_player', {
     p_league: leagueId,
