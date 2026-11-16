@@ -8,7 +8,7 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { AlertCircle, Check, Filter, Plus, Search, Upload, X } from 'lucide-react';
+import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
@@ -70,18 +70,23 @@ export function LiveMarket() {
         <p className="notice">{t('The market is closed. You cannot add players until your leader opens it.')}</p>
       )}
 
-      <div className="panel market-filters">
-        <label className="search-field">
-          <Search size={15} />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('Search')} />
-        </label>
-        <label className="filter-field">
-          <Filter size={15} />
+      {/* Same filter bar as the demo market: .filter-bar with a search box and a
+          position select. The live version used its own .market-filters markup
+          without a search label, so the two screens looked different and the input
+          was unlabelled for screen readers. */}
+      <div className="filter-bar">
+        <div className="search-box">
+          <Search size={18} />
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder={t('Search players')} aria-label={t('Search players')} />
+        </div>
+        <div className="filters">
+          <SlidersHorizontal size={17} />
           <select value={position} onChange={(e) => setPosition(e.target.value)} aria-label={t('Position')}>
             <option value="">{t('All positions')}</option>
             {POSITION_ORDER.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
-        </label>
+        </div>
       </div>
 
       {filtered.length === 0 ? (
@@ -112,7 +117,7 @@ export function LiveMarket() {
                   <button
                     className={mine ? 'button button-muted' : 'button button-small'}
                     disabled={mine || !live.league!.market_open || busy === player.id
-                      || (live.squad?.players.length ?? 0) >= 15}
+                      || (live.squad?.players?.length ?? 0) >= 15}
                     onClick={() => void add(player)}
                   >
                     {mine ? t('In squad') : busy === player.id ? t('Adding…') : t('Add to squad')}
@@ -177,35 +182,23 @@ export function LiveManagement() {
       <Success message={notice} />
       {!canManage && <p className="notice">{t('Only the League Leader can publish, edit or deactivate market players.')}</p>}
 
-      <div className="panel table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('PLAYER')}</th><th>{t('Position')}</th><th>{t('Price')}</th>
-              <th>{t('Rating')}</th><th>{t('Status')}</th><th>{t('Owners')}</th>{canManage && <th />}
-            </tr>
-          </thead>
-          <tbody>
-            {live.players.length === 0 && (
-              <tr><td colSpan={canManage ? 7 : 6}><small>{t('No players in this market yet.')}</small></td></tr>
-            )}
-            {live.players.map((p) => (
-              <tr key={p.id}>
-                <td><div className="table-team"><Avatar name={p.name} image={p.image_url ?? undefined} size="sm" /><strong>{p.name}</strong></div></td>
-                <td>{p.position}</td>
-                <td>{formatMoney(p.price)}</td>
-                <td>{p.rating}</td>
-                <td>{p.active ? <Badge kind="lime">{t('Active')}</Badge> : <Badge>{t('Inactive')}</Badge>}</td>
-                <td>{p.owned_by ?? 0}</td>
-                {canManage && (
-                  <td>
-                    <button className="button button-small button-outline" onClick={() => setEditing(p)}>{t('Edit')}</button>
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {/* Card rows like the demo's Player Management, not a table: each row shows
+          avatar, name, position/rating/price and its actions together. */}
+      <div className="panel manage-list-wrap">
+        <div className="management-list">
+          {live.players.length === 0 && <Empty title="No players in this market yet." />}
+          {live.players.map((p) => (
+            <div className="manage-row" key={p.id}>
+              <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+              <div>
+                <strong>{p.name}</strong>
+                <small>{p.position} · {p.rating} {t('OVR')} · {formatMoney(p.price)}</small>
+              </div>
+              <Badge kind={p.active ? 'approved' : 'neutral'}>{t(p.active ? 'Active' : 'Inactive')}</Badge>
+              {canManage && <button className="button button-muted" onClick={() => setEditing(p)}>{t('Edit')}</button>}
+            </div>
+          ))}
+        </div>
       </div>
 
       {(creating || editing) && (

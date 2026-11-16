@@ -48,7 +48,7 @@ const standings = [
     computed_at: '2026-01-01T00:00:00Z' },
 ];
 
-async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'notifications') {
+async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'notifications' | 'market' | 'management') {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
@@ -63,6 +63,16 @@ async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'noti
         return { data: { profile: { id: 'u1', display_name: 'Me' }, leagues: [league] }, error: null };
       }
       if (fn === 'ff_matches') return { data: matches, error: null };
+      if (fn === 'ff_squad') {
+        return { data: { team: { id: 't1', name: 'Real League FC' }, formation: '4-3-3',
+          status: 'empty', captain_id: null, vice_captain_id: null, budget: 100,
+          spent: 0, players: [] }, error: null };
+      }
+      if (fn === 'ff_market_players') {
+        return { data: [{ id: 'p1', player_id: 'pl1', name: 'Market Player', position: 'MID',
+          price: 5_000_000, rating: 80, active: true, image_path: null, image_url: null,
+          owned_by: 0, created_at: '2026-01-01' }], error: null };
+      }
       if (fn === 'ff_notifications') {
         return { data: [{ id: 'n1', kind: 'suggestion_approved', payload: { name: 'X' },
           read_at: null, created_at: '2026-01-01T00:00:00Z' }], error: null };
@@ -84,10 +94,13 @@ async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'noti
 
   const { LiveProvider } = await import('../../hooks/useLive');
   const mod = await import('./Match');
+  const market = await import('./Market');
   const { LiveStandings } = await import('./Squad');
   const Component = which === 'fixtures' ? mod.LiveFixtures
     : which === 'notifications' ? mod.LiveNotifications
     : which === 'matchcenter' ? mod.LiveMatchCenter
+    : which === 'market' ? market.LiveMarket
+    : which === 'management' ? market.LiveManagement
     : LiveStandings;
 
   await act(async () => {
@@ -97,7 +110,7 @@ async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'noti
       </MemoryRouter>,
     );
   });
-  for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
+  for (let i = 0; i < 8; i += 1) await act(async () => { await Promise.resolve(); });
 }
 
 describe('standings look like the demo standings', () => {
@@ -161,6 +174,21 @@ describe('notifications already match the demo', () => {
     await mountLive('notifications');
     expect(document.querySelector('.panel .activity-item')).toBeTruthy();
     expect(document.querySelector('.activity-icon')).toBeTruthy();
+  });
+});
+
+describe('the market and leader tools match the demo layouts', () => {
+  it('the market uses the demo filter bar with a labelled search', async () => {
+    await mountLive('market');
+    expect(document.querySelector('.filter-bar .search-box input[aria-label]')).toBeTruthy();
+    expect(document.querySelector('.filter-bar .filters select')).toBeTruthy();
+    // The bespoke class it replaced must be gone.
+    expect(document.querySelector('.market-filters')).toBeNull();
+  });
+
+  it('player management uses card rows, not a table', async () => {
+    await mountLive('management');
+    expect(document.querySelector('.management-list .manage-row')).toBeTruthy();
   });
 });
 
