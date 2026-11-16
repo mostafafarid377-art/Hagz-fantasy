@@ -1,3 +1,4 @@
+import { playerImage } from '../../services/playerImage';
 // Live player market, player management (leader), and suggestions.
 //
 // These screens are where the role rules become visible: a manager sees the
@@ -107,7 +108,7 @@ export function LiveMarket() {
                     <span className="position-pill">{player.position}</span>
                     <div className="player-rating">{player.rating}<small>{t('OVR')}</small></div>
                   </div>
-                  <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
+                  <Avatar name={player.name} image={playerImage(player)} size="lg" />
                 </div>
                 <Link to={`/players/${player.id}`} className="player-name">{player.name}</Link>
                 <div className="player-meta">
@@ -149,7 +150,7 @@ export function LivePlayerProfile() {
           showed a price line only, so the two screens looked like different products
           even though every figure here is real. */}
       <div className="panel profile-hero">
-        <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
+        <Avatar name={player.name} image={playerImage(player)} size="lg" />
         <div>
           <Badge kind="lime">{player.position}</Badge>{' '}
           <Badge kind={player.active ? 'approved' : 'neutral'}>{t(player.active ? 'Active' : 'Inactive')}</Badge>
@@ -202,7 +203,7 @@ export function LiveManagement() {
           {live.players.length === 0 && <Empty title="No players in this market yet." />}
           {live.players.map((p) => (
             <div className="manage-row" key={p.id}>
-              <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+              <Avatar name={p.name} image={playerImage(p)} size="sm" />
               <div>
                 <strong>{p.name}</strong>
                 <small>{p.position} · {p.rating} {t('OVR')} · {formatCompactMoney(p.price)}</small>
@@ -487,7 +488,7 @@ export function LiveApprovals() {
           <div className="panel">
             {pending.map((s) => (
               <div className="suggestion-row" key={s.id}>
-                <Avatar name={s.name} image={s.image_url ?? undefined} size="sm" />
+                <Avatar name={s.name} image={playerImage(s)} size="sm" />
                 <div>
                   <strong>{s.name}</strong>
                   <small>{s.position} · {t('Submitted by')} {s.submitted_by_name} {s.submitted_by === live.myUserId ? `(${t('you')})` : ''}</small>

@@ -1,3 +1,4 @@
+import { playerImage } from '../../services/playerImage';
 // Position-filtered player picker for the LIVE squad.
 //
 // This is the live counterpart of components/AddPlayerSheet.tsx, which is bound to the
@@ -93,7 +94,7 @@ export function AddLivePlayerSheet({
                 }
               }}
             >
-              <Avatar name={player.name} image={player.image_url ?? undefined} size="sm" />
+              <Avatar name={player.name} image={playerImage(player)} size="sm" />
               <span>
                 <strong>{player.name}</strong>
                 <small>{player.position} · {player.rating} {t('OVR')}</small>

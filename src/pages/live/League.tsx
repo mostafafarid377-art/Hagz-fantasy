@@ -1,3 +1,4 @@
+import { playerImage } from '../../services/playerImage';
 // Live dashboard, league overview, and league management.
 //
 // Everything here renders from server data (useLive). Loading, empty and error
@@ -177,7 +178,7 @@ export function LiveDashboard() {
     id: p.league_player_id, leagueId: live.leagueId ?? '', name: p.name,
     position: p.position, price: p.price, rating: p.rating,
     attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 },
-    image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5',
+    image: playerImage(p), active: p.active, points: 0, color: '#a9b9a5',
   }));
 
   /**
@@ -369,7 +370,7 @@ export function LiveDashboard() {
               {topPerformers.map(({ player, points }, i) => (
                 <Link to={`/players/${player.league_player_id}`} className="performer" key={player.league_player_id}>
                   <span className="rank">0{i + 1}</span>
-                  <Avatar name={player.name} image={player.image_url ?? undefined} size="sm" />
+                  <Avatar name={player.name} image={playerImage(player)} size="sm" />
                   <div><strong>{player.name}</strong><small>{player.position} · {formatCompactMoney(player.price)}</small></div>
                   <div className="performer-points"><strong>{points}</strong><small>{t('pts')}</small></div>
                   <ArrowUpRight size={16} />
