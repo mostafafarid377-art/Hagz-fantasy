@@ -4,7 +4,9 @@ test.beforeEach(async ({page})=>{await page.goto('/dashboard');await page.evalua
 
 test('application loads and desktop navigation works',async({page})=>{
   await expect(page.getByRole('heading',{name:/Welcome back/})).toBeVisible();
-  await page.getByRole('link',{name:'Player Market',exact:true}).click();
+  // The Market tab was removed from navigation; the screen is reached from the
+  // dashboard's "Explore market" action instead.
+  await page.getByRole('link',{name:'Explore market'}).click();
   await expect(page.getByRole('heading',{name:'Player Market'})).toBeVisible();
   await page.goto('/squad-builder');await expect(page.getByRole('heading',{name:'Squad Builder'})).toBeVisible();
 });
@@ -63,7 +65,10 @@ test('switching leagues isolates market and competition samples',async({page})=>
 test('mobile and tablet navigation work without horizontal overflow',async({page})=>{
   for(const width of [390,768]){await page.setViewportSize({width,height:844});await page.goto('/dashboard');
     await expect(page.locator('.mobile-nav')).toBeVisible();await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
-    await page.locator('.mobile-nav').getByRole('link',{name:'Market'}).click();await expect(page.getByRole('heading',{name:'Player Market'})).toBeVisible();}
+    // The Market tab is intentionally gone; the remaining tabs must work and the
+    // market screen must still be reachable from in-page actions.
+    await expect(page.locator('.mobile-nav').getByRole('link',{name:'Market'})).toHaveCount(0);
+    await page.locator('.mobile-nav').getByRole('link',{name:'Squad'}).click();await expect(page.locator('.mobile-nav')).toBeVisible();}
 });
 test('Arabic mobile layout has RTL navigation and no page overflow',async({page})=>{
   await page.setViewportSize({width:390,height:844});await page.getByLabel('Switch language').click();
