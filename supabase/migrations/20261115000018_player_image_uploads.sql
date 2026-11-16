@@ -188,11 +188,11 @@ begin
   if p_rating is null or p_rating < 1 or p_rating > 99 then raise exception 'approved player needs a rating between 1 and 99' using errcode = '23514'; end if;
 
   -- A review cannot select the image of a different suggestion.
-  if p_image_path is not null and p_image_path is distinct from s.image_path then
+  if p_image_path is not null and p_image_path <> '__remove__' and p_image_path is distinct from s.image_path then
     raise exception 'Image does not belong to this suggestion.' using errcode='42501';
   end if;
   insert into public.player_profiles(league_id, display_name, image_path, image_url)
-  values (p_league, s.name, null, s.image_url)
+  values (p_league, s.name, null, case when p_image_path = '__remove__' then null else s.image_url end)
   returning * into v_profile;
   insert into public.league_players(league_id, player_id, position, price, rating, active)
   values (p_league, v_profile.id, s.position, p_price, p_rating, true)
@@ -202,7 +202,7 @@ begin
      set status = 'approved', league_player_id = v_market.id
    where league_id = p_league and id = s.id;
   -- The guard permits only the exact profile linked by this approved suggestion.
-  update public.player_profiles set image_path=s.image_path where league_id=p_league and id=v_profile.id;
+  update public.player_profiles set image_path=case when p_image_path = '__remove__' then null else s.image_path end where league_id=p_league and id=v_profile.id;
   insert into public.player_approval_logs(league_id, suggestion_id, actor_id, decision, reason)
   values (p_league, s.id, ff_private.current_actor_id(), 'approved', nullif(btrim(coalesce(p_reason, '')), ''));
 

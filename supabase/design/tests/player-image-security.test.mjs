@@ -139,3 +139,22 @@ test('SECURITY FINDING: a stale null-path removal erases a newer image URL', asy
   const after=(await rpc(alice,'ff_market_players',league.id)).find(row=>row.id===p.id);
   assert.equal(after.image_url,null,'current draft silently loses the newer URL');
 });
+
+test('approval with image removal commits a profile without the suggestion image', async () => {
+  const pending=await rpc(bob,'ff_suggestion_submit',league.id,'Removed on approval','MID',null,null,'https://example.test/old.png');
+  const path=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png')).path;
+  await insert(bob,path);
+  await rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,null,path);
+  const approved=await rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,'__remove__');
+  const profile=(await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id);
+  assert.equal(profile.image_path,null); assert.equal(profile.image_url,null);
+  const charlie='00000000-0000-0000-0000-000000000004';
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0);
+});
+
+test('approval with removal also drops a legacy URL without any uploaded path', async () => {
+  const pending=await rpc(bob,'ff_suggestion_submit',league.id,'Remove legacy url','MID',null,null,'https://example.test/old.png');
+  const approved=await rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,'__remove__');
+  const profile=(await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id);
+  assert.equal(profile.image_path,null); assert.equal(profile.image_url,null);
+});

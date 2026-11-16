@@ -518,7 +518,7 @@ export function LiveApprovals() {
       let marketId = approvedId;
       if (!marketId) {
         const reviewed = await live.reviewSuggestion(selected.id, decision, decision === 'approved'
-          ? { price: Math.round(Number(priceM) * 1_000_000), rating: Number(rating) }
+          ? { price: Math.round(Number(priceM) * 1_000_000), rating: Number(rating), imagePath: (imageFile || removeImage || imageUrl !== (selected.image_url ?? '')) ? '__remove__' : null }
           : { reason });
         if (decision === 'approved') { marketId = reviewed.league_player_id ?? ''; setApprovedId(marketId); }
       }
