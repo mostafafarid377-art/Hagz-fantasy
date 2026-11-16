@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
+import { BackLink } from '../../components/Navigation';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
@@ -142,13 +143,25 @@ export function LivePlayerProfile() {
 
   return (
     <>
+      <BackLink fallback="/market" />
       <PageTitle eyebrow="PLAYER PROFILE" title={player.name} description={`${player.position} · ${player.rating} ${t('OVR')}`} />
+      {/* Same hero as the demo profile: badges, then a stats row. The live version
+          showed a price line only, so the two screens looked like different products
+          even though every figure here is real. */}
       <div className="panel profile-hero">
         <Avatar name={player.name} image={player.image_url ?? undefined} size="lg" />
         <div>
-          <Badge kind="lime">{player.active ? t('Active') : t('Inactive')}</Badge>
+          <Badge kind="lime">{player.position}</Badge>{' '}
+          <Badge kind={player.active ? 'approved' : 'neutral'}>{t(player.active ? 'Active' : 'Inactive')}</Badge>
           <h1>{player.name}</h1>
-          <p>{formatMoney(player.price)} · {player.owned_by ?? 0} {t('managers')}</p>
+          <p>{live.league?.name}</p>
+          <div className="profile-stats">
+            <span><strong>{player.rating}</strong> {t('OVR')}</span>
+            <span><strong>{formatMoney(player.price)}</strong> {t('Price')}</span>
+            {/* No per-player points exist in the live schema, so this figure is
+                omitted rather than shown as 0. */}
+            <span><strong>{player.owned_by ?? 0}</strong> {t('managers')}</span>
+          </div>
         </div>
         <Link className="button button-outline" to="/market">{t('Player Market')}</Link>
       </div>

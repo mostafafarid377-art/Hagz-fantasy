@@ -444,3 +444,80 @@ export function LiveSeason() {
     </>
   );
 }
+
+/**
+ * Player statistics in live mode.
+ *
+ * Mirrors the demo table: rank, player, position, rating, price. The demo's final
+ * column is FANTASY POINTS, which the live schema does not carry per player, so it
+ * is replaced with OVR as the sort key - the same substitution the dashboard pitch
+ * already makes - rather than rendering a column of zeros.
+ */
+export function LiveStatistics() {
+  const { t } = useTranslation();
+  const live = useLive();
+  const [query, setQuery] = useState('');
+  const [position, setPosition] = useState('');
+
+  if (live.loading) return <Loading />;
+  if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
+
+  const ranked = live.players
+    .filter((p) => (position ? p.position === position : true))
+    .filter((p) => (query ? p.name.toLowerCase().includes(query.toLowerCase()) : true))
+    .sort((a, b) => b.rating - a.rating || b.price - a.price);
+
+  return (
+    <>
+      <PageTitle eyebrow="THE NUMBERS" title="Player statistics"
+        description="How the players in your league market rate this season" />
+      {live.error && <ErrorNote message={live.error} />}
+
+      <div className="filter-bar">
+        <div className="search-box">
+          <input value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('Search players')} aria-label={t('Search players')} />
+        </div>
+        <div className="filters">
+          <select value={position} onChange={(e) => setPosition(e.target.value)} aria-label={t('Position')}>
+            <option value="">{t('All positions')}</option>
+            {['GK', 'DEF', 'MID', 'FWD'].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {ranked.length === 0 ? (
+        <Empty title="No players yet"
+          description="Your league leader publishes the market players." />
+      ) : (
+        <div className="panel table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{t('Rank')}</th><th>{t('PLAYER')}</th><th>{t('Position')}</th>
+                <th>{t('Rating')}</th><th>{t('Price')}</th><th>{t('Managers')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.map((p, i) => (
+                <tr key={p.id}>
+                  <td>{String(i + 1).padStart(2, '0')}</td>
+                  <td>
+                    <Link to={`/players/${p.id}`} className="table-team">
+                      <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                      <strong>{p.name}</strong>
+                    </Link>
+                  </td>
+                  <td>{p.position}</td>
+                  <td>{p.rating}</td>
+                  <td>{formatMoney(p.price)}</td>
+                  <td>{p.owned_by ?? 0}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
