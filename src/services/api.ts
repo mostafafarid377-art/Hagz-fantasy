@@ -287,7 +287,8 @@ export const setMatchLineup = (leagueId: string, revisionId: string, teamId: str
   'ff_match_set_lineup', { p_league: leagueId, p_revision: revisionId, p_team: teamId, p_players: players });
 
 export const submitMatchLineup = (leagueId: string, revisionId: string) =>
-  call<{ submission_id: string }>('ff_match_submit_lineup', { p_league: leagueId, p_revision: revisionId });
+  call<{ submission_id: string; approval_id?: string; state: 'submitted' | 'approved' }>(
+    'ff_match_submit_lineup', { p_league: leagueId, p_revision: revisionId });
 
 export const forkResult = (leagueId: string, approvalId: string, requestId: string) =>
   call<{ revision_id: string; request_id: string }>(
@@ -306,7 +307,7 @@ export const recordMatchEvent = (leagueId: string, revisionId: string, playerId:
 });
 
 export const submitMatchResult = (leagueId: string, revisionId: string, lineupApprovalId: string) =>
-  call<{ submission_id: string }>('ff_match_submit_result',
+  call<{ submission_id: string; official_result_id: string; revision_id: string; state: 'official'; finalized_by: string; finalized_at: string }>('ff_match_submit_result',
     { p_league: leagueId, p_revision: revisionId, p_lineup_approval: lineupApprovalId });
 
 export const reviewMatchSubmission = (leagueId: string, submissionId: string, decision: 'approved' | 'rejected', reason?: string) =>
