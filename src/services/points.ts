@@ -225,7 +225,7 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
   const seasonResultIds = scoped
     .map((row) => officialForMatch.get(row.id)?.id)
     .filter((value): value is string => typeof value === 'string');
-  const seasonItems = seasonResultIds.length > 1 ? await loadItems(seasonResultIds) : NO_ITEMS;
+  const seasonItems = seasonResultIds.length > 1 ? await loadItems(seasonResultIds) : lastItems;
   if (seasonItems.error) return fail(seasonItems.error);
 
   // --- 4. Resolve lineups -> teams, and real players -> league players ------
