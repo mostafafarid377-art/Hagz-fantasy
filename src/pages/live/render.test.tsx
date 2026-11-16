@@ -249,7 +249,7 @@ describe('live mode never presents refused data as emptiness', () => {
         }],
       }),
       leagueMembers: denied, marketPlayers: denied, squad: denied, suggestions: denied,
-      gameweeks: denied, matches: denied, standings: denied, notifications: denied,
+      gameweeks: denied, matches: denied, transfers: denied, standings: denied, notifications: denied,
     }));
 
     const [{ LiveProvider }, { LiveDashboard }, { AuthProvider }] = await Promise.all([

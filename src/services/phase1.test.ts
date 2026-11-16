@@ -68,9 +68,9 @@ describe('league-scoped market', () => {
 describe('suggestions and leader permissions', () => {
   const suggestion:Suggestion={id:'new',leagueId:'league-1',name:'Hatem Fathy',position:'MID',notes:'',status:'pending',submittedBy:'manager'};
   const player:Player={...demoPlayers[8],id:'new-player',name:suggestion.name};
-  it('submits a manager suggestion and prevents duplicate pending names in that league', () => {
+  it('allows separate same-name pending suggestions while restricting roles', () => {
     const list=submitSuggestion('manager',suggestion,'league-1',players,[]);expect(list).toHaveLength(1);
-    expect(()=>submitSuggestion('manager',{...suggestion,id:'another',name:'  HATEM FATHY '},'league-1',players,list)).toThrow();
+    expect(submitSuggestion('manager',{...suggestion,id:'another',name:'  HATEM FATHY '},'league-1',players,list)).toHaveLength(2);
     expect(()=>submitSuggestion('leader',suggestion,'league-1',players,[])).toThrow('forbidden');
   });
   it('approves exactly one player and rejects repeated or stale approval', () => {

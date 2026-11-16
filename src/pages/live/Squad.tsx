@@ -59,6 +59,12 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
 
   const squad = live.squad;
   const players = squad?.players ?? [];
+  const identityHint = (marketPlayerId: string | null | undefined) => {
+    const match = live.players.find((player) => player.id === marketPlayerId);
+    return match && live.players.some((player) => player.id !== match.id
+      && player.name.trim().toLocaleLowerCase() === match.name.trim().toLocaleLowerCase())
+      ? ` · #${match.id.slice(0, 8)}` : '';
+  };
 
   const spent = squad?.spent ?? 0;
   const budget = squad?.budget ?? 0;
@@ -85,10 +91,9 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   if (transfers) {
     const outOptions = players;
     const outgoing = outOptions.find((p) => p.league_player_id === outPlayer);
-    const inOptions = live.players.filter((p) => p.active && !outgoing
-      ? live.players.some((q) => q.id === p.id)
-      : true).filter((p) => outgoing && p.position === outgoing.position
-        && !players.some((s) => s.league_player_id === p.id));
+    const inOptions = live.players.filter((p) => p.active && !!outgoing
+      && p.position === outgoing.position
+      && !players.some((s) => s.league_player_id === p.id));
 
     return (
       <>
@@ -107,7 +112,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               <option value="">{t('Select a player')}</option>
               {outOptions.map((p) => (
                 <option key={p.league_player_id} value={p.league_player_id}>
-                  {p.name} · {p.position} · {formatCompactMoney(p.price)}
+                  {p.name} · {p.position} · {formatCompactMoney(p.price)}{identityHint(p.league_player_id)}
                 </option>
               ))}
             </select>
@@ -116,7 +121,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             <select value={inPlayer} onChange={(e) => setInPlayer(e.target.value)} disabled={!outgoing}>
               <option value="">{t('Select a player')}</option>
               {inOptions.map((p) => (
-                <option key={p.id} value={p.id}>{p.name} · {formatCompactMoney(p.price)}</option>
+                <option key={p.id} value={p.id}>{p.name} · {formatCompactMoney(p.price)}{identityHint(p.id)}</option>
               ))}
             </select>
           </label>
@@ -125,7 +130,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               <span>{t('After transfer')}: {formatCompactMoney(remaining + outgoing.price - (inOptions.find((p) => p.id === inPlayer)?.price ?? 0))}</span>
             </div>
           )}
-          <button className="button" disabled={!outPlayer || !inPlayer || busy === 'transfer'}
+          <button className="button" disabled={!outPlayer || !inPlayer || !live.league.market_open || busy === 'transfer'}
             onClick={() => void run('transfer', async () => {
               await live.transfer(outPlayer, inPlayer);
               setOutPlayer(''); setInPlayer('');
@@ -134,6 +139,25 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           </button>
           <Link className="text-link" to="/market">{t('Explore the player market')} →</Link>
         </div>
+
+        <section className="panel section-spacer transfer-history" aria-labelledby="transfer-history-title">
+          <SectionHead eyebrow="YOUR ACTIVITY" title="Transfer history" />
+          {live.transfers.length === 0 ? <p className="muted">{t('No transfers have been recorded yet.')}</p> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>{t('Gameweek')}</th><th>{t('Manager')}</th><th>{t('Transfer')}</th><th>{t('Date')}</th></tr></thead>
+                <tbody>{live.transfers.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.gameweek_number}</td>
+                    <td>{item.manager_name ?? item.team_name}</td>
+                    <td>{item.out_name ? <>{item.out_name}{identityHint(item.out_player_id)} <span aria-label={t('out')}>→</span> </> : null}{item.in_name}{identityHint(item.in_player_id)}</td>
+                    <td><time dateTime={item.created_at}>{new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.created_at))}</time></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </>
     );
   }

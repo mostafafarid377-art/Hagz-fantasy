@@ -76,6 +76,8 @@ export function Pitch({
           <div className="pitch-row" key={pos}>
             {group.map((p) => {
               const points = pointsFor?.(p);
+              const sameName = group.some((other) => other.id !== p.id
+                && other.name.trim().toLocaleLowerCase() === p.name.trim().toLocaleLowerCase());
               const content = (
                 <>
                   <div className="pitch-portrait">
@@ -84,7 +86,7 @@ export function Pitch({
                     {p.id === captainId && <i>{t('C')}</i>}
                     {p.id === viceCaptainId && <i>{t('VC')}</i>}
                   </div>
-                  <strong>{p.name.split(' ')[0]}</strong>
+                  <strong>{p.name.split(' ')[0]}{sameName && <small className="identity-hint">#{p.id.slice(0, 8)}</small>}</strong>
                   {/* Whole fragment inside the branch: rendering "-" with "pts" after it
                       would claim a score that does not exist. */}
                   {showPoints && (points != null
@@ -96,9 +98,9 @@ export function Pitch({
               return (
                 <div className="pitch-slot" key={p.id}>
                   {onPlayerClick
-                    ? <button type="button" className={className} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}`} disabled={!!swapSource && !swapTargets?.includes(p.id)} onClick={() => onPlayerClick(p)}>{content}</button>
-                    : <DetailLink to={`/players/${p.id}`} className={className}>{content}</DetailLink>}
-                  {onRemovePlayer && <button type="button" className="pitch-remove" aria-label={`${t('Remove')}: ${p.name}`} onClick={() => onRemovePlayer(p)}>&times;</button>}
+                    ? <button type="button" className={className} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}${sameName ? ` #${p.id.slice(0, 8)}` : ''}`} disabled={!!swapSource && !swapTargets?.includes(p.id)} onClick={() => onPlayerClick(p)}>{content}</button>
+                    : <DetailLink to={`/players/${p.id}`} className={className} aria-label={`${t('Player profile')}: ${p.name}${sameName ? ` #${p.id.slice(0, 8)}` : ''}`}>{content}</DetailLink>}
+                  {onRemovePlayer && <button type="button" className="pitch-remove" aria-label={`${t('Remove')}: ${p.name}${sameName ? ` #${p.id.slice(0, 8)}` : ''}`} onClick={() => onRemovePlayer(p)}>&times;</button>}
                 </div>
               );
             })}

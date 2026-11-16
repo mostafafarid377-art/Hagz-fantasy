@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { demoPlayers, initialState } from '../data/demo';
-import { canAddPlayer, canManage, isDuplicateName, reviewSuggestion, squadSummary } from './rules';
+import { canAddPlayer, canManage, reviewSuggestion, saveMarketPlayer, squadSummary, submitSuggestion } from './rules';
 import type { Player } from '../types';
 const players=demoPlayers;
 describe('squad rules',()=>{
@@ -15,6 +15,6 @@ describe('suggestions and permissions',()=>{
  it('restricts leader operations',()=>{expect(canManage('manager')).toBe(false);expect(canManage('leader')).toBe(true);expect(()=>reviewSuggestion('manager',suggestion,'approved',players,[suggestion],player)).toThrow('forbidden');});
  it('approves a pending suggestion and adds one market player',()=>{const result=reviewSuggestion('leader',suggestion,'approved',players,[suggestion],player);expect(result.suggestions[0].status).toBe('approved');expect(result.players[result.players.length-1]?.name).toBe(suggestion.name);});
  it('rejects without creating a player',()=>{const result=reviewSuggestion('leader',suggestion,'rejected',players,[suggestion]);expect(result.suggestions[0].status).toBe('rejected');expect(result.players).toHaveLength(players.length);});
- it('prevents duplicate names within a league, ignoring case and spaces',()=>{expect(isDuplicateName('  omar KHALED ', 'league-1',players,[])).toBe(true);expect(isDuplicateName('Hady Wael','league-1',players,[suggestion])).toBe(true);expect(isDuplicateName('Omar Khaled','another',players,[])).toBe(false);});
- it('prevents approval of an existing market name and re-review',()=>{expect(()=>reviewSuggestion('leader',suggestion,'approved',players,[suggestion],{...player,name:players[0].name})).toThrow('duplicate');expect(()=>reviewSuggestion('leader',suggestion,'approved',players,[{...suggestion,status:'rejected'}],player)).toThrow('already reviewed');});
+ it('allows distinct market players and suggestions with the same display name',()=>{const withDuplicate=submitSuggestion('manager',{...suggestion,id:'suggestion-2'},'league-1',players,[suggestion]);expect(withDuplicate).toHaveLength(2);const sameName={...players[0],id:'same-name-player',name:players[0].name};expect(saveMarketPlayer('leader','league-1',sameName,players,[])).toHaveLength(players.length+1);});
+ it('approves a same-name real person by ID and prevents re-review',()=>{const result=reviewSuggestion('leader',suggestion,'approved',players,[suggestion],{...player,name:players[0].name});expect(result.players[result.players.length - 1]?.name).toBe(players[0].name);expect(()=>reviewSuggestion('leader',suggestion,'approved',players,[{...suggestion,status:'rejected'}],player)).toThrow('already reviewed');});
 });
