@@ -17,7 +17,7 @@ import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
-import { formations } from '../../services/rules';
+import { formations, limits } from '../../services/rules';
 import type { Formation, Player, Position } from '../../types';
 
 const FORMATIONS = Object.keys(formations) as Formation[];
@@ -158,7 +158,21 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   return (
     <>
       <PageTitle eyebrow="YOUR TEAM" title={builder ? 'Squad Builder' : 'My Squad'}
-        description={`${ordered.length}/15 · ${formatMoney(remaining)} ${t('remaining')}`} />
+        description={t('Maximum 15 players, with a 100M budget.')} />
+
+      {/* Same 7-cell strip as the demo squad screen: size, value, budget, then the
+          four position counts. */}
+      <div className="squad-summary">
+        <div><small>{t('Squad')}</small><strong>{ordered.length}<span>/15</span></strong></div>
+        <div><small>{t('Squad value')}</small><strong>{formatMoney(spent)}</strong></div>
+        <div><small>{t('Budget remaining')}</small><strong className="lime">{formatMoney(remaining)}</strong></div>
+        {(['GK', 'DEF', 'MID', 'FWD'] as Position[]).map((pos) => (
+          <div key={pos}>
+            <small>{pos}</small>
+            <strong>{ordered.filter((p) => p.position === pos).length}<span>/{limits[pos]}</span></strong>
+          </div>
+        ))}
+      </div>
 
       {live.error && <ErrorNote message={live.error} />}
       {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}

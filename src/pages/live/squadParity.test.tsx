@@ -99,6 +99,29 @@ describe('the live squad tab is laid out like the demo one', () => {
   });
 });
 
+describe('the summary strip matches the demo squad screen', () => {
+  it('shows the 7-cell summary: size, value, budget, then four position counts', async () => {
+    await mountLiveSquad();
+    const cells = document.querySelectorAll('.squad-summary > div');
+    expect(cells.length).toBe(7);
+  });
+
+  it('labels the cells the way the demo does', async () => {
+    await mountLiveSquad();
+    const text = document.querySelector('.squad-summary')?.textContent ?? '';
+    for (const label of ['Squad', 'Squad value', 'Budget remaining', 'GK', 'DEF', 'MID', 'FWD']) {
+      expect(text).toContain(label);
+    }
+  });
+
+  it('shows the squad as n/15', async () => {
+    await mountLiveSquad();
+    const text = document.querySelector('.squad-summary')?.textContent ?? '';
+    // FULL_SQUAD is 15 players.
+    expect(text).toMatch(/15\/15/);
+  });
+});
+
 describe('there is no squad list under the pitch', () => {
   it('renders no roster rows', async () => {
     await mountLiveSquad();

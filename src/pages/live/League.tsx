@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trash2, Trophy, UsersRound, X,
+  AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Shield, Trash2, Trophy, UsersRound, X, Zap,
 } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { Pitch } from '../Dashboard';
@@ -118,8 +118,25 @@ export function LiveDashboard() {
   }
 
   const nextMatch = [...live.matches].sort((a, b) => +new Date(a.starts_at) - +new Date(b.starts_at))[0];
-  const squadSize = live.squad?.players.length ?? 0;
+  const squadSize = live.squad?.players?.length ?? 0;
   const budgetLeft = (live.squad?.budget ?? 0) - (live.squad?.spent ?? 0);
+
+  // The demo's four cards are LEAGUE RANK / SQUAD VALUE / IN THE BANK / total points.
+  // The first three are all derivable from live data, so the live cards use the same
+  // labels and order instead of SQUAD / BUDGET LEFT / MEMBERS / MATCHES.
+  //
+  // The fourth is the exception: demo shows LAST GAME POINTS, but a live squad player
+  // has no points field, so there is no honest per-gameweek figure to show. The card
+  // reports the season fantasy total where the standings provide one and renders an
+  // em dash otherwise, rather than inventing a number.
+  const myStanding = live.myUserId
+    ? live.standings.find((row) => row.manager_id === live.myUserId)
+    : undefined;
+  const myRank = myStanding
+    ? [...live.standings].sort((a, b) => (b.fantasy_points ?? 0) - (a.fantasy_points ?? 0))
+        .findIndex((row) => row.team_id === myStanding.team_id) + 1
+    : 0;
+  const squadValue = live.squad?.spent ?? 0;
 
   // The table, ranked by fantasy points only - the same rule as /standings.
   const ranked = [...live.standings].sort((a, b) =>
@@ -162,6 +179,20 @@ export function LiveDashboard() {
         </Link>
       </div>
 
+      {/* The demo home shows a hero between the welcome row and the notice; live
+          went straight from the greeting to a paragraph, which is a large part of
+          why the two home pages did not feel like the same product. */}
+      <section className="hero">
+        <div className="hero-content">
+          <div className="hero-kicker"><span /> {t('THE GAME IS BETTER TOGETHER')}</div>
+          <h2>{t('Your friends.')}<br />{t('Your team.')} <em>{t('Your league.')}</em></h2>
+          <p>{t('Build your dream squad from the friends you play with. The bragging rights are real.')}</p>
+          <Link to="/squad" className="button">{t('Build your squad')} <ArrowUpRight size={16} /></Link>
+        </div>
+        <div className="hero-index">01 / 03 <span>━━━━</span></div>
+        <div className="hero-watermark">FF.</div>
+      </section>
+
       <p className="notice dashboard-notice">
         {t('Live data from your league. Only approved results count towards points.')}
       </p>
@@ -172,27 +203,27 @@ export function LiveDashboard() {
       </div>
       <div className="stat-grid">
         <div className="stat-card">
-          <div className="stat-top"><span>{t('SQUAD')}</span><div className="stat-icon"><UsersRound size={17} /></div></div>
-          <div className="stat-number">{squadSize}<small>/15</small></div>
-          <div className="stat-foot">{t(live.squad?.status === 'confirmed' ? 'Lineup confirmed' : 'Draft lineup')}</div>
+          <div className="stat-top"><span>{t('LEAGUE RANK')}</span><div className="stat-icon"><Trophy size={17} /></div></div>
+          <div className="stat-number">{myRank ? String(myRank).padStart(2, '0') : '—'}</div>
+          <div className="stat-foot">{myRank ? `${t('of')} ${live.standings.length} ${t('teams')}` : t('No standings yet')}</div>
           <div className="stat-number-bg">01</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('BUDGET LEFT')}</span><div className="stat-icon"><Shield size={17} /></div></div>
-          <div className="stat-number">{formatMoney(budgetLeft)}</div>
-          <div className="stat-foot">{t('Spent')} {formatMoney(live.squad?.spent ?? 0)}</div>
+          <div className="stat-top"><span>{t('SQUAD VALUE')}</span><div className="stat-icon"><UsersRound size={17} /></div></div>
+          <div className="stat-number">{formatMoney(squadValue)}</div>
+          <div className="stat-foot">{squadSize}/15 {t('players')}</div>
           <div className="stat-number-bg">02</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('MEMBERS')}</span><div className="stat-icon"><Trophy size={17} /></div></div>
-          <div className="stat-number">{live.members.length}</div>
-          <div className="stat-foot">{live.league.market_open ? t('Market open') : t('Market closed')}</div>
+          <div className="stat-top"><span>{t('IN THE BANK')}</span><div className="stat-icon"><Shield size={17} /></div></div>
+          <div className="stat-number">{formatMoney(budgetLeft)}</div>
+          <div className="stat-foot">{t('Budget remaining')}</div>
           <div className="stat-number-bg">03</div>
         </div>
         <div className="stat-card">
-          <div className="stat-top"><span>{t('MATCHES')}</span><div className="stat-icon"><CalendarDays size={17} /></div></div>
-          <div className="stat-number">{live.matches.length}</div>
-          <div className="stat-foot">{nextMatch ? `${nextMatch.team_a} vs ${nextMatch.team_b}` : t('No fixtures yet')}</div>
+          <div className="stat-top"><span>{t('TOTAL POINTS')}</span><div className="stat-icon"><Zap size={17} /></div></div>
+          <div className="stat-number">{myStanding ? <>{myStanding.fantasy_points} <small>{t('pts')}</small></> : '—'}</div>
+          <div className="stat-foot">{t('Season total · last game not available')}</div>
           <div className="stat-number-bg">04</div>
         </div>
       </div>
