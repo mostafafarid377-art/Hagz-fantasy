@@ -123,6 +123,23 @@ describe('the season admin screen is moved, not deleted', () => {
   });
 });
 
+describe('the season screen is reachable, not just routed', () => {
+  it('the layout links to /season', async () => {
+    // Moving a screen to a new route without a link orphans it - the feature would
+    // exist but no user could find it.
+    const { readFileSync } = await import('node:fs');
+    const layout = readFileSync('src/layouts/AppLayout.tsx', 'utf8');
+    expect(layout).toContain('to="/season"');
+  });
+
+  it('the link sits in the leader-tools group, which is role gated', async () => {
+    const { readFileSync } = await import('node:fs');
+    const layout = readFileSync('src/layouts/AppLayout.tsx', 'utf8');
+    const leaderGroup = layout.slice(layout.indexOf("canManage&&<div className=\"nav-group\""));
+    expect(leaderGroup).toContain('to="/season"');
+  });
+});
+
 describe('live does not fabricate figures the schema lacks', () => {
   it('the statistics table has no fantasy points column', async () => {
     await mountLive('statistics');
