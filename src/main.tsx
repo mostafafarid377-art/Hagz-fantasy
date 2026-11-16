@@ -23,7 +23,7 @@ import { LiveAuthPage } from './pages/live/Auth';
 import { LiveLeagueForm, LiveLeagueOverview } from './pages/live/League';
 import { LiveProfile, LiveSettings } from './pages/live/Account';
 import { LiveApprovals, LiveManagement, LiveMarket, LivePlayerProfile, LiveSuggestPlayer } from './pages/live/Market';
-import { LiveSeason, LiveSquad, LiveStandings } from './pages/live/Squad';
+import { LiveSeason, LiveSquad, LiveStandings, LiveStatistics } from './pages/live/Squad';
 import { LiveFixtures, LiveMatchCenter, LiveNotifications } from './pages/live/Match';
 import { DashboardRoute, ModeSwitch } from './pages/live/Routes';
 
@@ -86,8 +86,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
                   <Route path="/match-center/:matchId" element={<ModeSwitch live={()=><LiveMatchCenter/>} demo={()=><MatchCenter/>}/>}/>
                   <Route path="/head-to-head" element={<ModeSwitch live={()=><LiveFixtures/>} demo={()=><Fixtures head/>}/>}/>
                   <Route path="/standings" element={<ModeSwitch live={()=><LiveStandings/>} demo={()=><Standings/>}/>}/>
-                  <Route path="/statistics" element={<ModeSwitch live={()=><LiveSeason/>} demo={()=><Statistics/>}/>}/>
-                  <Route path="/points" element={<ModeSwitch live={()=><LiveStandings/>} demo={()=><Statistics points/>}/>}/>
+                  {/* /statistics is the player table in both modes; the live season/
+                      gameweek admin screen moved to /season so it no longer shadows
+                      the demo route. The feature is kept, not dropped. */}
+                  <Route path="/statistics" element={<ModeSwitch live={()=><LiveStatistics/>} demo={()=><Statistics/>}/>}/>
+                  <Route path="/season" element={<ModeSwitch live={()=><LiveSeason/>} demo={()=><Statistics/>}/>}/>
+                  <Route path="/points" element={<ModeSwitch live={()=><LiveStatistics/>} demo={()=><Statistics points/>}/>}/>
                   <Route path="/profile" element={<ModeSwitch live={()=><LiveProfile/>} demo={()=><Profile/>}/>}/>
                   <Route path="/settings" element={<ModeSwitch live={()=><LiveSettings/>} demo={()=><SettingsPage/>}/>}/>
                   <Route path="/notifications" element={<ModeSwitch live={()=><LiveNotifications/>} demo={()=><Notifications/>}/>}/>

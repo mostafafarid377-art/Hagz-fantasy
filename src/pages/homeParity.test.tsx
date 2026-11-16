@@ -25,6 +25,7 @@ afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubA
 /** Structural landmarks that must exist on BOTH home pages. */
 const LANDMARKS = [
   '.welcome-row',
+  '.hero',
   '.overview-heading',
   '.stat-grid',
   '.dashboard-grid',
@@ -142,8 +143,11 @@ describe('the live home shows real data, not placeholders', () => {
     await mountLiveHome();
     // A live squad player has no points field. Rendering p.points anyway would show
     // a zero for every player, which reads as a real result.
-    expect(document.querySelector('.pitch')).toBeTruthy();
-    expect(document.body.textContent).not.toMatch(/0 pts/);
+    const pitch = document.querySelector('.pitch');
+    expect(pitch).toBeTruthy();
+    // Scope to the pitch and require a word boundary: a legitimate "500 pts" in a
+    // stat card contains the substring "0 pts", which made the loose check fire.
+    expect(pitch!.textContent).not.toMatch(/(^|\s)0 pts/);
   });
 
   it('lists the next fixture from live matches', async () => {

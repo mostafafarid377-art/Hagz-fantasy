@@ -17,7 +17,7 @@ import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
-import { formations } from '../../services/rules';
+import { formations, limits } from '../../services/rules';
 import type { Formation, Player, Position } from '../../types';
 
 const FORMATIONS = Object.keys(formations) as Formation[];
@@ -158,7 +158,21 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   return (
     <>
       <PageTitle eyebrow="YOUR TEAM" title={builder ? 'Squad Builder' : 'My Squad'}
-        description={`${ordered.length}/15 · ${formatMoney(remaining)} ${t('remaining')}`} />
+        description={t('Maximum 15 players, with a 100M budget.')} />
+
+      {/* Same 7-cell strip as the demo squad screen: size, value, budget, then the
+          four position counts. */}
+      <div className="squad-summary">
+        <div><small>{t('Squad')}</small><strong>{ordered.length}<span>/15</span></strong></div>
+        <div><small>{t('Squad value')}</small><strong>{formatMoney(spent)}</strong></div>
+        <div><small>{t('Budget remaining')}</small><strong className="lime">{formatMoney(remaining)}</strong></div>
+        {(['GK', 'DEF', 'MID', 'FWD'] as Position[]).map((pos) => (
+          <div key={pos}>
+            <small>{pos}</small>
+            <strong>{ordered.filter((p) => p.position === pos).length}<span>/{limits[pos]}</span></strong>
+          </div>
+        ))}
+      </div>
 
       {live.error && <ErrorNote message={live.error} />}
       {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
@@ -426,6 +440,83 @@ export function LiveSeason() {
             <UserPlus size={15} /> {busy ? t('Creating…') : t('Create season')}
           </button>
         </form>
+      )}
+    </>
+  );
+}
+
+/**
+ * Player statistics in live mode.
+ *
+ * Mirrors the demo table: rank, player, position, rating, price. The demo's final
+ * column is FANTASY POINTS, which the live schema does not carry per player, so it
+ * is replaced with OVR as the sort key - the same substitution the dashboard pitch
+ * already makes - rather than rendering a column of zeros.
+ */
+export function LiveStatistics() {
+  const { t } = useTranslation();
+  const live = useLive();
+  const [query, setQuery] = useState('');
+  const [position, setPosition] = useState('');
+
+  if (live.loading) return <Loading />;
+  if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
+
+  const ranked = live.players
+    .filter((p) => (position ? p.position === position : true))
+    .filter((p) => (query ? p.name.toLowerCase().includes(query.toLowerCase()) : true))
+    .sort((a, b) => b.rating - a.rating || b.price - a.price);
+
+  return (
+    <>
+      <PageTitle eyebrow="THE NUMBERS" title="Player statistics"
+        description="How the players in your league market rate this season" />
+      {live.error && <ErrorNote message={live.error} />}
+
+      <div className="filter-bar">
+        <div className="search-box">
+          <input value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('Search players')} aria-label={t('Search players')} />
+        </div>
+        <div className="filters">
+          <select value={position} onChange={(e) => setPosition(e.target.value)} aria-label={t('Position')}>
+            <option value="">{t('All positions')}</option>
+            {['GK', 'DEF', 'MID', 'FWD'].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {ranked.length === 0 ? (
+        <Empty title="No players yet"
+          description="Your league leader publishes the market players." />
+      ) : (
+        <div className="panel table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{t('Rank')}</th><th>{t('PLAYER')}</th><th>{t('Position')}</th>
+                <th>{t('Rating')}</th><th>{t('Price')}</th><th>{t('Managers')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.map((p, i) => (
+                <tr key={p.id}>
+                  <td>{String(i + 1).padStart(2, '0')}</td>
+                  <td>
+                    <Link to={`/players/${p.id}`} className="table-team">
+                      <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                      <strong>{p.name}</strong>
+                    </Link>
+                  </td>
+                  <td>{p.position}</td>
+                  <td>{p.rating}</td>
+                  <td>{formatMoney(p.price)}</td>
+                  <td>{p.owned_by ?? 0}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </>
   );
