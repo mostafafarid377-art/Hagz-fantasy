@@ -39,7 +39,20 @@ Object.assign(ar, {
   'The match was created but could not be verified. Refresh the match list before scheduling another.':'تم إنشاء المباراة لكن تعذر التحقق منها. حدّث قائمة المباريات قبل جدولة مباراة أخرى.',
   'Only published League Market players can be selected in lineups. Scheduling does not create player profiles or affect fantasy squads.':'يمكن اختيار اللاعبين المنشورين في سوق الدوري فقط. لا تنشئ الجدولة ملفات لاعبين ولا تؤثر على فرق الفانتازي.',
   'No fixtures yet':'لا توجد مباريات بعد', 'Your league leader schedules the matches.':'مسؤول الدوري هو من يجدول المباريات.',
-  'Only the match’s assigned Organizer (or Leader) can edit its record. Fantasy scoring remains pending until scoring rules are approved.':'يمكن لمنظّم المباراة المعيّن (أو مسؤول الدوري) فقط تعديل سجلها. تبقى نقاط الفانتازي معلّقة حتى اعتماد قواعد الاحتساب.'
+  'Only the match’s assigned Organizer (or Leader) can edit its record. Fantasy scoring remains pending until scoring rules are approved.':'يمكن لمنظّم المباراة المعيّن (أو مسؤول الدوري) فقط تعديل سجلها. تبقى نقاط الفانتازي معلّقة حتى اعتماد قواعد الاحتساب.',
+  'Schedule matches, manage lineups and publish official results.':'جدول المباريات وأدر التشكيلات وانشر النتائج الرسمية.',
+  'League Leader and assigned active Organizer can manage this match. Organizer results publish immediately when complete; the Leader may also finalize them. Fantasy scoring remains pending until scoring rules are approved.':'يمكن لمسؤول الدوري والمنظّم النشط المعيّن إدارة هذه المباراة. تُنشر نتائج المنظّم فور اكتمالها، ويمكن لمسؤول الدوري اعتمادها أيضاً. تبقى نقاط الفانتازي معلّقة حتى اعتماد قواعد الاحتساب.',
+  'Lineup saved and approved.':'تم حفظ التشكيلة واعتمادها.', 'Lineup submitted for Leader review.':'تم إرسال التشكيلة لمراجعة مسؤول الدوري.',
+  'Save and approve lineups':'حفظ التشكيلات واعتمادها', 'Submit lineups for review':'إرسال التشكيلات للمراجعة',
+  'Result finalized and published to the league.':'تم اعتماد النتيجة ونشرها للدوري.', 'Finalize and publish result':'اعتماد النتيجة ونشرها',
+  'A correction starts a new immutable draft. The current official result stays visible until the corrected result is complete and finalized. A reason and full audit history are retained.':'يبدأ التصحيح مسودة جديدة غير قابلة للتغيير. تظل النتيجة الرسمية الحالية ظاهرة حتى اكتمال النتيجة المصححة واعتمادها. يُحفظ السبب وسجل التدقيق كاملاً.',
+  'Correction draft opened. The current official result remains active.':'فُتحت مسودة التصحيح. تظل النتيجة الرسمية الحالية معتمدة.', 'Open correction':'فتح تصحيح',
+  'Only a complete, saved result finalized by the Leader or assigned active Organizer becomes official. Fantasy scoring is intentionally pending until the league has an approved scoring configuration.':'لا تصبح النتيجة رسمية إلا بعد اكتمالها وحفظها واعتمادها من مسؤول الدوري أو المنظّم النشط المعيّن. يظل احتساب النقاط معلقاً حتى اعتماد إعدادات الدوري.',
+  'Lineup awaiting review':'التشكيلة بانتظار المراجعة', 'Result ready to finalize':'النتيجة جاهزة للاعتماد', 'Saved result':'النتيجة المحفوظة',
+  'A previously submitted result can be finalized here. Only complete saved match details will be published.':'يمكن اعتماد نتيجة أُرسلت سابقاً من هنا. لن تُنشر إلا تفاصيل المباراة المكتملة والمحفوظة.',
+  'Finalize saved result':'اعتماد النتيجة المحفوظة', 'ready for finalization':'جاهزة للاعتماد',
+  'awaiting League Leader review':'بانتظار مراجعة مسؤول الدوري', 'Record match result':'تسجيل نتيجة المباراة',
+  'A match result is now official':'أصبحت نتيجة المباراة رسمية'
 });
 const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});

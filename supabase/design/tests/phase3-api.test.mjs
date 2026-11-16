@@ -33,7 +33,7 @@ const PKG = [
   // definer sees an anonymous caller.
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
-  '20261115000019_optional_match_gameweek',
+  '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -51,6 +51,7 @@ const asUser = async (id, fn) => {
     await db.exec('reset role');
     return result;
   } catch (error) {
+    if (process.env.DEBUG_SQL_ERRORS) console.error({ message: error.message, detail: error.detail, where: error.where, query: error.query });
     // A failed statement aborts the transaction, and a `reset role` inside an
     // aborted transaction raises 25P02 and would replace the real SQLSTATE we
     // are asserting on. The caller rolls back, which also clears the role.
@@ -653,25 +654,30 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   const approved = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, submitted.submission_id, 'approved');
   assert.equal(approved.decision, 'approved');
 
-  // Result path: fork, score, record an event, submit, approve.
+  // Result path: fork, save a complete score/events record, then finalize atomically.
   const forkRequestId = crypto.randomUUID();
   const forked = await rpc(BOB, "ff_match_fork_result", LEAGUE.id, approved.approval_id, forkRequestId);
   assert.ok(forked.revision_id);
   const retriedFork = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, approved.approval_id, forkRequestId);
   assert.equal(retriedFork.revision_id, forked.revision_id, 'retrying the same fork request is idempotent');
+  await expectDenied(() => rpc(BOB, 'ff_match_submit_result', LEAGUE.id, forked.revision_id, approved.approval_id), '23514', 'incomplete result cannot be finalized');
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, match.id]), 0, 'an unsaved score never becomes official');
   await rpc(BOB, 'ff_match_set_score', LEAGUE.id, forked.revision_id, 3, 1);
   await expectDenied(() => rpc(BOB, 'ff_match_record_event', LEAGUE.id, forked.revision_id, prof,
     'teleportation', 12), '23514', 'unsupported event type');
   const event = await rpc(BOB, 'ff_match_record_event', LEAGUE.id, forked.revision_id, prof, 'goal', 12);
   assert.equal(event.type, 'goal');
 
+  await expectDenied(() => rpc(CAROL, 'ff_match_submit_result', LEAGUE.id, forked.revision_id, approved.approval_id), '42501', 'unassigned Manager cannot finalize this match');
   const resultSubmission = await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, forked.revision_id, approved.approval_id);
   assert.ok(resultSubmission.submission_id);
-  await expectDenied(() => rpc(BOB, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved'), '42501', 'organizer self-approving a result');
-  const resultApproval = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved');
-  assert.equal(resultApproval.decision, 'approved');
+  assert.equal(resultSubmission.state, 'official', 'a complete saved result finalizes immediately');
+  assert.equal(resultSubmission.finalized_by, BOB, 'the assigned Organizer is the recorded finalizer');
+  assert.ok(resultSubmission.finalized_at);
+  await expectDenied(() => rpc(BOB, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved'), '42501', 'result review/approval is removed');
+  await expectDenied(() => rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, resultSubmission.submission_id, 'approved'), '42501', 'Leader cannot put a result through the obsolete review RPC');
 
-  // The approved result is now the official one, and is readable by members.
+  // The finalized result is now official, and is readable by members.
   const official = await scalar(
     `select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current`,
     [LEAGUE.id, match.id]);
@@ -679,6 +685,17 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
 
   const matches = await rpc(CAROL, 'ff_matches', LEAGUE.id);
   assert.equal(matches.length, 1);
+  assert.equal(matches[0].is_official, true, 'Fixtures/Match Center read exposes the finalized state');
+  assert.equal(matches[0].official_result_id, resultSubmission.official_result_id);
+  assert.equal(matches[0].official_revision_id, forked.revision_id);
+  assert.equal(matches[0].finalized_by, BOB);
+  assert.ok(matches[0].finalized_at);
+  const visibleOfficial = await asUser(CAROL, async () => (await q(
+    'select id,match_id,revision_id,finalized_by,finalized_at from public.official_match_results where league_id=$1 and match_id=$2 and is_current',
+    [LEAGUE.id, match.id])).rows);
+  assert.equal(visibleOfficial.length, 1, 'the existing authenticated official-result read sees one current row');
+  assert.equal(visibleOfficial[0].finalized_by, BOB);
+  assert.ok(visibleOfficial[0].finalized_at);
   assert.equal(matches[0].revision_state, 'approved');
   assert.equal(matches[0].history.length, 2, 'the read RPC includes append-only revision history');
   assert.equal(matches[0].history[0].events.length, 1, 'result events are retained in revision history');
@@ -686,16 +703,18 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   assert.equal(matches[0].history[1].lineups[0].players[0].selection, 'starter');
 
   globalThis.MATCH = match;
+  globalThis.MATCH_OFFICIAL_ID = resultSubmission.official_result_id;
+  globalThis.MATCH_OFFICIAL_REVISION = forked.revision_id;
   globalThis.MATCH_LINEUP = { teamA: teamA.id, teamB: teamB.id, playerA: prof, playerB: profB };
   globalThis.LINEUP_APPROVAL = approved.approval_id;
 });
 
 test('matches: a correction preserves history and supersedes the old result', async () => {
   const { LEAGUE, MATCH, LINEUP_APPROVAL } = globalThis;
-  await expectDenied(() => rpc(BOB, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'typo'), '42501', 'organizer opening a correction');
+  await expectDenied(() => rpc(CAROL, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'typo'), '42501', 'unassigned manager opening a correction');
   await expectDenied(() => rpc(ALICE, 'ff_match_open_correction', LEAGUE.id, MATCH.id, '   '), '23514', 'correction without a reason');
 
-  const correction = await rpc(ALICE, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'Goal was disallowed');
+  const correction = await rpc(BOB, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'Goal was disallowed');
   assert.ok(correction.draft_revision_id);
 
   // The previous official result is retained but no longer current.
@@ -704,8 +723,12 @@ test('matches: a correction preserves history and supersedes the old result', as
     [LEAGUE.id, MATCH.id]);
   const historical = await scalar(
     `select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2`, [LEAGUE.id, MATCH.id]);
-  assert.equal(current, 0, 'the superseded result is no longer current');
-  assert.equal(historical, 1, 'the historical result row is preserved, not deleted');
+  assert.equal(current, 1, 'the existing official result remains current while correction is only a draft');
+  assert.equal(historical, 1, 'opening a correction does not fabricate an official replacement');
+  const duringCorrection = (await rpc(CAROL, 'ff_matches', LEAGUE.id))[0];
+  assert.equal(duringCorrection.is_official, true, 'the current official result remains visible during correction');
+  assert.equal(duringCorrection.official_result_id, globalThis.MATCH_OFFICIAL_ID);
+  assert.equal(duringCorrection.official_revision_id, globalThis.MATCH_OFFICIAL_REVISION);
 
   const record = await scalar(
     `select count(*)::int from public.match_corrections where league_id=$1 and match_id=$2`, [LEAGUE.id, MATCH.id]);
@@ -721,9 +744,23 @@ test('matches: a correction preserves history and supersedes the old result', as
   await expectDenied(() => rpc(BOB, 'ff_match_fork_result', LEAGUE.id, LINEUP_APPROVAL, crypto.randomUUID()), '23514', 'old lineup approval cannot bypass correction reapproval');
   const correctedDraft = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, correctionLineupApproval.approval_id, crypto.randomUUID());
   await rpc(BOB, 'ff_match_set_score', LEAGUE.id, correctedDraft.revision_id, 2, 1);
-  const correctedSubmission = await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, correctedDraft.revision_id, correctionLineupApproval.approval_id);
-  await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, correctedSubmission.submission_id, 'approved');
-  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, MATCH.id]), 1, 'reapproved correction replaces the official pointer without deleting history');
+  // Model a complete Organizer submission saved under the previous workflow;
+  // the Leader can finalize it now without an approval round-trip.
+  await q("select set_config('request.jwt.claim.sub',$1,false)", [BOB]);
+  const pendingLegacyId = await scalar('select ff_private.submit_result($1,$2,$3)',
+    [LEAGUE.id, correctedDraft.revision_id, correctionLineupApproval.approval_id]);
+  await expectDenied(() => rpc(CAROL, 'ff_match_submit_result', LEAGUE.id, correctedDraft.revision_id, correctionLineupApproval.approval_id), '42501', 'unassigned manager cannot finalize another organizer’s saved result');
+  const correctedSubmission = await rpc(ALICE, 'ff_match_submit_result', LEAGUE.id, correctedDraft.revision_id, correctionLineupApproval.approval_id);
+  assert.equal(correctedSubmission.submission_id, pendingLegacyId);
+  assert.equal(correctedSubmission.state, 'official', 'a Leader can finalize the corrected result without a second approval');
+  assert.equal(correctedSubmission.finalized_by, ALICE, 'the Leader is recorded as finalizer');
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, MATCH.id]), 1, 'the finalized correction replaces the official pointer without deleting history');
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2', [LEAGUE.id, MATCH.id]), 2, 'the prior official result remains immutable history');
+  const refreshed = (await rpc(CAROL, 'ff_matches', LEAGUE.id))[0];
+  assert.equal(refreshed.is_official, true);
+  assert.equal(refreshed.official_revision_id, correctedDraft.revision_id);
+  assert.equal(refreshed.finalized_by, ALICE);
+  assert.notEqual(refreshed.official_result_id, globalThis.MATCH_OFFICIAL_ID, 'refresh reveals the newly finalized result');
 });
 
 test('matches: Gameweek is optional and old matches retain their Gameweek links', async () => {
@@ -822,6 +859,12 @@ test('isolation: two leagues never leak into each other', async () => {
   await expectDenied(() => rpc(ALICE, 'ff_suggestion_submit', second.id, 'Cross League', 'MID'), '42501', 'cross-league suggestion');
   // And her leader powers do not extend there.
   await expectDenied(() => rpc(ALICE, 'ff_league_set_market', second.id, false), '42501', 'cross-league leader action');
+  await rpc(BOB, 'ff_league_set_organizer', second.id, BOB, true);
+  const foreignTeamA = await rpc(BOB, 'ff_tournament_create', second.id, 'Second League A');
+  const foreignTeamB = await rpc(BOB, 'ff_tournament_create', second.id, 'Second League B');
+  const foreignMatch = await rpc(BOB, 'ff_match_create', second.id, null, foreignTeamA.id, foreignTeamB.id, BOB,
+    '2026-12-01T19:00:00Z', 'Second League Ground', 1, 1);
+  await expectDenied(() => rpc(ALICE, 'ff_match_open_revision', second.id, foreignMatch.id), '42501', 'cross-league match operation');
 });
 
 test('leadership transfer keeps exactly one active leader', async () => {
@@ -902,7 +945,7 @@ test('fixtures: a team from another league is refused with a clear 42501', async
 
 // The additive migration replaces the bodies of existing RPCs without opening
 // new execute access to anon or changing the authenticated application surface.
-test('match RPCs retain authenticated-only execute permissions after migration 019', async () => {
+test('match RPCs retain authenticated-only execute permissions after migration 020', async () => {
   const create = await scalar(`select has_function_privilege('authenticated', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const anonCreate = await scalar(`select has_function_privilege('anon', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const read = await scalar(`select has_function_privilege('authenticated', 'public.ff_matches(uuid)'::regprocedure, 'execute')`);

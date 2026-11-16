@@ -43,7 +43,7 @@ export function LiveMatchCenter() {
   const featured = sorted[0];
 
   return <>
-    <PageTitle eyebrow="MATCHDAY" title="Match Center" description="Schedule real matches, record matchday details and review submissions.">
+    <PageTitle eyebrow="MATCHDAY" title="Match Center" description={t('Schedule matches, manage lineups and publish official results.')}>
       {live.isLeader && <button className="button button-primary" onClick={() => setCreateOpen((v) => !v)}>{t('Schedule match')}</button>}
       <button className="button button-outline" onClick={() => void live.refreshMatches()}><RefreshCw size={15} /> {t('Refresh')}</button>
     </PageTitle>
@@ -53,12 +53,12 @@ export function LiveMatchCenter() {
 
     {sorted.length === 0 ? <Empty title="No matches yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'A League Leader schedules matches and appoints an organizer.'} /> : <>
       {featured && <div className="match-center-hero panel">
-        <Badge kind={featured.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(featured.revision_state === 'approved' ? 'Full time' : 'Scheduled')}</Badge>
-        <div className="center-teams"><div><div className="team-crest crest-lime"><Shield size={30} /></div><strong>{featured.team_a}</strong></div><div><small>{featured.team_a_score == null ? t('Upcoming') : t('Final score')}</small><b>{featured.team_a_score == null ? 'VS' : `${featured.team_a_score} : ${featured.team_b_score}`}</b></div><div><div className="team-crest crest-orange"><Zap size={30} /></div><strong>{featured.team_b}</strong></div></div>
+        <Badge kind={featured.is_official ? 'lime' : 'neutral'}>{t(featured.is_official ? 'Full time' : 'Scheduled')}</Badge>
+        <div className="center-teams"><div><div className="team-crest crest-lime"><Shield size={30} /></div><strong>{featured.team_a}</strong></div><div><small>{featured.is_official ? t('Final score') : t('Upcoming')}</small><b>{featured.is_official ? `${featured.team_a_score} : ${featured.team_b_score}` : 'VS'}</b></div><div><div className="team-crest crest-orange"><Zap size={30} /></div><strong>{featured.team_b}</strong></div></div>
         <div className="match-info"><span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span><span><MapPin size={16} /> {featured.venue}</span>{featured.gameweek_id && <span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span>}</div>
       </div>}
       <div className="panel table-wrap"><table><thead><tr><th>{t('MATCH')}</th><th>{t('Kick-off')}</th><th>{t('Venue')}</th><th>{t('Score')}</th><th>{t('Status')}</th><th /></tr></thead><tbody>
-        {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.team_a_score == null ? '—' : `${m.team_a_score} – ${m.team_b_score}`}</td><td><Badge kind={m.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
+        {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.is_official ? `${m.team_a_score} – ${m.team_b_score}` : '—'}</td><td><Badge kind={m.is_official ? 'lime' : 'neutral'}>{t(m.is_official ? 'Full time' : m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
       </tbody></table></div>
     </>}
     {selected && <dialog ref={matchDialog} className="player-sheet match-detail-sheet" aria-labelledby="match-title"
@@ -74,6 +74,7 @@ export function LiveMatchCenter() {
 }
 
 function MatchWorkflow({ match }: { match: ApiMatch }) {
+  const { t } = useTranslation();
   const live = useLive();
   const [busy, setBusy] = useState(false);
   const [forkRequestId, setForkRequestId] = useState<string | null>(null);
@@ -86,7 +87,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   const [eventMinute, setEventMinute] = useState(''); const [relatedPlayer, setRelatedPlayer] = useState('');
   const history = match.history ?? [];
   const current: ApiMatchRevision | undefined = history[0];
-  const canOrganize = live.isLeader || match.organizer_id === live.myUserId;
+  const canOrganize = live.isLeader || (match.organizer_id === live.myUserId && live.members.some((member) => member.user_id === live.myUserId && member.status === 'active' && member.is_organizer));
   const approvedLineups = history.flatMap((r) => r.submissions.filter((s) => s.kind === 'lineup' && s.approval?.decision === 'approved').map((s) => ({ revision: r, approval: s.approval! })));
   const approvedLineup = approvedLineups[0];
   const currentLineups = current?.lineups ?? [];
@@ -139,14 +140,15 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     return { ...prev, [team]: side };
   });
   const setSelection = (team: string, id: string, selection: 'starter' | 'substitute') => setPlayersBySide((prev) => ({ ...prev, [team]: { ...(prev[team] ?? {}), [id]: selection } }));
-  const pending = history.flatMap((r) => r.submissions.filter((s) => !s.approval).map((s) => ({ revision: r, submission: s })));
+  const pending = history.flatMap((r) => r.submissions.filter((s) => s.kind === 'lineup' && !s.approval).map((s) => ({ revision: r, submission: s })));
+  const pendingResult = current?.submissions.find((s) => s.kind === 'result' && !s.approval);
   const canEditDraft = canOrganize && !!current && (current.state === 'draft' || current.state === 'corrected');
   const isResultDraft = !!current && current.state === 'draft' && !!approvedLineup && current.revision_id !== approvedLineup.revision.revision_id && !current.correction && current.lineups.length === 2;
 
   return <div className="match-workflow">
     <div className="sheet-stats"><div><small>A</small><strong>{match.team_a_score ?? '—'}</strong></div><div><small>Workflow</small><strong>{current?.state ?? 'Scheduled'}</strong></div><div><small>B</small><strong>{match.team_b_score ?? '—'}</strong></div></div>
     {error && <p className="error-text" role="alert">{error}</p>}{notice && <p className="success-text" role="status">{notice}</p>}
-    {live.isLeader && <p className="notice">League Leader can schedule and review. Only the match’s assigned Organizer (or Leader) can edit its record. Fantasy scoring remains pending until scoring rules are approved.</p>}
+    {canOrganize && <p className="notice">{t('League Leader and assigned active Organizer can manage this match. Organizer results publish immediately when complete; the Leader may also finalize them. Fantasy scoring remains pending until scoring rules are approved.')}</p>}
     {canOrganize && !current && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'Match record opened.')}>Open match record</button>}
     {canOrganize && current?.state === 'rejected' && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'A new immutable revision is open for correction.')}>Open new revision</button>}
     {canEditDraft && <section className="workflow-section"><h3>Lineups · published League Market</h3><p className="muted">Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.</p>
@@ -160,18 +162,19 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
           await api.setMatchLineup(live.leagueId!, current!.revision_id, sideId, rows);
         }
       }, 'Both side lineups saved.')}>Save both lineups</button>
-      <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), 'Lineup submitted to the League Leader.')}>Submit lineups for review</button>
+      <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
     </section>}
     {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}
-    {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>Record match result</button>}
+    {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>{t('Record match result')}</button>}
+    {canOrganize && pendingResult && approvedLineup && current && <section className="workflow-section"><h3>{t('Saved result')}</h3><p className="muted">{t('A previously submitted result can be finalized here. Only complete saved match details will be published.')}</p><button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup.approval.id), t('Result finalized and published to the league.'))}>{t('Finalize saved result')}</button></section>}
     {canEditDraft && isResultDraft && <section className="workflow-section"><h3>Score and match events</h3><div className="score-editor"><label>{match.team_a}<input type="number" min={0} value={scoreA} onChange={(e) => setScoreA(Number(e.target.value))} /></label><span>–</span><label>{match.team_b}<input type="number" min={0} value={scoreB} onChange={(e) => setScoreB(Number(e.target.value))} /></label><button className="button button-outline" disabled={busy} onClick={() => void run(() => api.setMatchScore(live.leagueId!, current.revision_id, scoreA, scoreB), 'Score saved.')}>Save score</button></div>
       <div className="event-editor"><label>Player<select value={eventPlayer} onChange={(e) => setEventPlayer(e.target.value)}><option value="">Select lineup player</option>{eventPlayers.map((p) => <option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select></label><label>Event<select value={eventType} onChange={(e) => setEventType(e.target.value)}>{['appearance','goal','assist','clean_sheet','yellow_card','red_card','own_goal','mvp','penalty_saved','penalty_missed','substitution_out','substitution_in'].map((x) => <option key={x} value={x}>{x.replace(/_/g, ' ')}</option>)}</select></label><label>Minute<input type="number" min={0} max={130} value={eventMinute} onChange={(e) => setEventMinute(e.target.value)} /></label>{eventType.startsWith('substitution_') && <label>Related player<select value={relatedPlayer} onChange={(e) => setRelatedPlayer(e.target.value)}><option value="">Optional related player</option>{eventPlayers.filter((p) => p.player_id !== eventPlayer).map((p) => <option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select></label>}<button className="button button-outline" disabled={busy || !eventPlayer} onClick={() => void run(() => api.recordMatchEvent(live.leagueId!, current.revision_id, eventPlayer, eventType, { minute: eventMinute ? Number(eventMinute) : null, relatedPlayerId: relatedPlayer || null }), 'Event recorded.')}>Record event</button></div>
-      <button className="button button-primary" disabled={busy || !approvedLineup} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup!.approval.id), 'Result submitted to the League Leader.')}>Submit result for review</button>
+      <button className="button button-primary" disabled={busy || !approvedLineup} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup!.approval.id), t('Result finalized and published to the league.'))}>{t('Finalize and publish result')}</button>
     </section>}
-    {live.isLeader && match.revision_state === 'approved' && match.team_a_score !== null && <section className="workflow-section"><h3>Corrections</h3><p className="muted">Corrections create a new immutable revision and require lineup and result reapproval. Existing approval history stays intact.</p><button className="button button-outline" disabled={busy} onClick={() => { const why = window.prompt('Reason for opening this correction?'); if (why?.trim()) void run(() => api.openCorrection(live.leagueId!, match.id, why), 'Correction revision opened.'); }}>Open correction</button></section>}
+    {canOrganize && match.is_official && match.official_revision_id === match.revision_id && <section className="workflow-section"><h3>Corrections</h3><p className="muted">{t('A correction starts a new immutable draft. The current official result stays visible until the corrected result is complete and finalized. A reason and full audit history are retained.')}</p><button className="button button-outline" disabled={busy} onClick={() => { const why = window.prompt('Reason for opening this correction?'); if (why?.trim()) void run(() => api.openCorrection(live.leagueId!, match.id, why), t('Correction draft opened. The current official result remains active.')); }}>{t('Open correction')}</button></section>}
     {match.events.length > 0 && <><h3>Latest revision events</h3>{match.events.map((e) => <div className="event-row" key={e.id}><span>{e.minute ?? '—'}′</span><b>{eventGlyph(e.type)}</b><div><strong>{e.type.replace(/_/g, ' ')}</strong><small>{e.player_name ?? ''}</small></div></div>)}</>}
-    <section className="workflow-section"><h3>Revision and approval history</h3>{history.length === 0 ? <p className="muted">No revisions or submissions yet.</p> : history.map((revision) => <div className="history-item" key={revision.revision_id}><strong>Revision {revision.version} · {revision.state}</strong>{revision.team_a_score !== null && <span> · {revision.team_a_score}–{revision.team_b_score}</span>}{revision.correction && <p>Correction: {revision.correction.reason}</p>}{revision.events.length > 0 && <p>Events: {revision.events.map((event) => `${event.minute ?? '—'}′ ${event.type.replace(/_/g, ' ')} · ${event.player_name ?? 'player'}`).join('; ')}</p>}{revision.submissions.map((submission) => <p key={submission.id}>{submission.kind} submitted {new Date(submission.submitted_at).toLocaleString()} — {submission.approval ? `${submission.approval.decision}${submission.approval.reason ? `: ${submission.approval.reason}` : ''}` : 'awaiting League Leader review'}</p>)}</div>)}</section>
-    <p className="notice">Only an approved result becomes official. Fantasy scoring is intentionally pending until the league has an approved scoring configuration.</p>
+    <section className="workflow-section"><h3>Revision and approval history</h3>{history.length === 0 ? <p className="muted">No revisions or submissions yet.</p> : history.map((revision) => <div className="history-item" key={revision.revision_id}><strong>Revision {revision.version} · {revision.state}</strong>{revision.team_a_score !== null && <span> · {revision.team_a_score}–{revision.team_b_score}</span>}{revision.correction && <p>Correction: {revision.correction.reason}</p>}{revision.events.length > 0 && <p>Events: {revision.events.map((event) => `${event.minute ?? '—'}′ ${event.type.replace(/_/g, ' ')} · ${event.player_name ?? 'player'}`).join('; ')}</p>}{revision.submissions.map((submission) => <p key={submission.id}>{submission.kind} submitted {new Date(submission.submitted_at).toLocaleString()} — {submission.approval ? `${submission.approval.decision}${submission.approval.reason ? `: ${submission.approval.reason}` : ''}` : t(submission.kind === 'result' ? 'ready for finalization' : 'awaiting League Leader review')}</p>)}</div>)}</section>
+    <p className="notice">{t('Only a complete, saved result finalized by the Leader or assigned active Organizer becomes official. Fantasy scoring is intentionally pending until the league has an approved scoring configuration.')}</p>
   </div>;
 }
 
@@ -188,8 +191,10 @@ export function LiveFixtures() {
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
   const played = (m: ApiMatch) => new Date(m.starts_at).getTime() < Date.now();
-  const statusLabel = (m: ApiMatch) => m.revision_state === 'approved' ? 'Full time'
-    : m.revision_state === 'submitted' ? 'Awaiting review'
+  const statusLabel = (m: ApiMatch) => m.is_official ? 'Full time'
+    : m.has_pending_result ? 'Result ready to finalize'
+      : m.has_pending_lineup ? 'Lineup awaiting review'
+        : m.revision_state === 'submitted' ? 'Lineup awaiting review'
       : m.revision_state === 'rejected' ? 'Needs correction'
         : m.revision_state === 'corrected' ? 'Correction in progress'
           : m.revision_state === 'draft' ? 'In progress' : played(m) ? 'Awaiting result' : 'Upcoming';
@@ -303,6 +308,7 @@ function notificationText(kind: string, payload: Record<string, unknown>, t: (ke
     case 'lineup_submitted': return t('A lineup was submitted for your review');
     case 'result_submitted': return t('A match result was submitted for your review');
     case 'match_reviewed': return `${t('A submission was')} ${String(payload.decision ?? '')}`;
+    case 'match_finalized': return t('A match result is now official');
     default: return kind.replace(/_/g, ' ');
   }
 }

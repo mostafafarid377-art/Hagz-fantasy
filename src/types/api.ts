@@ -118,6 +118,8 @@ export interface ApiMatchSubmission {
     reason: string | null;
     reviewed_by: string;
     reviewed_at: string;
+    finalized_by?: string | null;
+    finalized_at?: string | null;
   };
 }
 
@@ -148,6 +150,13 @@ export interface ApiMatch {
   revision_id: string | null;
   revision_version: number | null;
   revision_state: 'draft' | 'submitted' | 'approved' | 'rejected' | 'corrected' | null;
+  is_official?: boolean;
+  official_result_id?: string | null;
+  official_revision_id?: string | null;
+  finalized_by?: string | null;
+  finalized_at?: string | null;
+  has_pending_lineup?: boolean;
+  has_pending_result?: boolean;
   team_a_score: number | null;
   team_b_score: number | null;
   events: ApiMatchEvent[];
