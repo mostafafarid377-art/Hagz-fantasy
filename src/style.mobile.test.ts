@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const css = readFileSync(fileURLToPath(new URL('./style.css', import.meta.url)), 'utf8');
+const approvalCss = readFileSync(fileURLToPath(new URL('./pages/live/approvalReview.css', import.meta.url)), 'utf8');
 
 interface Rule { media: string | null; selector: string; body: string }
 
@@ -147,6 +148,22 @@ describe('the invite card and last-game list fit a phone', () => {
     const row = mobile.find((rule) => rule.selector === '.last-game-row');
     expect(row).toBeTruthy();
     expect(row!.body).toContain('grid-template-columns');
+  });
+});
+
+describe('the live approval sheet is usable on phones', () => {
+  it('stacks each review label above a dark, full-width control', () => {
+    expect(approvalCss).toMatch(/\.approval-review-fields label,[\s\S]*?display:\s*flex/);
+    expect(approvalCss).toMatch(/\.approval-review-fields label,[\s\S]*?flex-direction:\s*column/);
+    expect(approvalCss).toMatch(/\.approval-review-fields input,[\s\S]*?width:\s*100%/);
+    expect(approvalCss).toMatch(/\.approval-review-fields input,[\s\S]*?background:\s*#0f1510/);
+  });
+
+  it('uses a single-column control and action layout at the phone breakpoint', () => {
+    const mobile = approvalCss.match(/@media\s*\(max-width:\s*600px\)[\s\S]*$/)?.[0] ?? '';
+    expect(mobile).toMatch(/\.approval-review-fields\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(mobile).toMatch(/\.approval-review-actions\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(mobile).toMatch(/\.approval-review-sheet\s*\{[^}]*max-height:\s*min\(86dvh,\s*760px\)/);
   });
 });
 
