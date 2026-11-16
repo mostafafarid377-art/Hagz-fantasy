@@ -3,7 +3,7 @@
  * verify the Fixtures screen and shared scheduling form, not hosted behaviour.
  */
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { LiveFixtures, LiveMatchCenter } from './Match';
@@ -22,6 +22,8 @@ vi.mock('./League', () => ({
 }));
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+const showModal = vi.fn(function (this: HTMLDialogElement) { this.open = true; });
+beforeEach(() => { HTMLDialogElement.prototype.showModal = showModal; });
 
 const mockLive = (isLeader = true) => ({
   loading: false, league: { league_id: 'league-1', name: 'League', role: 'leader', status: 'active', is_leader: isLeader, is_organizer: false },
@@ -48,17 +50,30 @@ describe('Live fixtures and scheduling', () => {
     expect(screen.getByRole('button', { name: 'Schedule match' })).toBeTruthy();
   });
 
-  it('opens a persistent match URL directly to match details and revision history', () => {
+  it('opens a persistent match URL directly to match details and revision history', async () => {
     const live: any = mockLive();
     live.matches[0].revision_state = 'approved';
     live.matches[0].team_a_score = 2; live.matches[0].team_b_score = 1;
     live.matches[0].history = [{ revision_id: 'revision-1', version: 1, state: 'approved', team_a_score: 2, team_b_score: 1,
       submissions: [], events: [], correction: null, lineups: [] } as never];
     vi.mocked(useLive).mockReturnValue(live as never);
-    render(<MemoryRouter initialEntries={['/match-center/match-1']}><Routes><Route path="/match-center/:matchId" element={<LiveMatchCenter />} /></Routes></MemoryRouter>);
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    render(<MemoryRouter initialEntries={['/match-center/match-1']}><Routes>
+      <Route path="/match-center" element={<LiveMatchCenter />} />
+      <Route path="/match-center/:matchId" element={<LiveMatchCenter />} />
+    </Routes></MemoryRouter>);
+    const dialog = await screen.findByRole('dialog') as HTMLDialogElement;
+    expect(dialog.open).toBe(true);
+    expect(showModal).toHaveBeenCalledOnce();
     expect(screen.getByText('North vs South')).toBeTruthy();
     expect(screen.getByText(/Revision 1 · approved/)).toBeTruthy();
+    const workflow = dialog.querySelector('.match-workflow');
+    const closeBar = dialog.querySelector('.sheet-actions');
+    expect(workflow).not.toBeNull();
+    expect(closeBar?.parentElement).toBe(dialog);
+    expect(workflow?.contains(closeBar)).toBe(false);
+
+    fireEvent.click(closeBar!.querySelector('button')!);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('creates and verifies a standalone match through the shared Fixtures workflow', async () => {

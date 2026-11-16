@@ -2,9 +2,9 @@
 // the authenticated ff_match_* RPCs; visibility here is convenience only, while
 // authorization and immutable-history rules remain enforced in PostgreSQL.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowRight, CalendarDays, Check, MapPin, RefreshCw, Shield, X, Zap } from 'lucide-react';
 import { Badge, Empty, PageTitle } from '../../components/UI';
 import { useLive } from '../../hooks/useLive';
@@ -18,13 +18,25 @@ export function LiveMatchCenter() {
   const { t } = useTranslation();
   const live = useLive();
   const { matchId: routeMatchId } = useParams();
+  const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const matchDialog = useRef<HTMLDialogElement>(null);
 
   const sorted = useMemo(() => [...live.matches].sort((a, b) => +new Date(b.starts_at) - +new Date(a.starts_at)), [live.matches]);
   const selected = live.matches.find((m) => m.id === (selectedId ?? routeMatchId)) ?? null;
 
+  useEffect(() => {
+    const element = matchDialog.current;
+    if (!selected || !element || element.open) return;
+    if (typeof element.showModal === 'function') element.showModal();
+    else element.setAttribute('open', '');
+  }, [selected?.id]);
 
+  function closeMatch() {
+    setSelectedId(null);
+    if (routeMatchId) navigate('/match-center', { replace: true });
+  }
 
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
@@ -49,7 +61,15 @@ export function LiveMatchCenter() {
         {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.team_a_score == null ? '—' : `${m.team_a_score} – ${m.team_b_score}`}</td><td><Badge kind={m.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
       </tbody></table></div>
     </>}
-    {selected && <dialog open className="player-sheet match-detail-sheet" aria-labelledby="match-title"><div className="sheet-handle" aria-hidden="true" /><button className="sheet-close" aria-label={t('Close')} onClick={() => setSelectedId('')}><X size={20} /></button><div className="eyebrow">{t('MATCHDAY')}</div><h2 id="match-title">{selected.team_a} vs {selected.team_b}</h2><p className="sheet-note"><CalendarDays size={14} /> {new Date(selected.starts_at).toLocaleString()} · <MapPin size={14} /> {selected.venue}</p><MatchWorkflow match={selected} /><div className="sheet-actions"><button className="button button-outline" onClick={() => setSelectedId('')}>{t('Close')}</button></div></dialog>}
+    {selected && <dialog ref={matchDialog} className="player-sheet match-detail-sheet" aria-labelledby="match-title"
+      onClose={closeMatch} onClick={(event) => { if (event.target === event.currentTarget) closeMatch(); }}>
+      <div className="sheet-handle" aria-hidden="true" />
+      <button type="button" className="sheet-close" aria-label={t('Close')} onClick={closeMatch}><X size={20} /></button>
+      <div className="eyebrow">{t('MATCHDAY')}</div><h2 id="match-title">{selected.team_a} vs {selected.team_b}</h2>
+      <p className="sheet-note"><CalendarDays size={14} /> {new Date(selected.starts_at).toLocaleString()} · <MapPin size={14} /> {selected.venue}</p>
+      <MatchWorkflow match={selected} />
+      <div className="sheet-actions"><button type="button" className="button button-outline" onClick={closeMatch}>{t('Close')}</button></div>
+    </dialog>}
   </>;
 }
 
