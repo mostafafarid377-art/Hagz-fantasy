@@ -1,170 +1,242 @@
-// Live Match Center, fixtures and notifications.
-//
-// The match workflow is the most stateful part of the product:
-//   organizer: create → open revision → set both lineups → submit lineup
-//   leader:    approve/reject the lineup
-//   organizer: fork result → set score → record events → submit result
-//   leader:    approve/reject the result  (only this creates an official result)
-//   leader:    open a correction, which preserves history and supersedes scores
-//
-// Every refusal comes from the database (self-approval, wrong organizer, not a
-// leader, unsupported event type). This screen never decides authorization; it
-// only offers the next step that the server would accept.
+// Live Match Center, fixtures and notifications. Match mutations are backed by
+// the authenticated ff_match_* RPCs; visibility here is convenience only, while
+// authorization and immutable-history rules remain enforced in PostgreSQL.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { ArrowRight, CalendarDays, Check, MapPin, RefreshCw, Shield, X, Zap } from 'lucide-react';
 import { Badge, Empty, PageTitle } from '../../components/UI';
 import { useLive } from '../../hooks/useLive';
+import * as api from '../../services/api';
 import { ErrorNote, Loading, PartialDataNote } from './League';
-import type { ApiMatch } from '../../types/api';
+import type { ApiMatch, ApiMatchRevision, Position } from '../../types/api';
+import './matchWorkflow.css';
 
 export function LiveMatchCenter() {
   const { t } = useTranslation();
   const live = useLive();
-  const [selected, setSelected] = useState<ApiMatch | null>(null);
+  const { matchId: routeMatchId } = useParams();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [teams, setTeams] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
+  const [teamError, setTeamError] = useState('');
+  const [newTeamName, setNewTeamName] = useState('');
+  const [teamSaveBusy, setTeamSaveBusy] = useState(false);
+  const [teamSaveError, setTeamSaveError] = useState('');
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState('');
+  const [gameweekId, setGameweekId] = useState('');
+  const [teamA, setTeamA] = useState('');
+  const [teamB, setTeamB] = useState('');
+  const [organizerId, setOrganizerId] = useState('');
+  const [startsAt, setStartsAt] = useState('');
+  const [venue, setVenue] = useState('');
+  const [starters, setStarters] = useState(7);
+  const [substitutes, setSubstitutes] = useState(5);
 
-  const sorted = useMemo(
-    () => [...live.matches].sort((a, b) => +new Date(b.starts_at) - +new Date(a.starts_at)),
-    [live.matches],
-  );
+  const sorted = useMemo(() => [...live.matches].sort((a, b) => +new Date(b.starts_at) - +new Date(a.starts_at)), [live.matches]);
+  const selected = live.matches.find((m) => m.id === (selectedId ?? routeMatchId)) ?? null;
+
+  useEffect(() => {
+    if (!live.leagueId || !live.isLeader) return;
+    let active = true;
+    api.realTeams(live.leagueId).then((rows) => { if (active) setTeams(rows.filter((x) => x.active)); })
+      .catch((e) => { if (active) setTeamError(e instanceof Error ? e.message : 'Could not load league teams'); });
+    return () => { active = false; };
+  }, [live.leagueId, live.isLeader]);
+
+  async function addRealTeam() {
+    if (!live.leagueId || !newTeamName.trim()) return;
+    setTeamSaveBusy(true); setTeamSaveError('');
+    try {
+      const saved = await api.createRealTeam(live.leagueId, newTeamName.trim());
+      const rows = await api.realTeams(live.leagueId);
+      if (!rows.some((x) => x.id === saved.id)) throw new Error('Team was created, but could not be loaded. Refresh before creating it again.');
+      setTeams(rows.filter((x) => x.active));
+      setTeamError('');
+      setNewTeamName('');
+    } catch (error) { setTeamSaveError(error instanceof Error ? error.message : 'Could not create real team'); }
+    finally { setTeamSaveBusy(false); }
+  }
+
+  async function createMatch(e: FormEvent) {
+    e.preventDefault();
+    if (!live.leagueId) return;
+    setCreateBusy(true); setCreateError('');
+    let created = false;
+    try {
+      const saved = await api.createMatch(live.leagueId, {
+        gameweekId, teamA, teamB, organizerId, startsAt: new Date(startsAt).toISOString(), venue,
+        startersPerSide: starters, maxSubstitutes: substitutes,
+      });
+      created = true;
+      await live.refreshMatches();
+      const persisted = await api.matches(live.leagueId);
+      if (!persisted.some((m) => m.id === saved.id)) {
+        throw new Error('The match was created, but could not be verified in the current match list. Refresh before scheduling another.');
+      }
+      setCreateOpen(false); setGameweekId(''); setTeamA(''); setTeamB(''); setOrganizerId(''); setStartsAt(''); setVenue('');
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : 'Could not create match');
+      if (created) setCreateOpen(false);
+    }
+    finally { setCreateBusy(false); }
+  }
 
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
-
-  // The hero features the most recent match; sorted is newest-first.
   const featured = sorted[0];
+  const organizers = live.members.filter((m) => m.is_organizer && m.status === 'active');
 
-  return (
-    <>
-      <PageTitle eyebrow="MATCHDAY" title="Match Center"
-        description="Real matches, organizer submissions and leader approvals.">
-        <button className="button button-outline" onClick={() => void live.refreshMatches()}>
-          <RefreshCw size={15} /> {t('Refresh')}
-        </button>
-      </PageTitle>
+  return <>
+    <PageTitle eyebrow="MATCHDAY" title="Match Center" description="Schedule real matches, record matchday details and review submissions.">
+      {live.isLeader && <button className="button button-primary" onClick={() => { setCreateError(''); setCreateOpen((v) => !v); }}>Schedule match</button>}
+      <button className="button button-outline" onClick={() => void live.refreshMatches()}><RefreshCw size={15} /> {t('Refresh')}</button>
+    </PageTitle>
+    {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
+    <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
+    {createOpen && live.isLeader && <section className="panel match-create-panel">
+      <h2>Schedule a real match</h2>
+      <p className="muted">Only published League Market players can be selected in lineups. Scheduling does not create player profiles or affect fantasy squads.</p>
+      {teamError && <p className="error-text" role="alert">Teams could not be loaded: {teamError}</p>}
+      <div className="inline-team-create"><label>New real team<input value={newTeamName} maxLength={100} onChange={(e) => setNewTeamName(e.target.value)} placeholder="Enter real team name" /></label><button type="button" className="button button-outline" disabled={teamSaveBusy || !newTeamName.trim()} onClick={() => void addRealTeam()}>{teamSaveBusy ? 'Saving…' : 'Add team'}</button>{teamSaveError && <p className="error-text" role="alert">{teamSaveError}</p>}</div>
+      <form className="match-form" onSubmit={(e) => void createMatch(e)}>
+        <label>Gameweek<select required value={gameweekId} onChange={(e) => setGameweekId(e.target.value)}><option value="">Choose gameweek</option>{live.gameweeks.map((g) => <option key={g.id} value={g.id}>Gameweek {g.number}{g.season_name ? ` · ${g.season_name}` : ''}</option>)}</select></label>
+        <label>Team A<select required value={teamA} onChange={(e) => setTeamA(e.target.value)}><option value="">Choose team</option>{teams.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <label>Team B<select required value={teamB} onChange={(e) => setTeamB(e.target.value)}><option value="">Choose team</option>{teams.filter((x) => x.id !== teamA).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <label>Assigned Organizer<select required value={organizerId} onChange={(e) => setOrganizerId(e.target.value)}><option value="">Choose appointed organizer</option>{organizers.map((x) => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}</select></label>
+        <label>Date & kick-off<input required type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} /></label>
+        <label>Venue<input required minLength={1} maxLength={200} value={venue} onChange={(e) => setVenue(e.target.value)} /></label>
+        <label>Starters per side<input required type="number" min={1} max={11} value={starters} onChange={(e) => setStarters(Number(e.target.value))} /></label>
+        <label>Maximum substitutes<input required type="number" min={0} max={30} value={substitutes} onChange={(e) => setSubstitutes(Number(e.target.value))} /></label>
+        {createError && <p className="error-text" role="alert">{createError}</p>}
+        <div className="form-actions"><button className="button button-primary" disabled={createBusy || live.gameweeks.length === 0 || teams.length < 2 || organizers.length === 0}>{createBusy ? 'Saving…' : 'Create match'}</button><button type="button" className="button button-outline" onClick={() => setCreateOpen(false)}>Cancel</button></div>
+        {live.gameweeks.length === 0 && <p className="notice">Create a season and gameweek before scheduling a match.</p>}
+        {teams.length < 2 && !teamError && <p className="notice">At least two active real teams are required.</p>}
+        {organizers.length === 0 && <p className="notice">Appoint an active league member as Match Organizer in league management first.</p>}
+      </form>
+    </section>}
+    {createError && !createOpen && <ErrorNote message={createError} onRetry={() => void live.refreshMatches()} />}
 
-      {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
-      <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
+    {sorted.length === 0 ? <Empty title="No matches yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'A League Leader schedules matches and appoints an organizer.'} /> : <>
+      {featured && <div className="match-center-hero panel">
+        <Badge kind={featured.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(featured.revision_state === 'approved' ? 'Full time' : 'Scheduled')}</Badge>
+        <div className="center-teams"><div><div className="team-crest crest-lime"><Shield size={30} /></div><strong>{featured.team_a}</strong></div><div><small>{featured.team_a_score == null ? t('Upcoming') : t('Final score')}</small><b>{featured.team_a_score == null ? 'VS' : `${featured.team_a_score} : ${featured.team_b_score}`}</b></div><div><div className="team-crest crest-orange"><Zap size={30} /></div><strong>{featured.team_b}</strong></div></div>
+        <div className="match-info"><span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span><span><MapPin size={16} /> {featured.venue}</span><span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span></div>
+      </div>}
+      <div className="panel table-wrap"><table><thead><tr><th>{t('MATCH')}</th><th>{t('Kick-off')}</th><th>{t('Venue')}</th><th>{t('Score')}</th><th>{t('Status')}</th><th /></tr></thead><tbody>
+        {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.team_a_score == null ? '—' : `${m.team_a_score} – ${m.team_b_score}`}</td><td><Badge kind={m.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
+      </tbody></table></div>
+    </>}
+    {selected && <dialog open className="player-sheet match-detail-sheet" aria-labelledby="match-title"><div className="sheet-handle" aria-hidden="true" /><button className="sheet-close" aria-label={t('Close')} onClick={() => setSelectedId('')}><X size={20} /></button><div className="eyebrow">{t('MATCHDAY')}</div><h2 id="match-title">{selected.team_a} vs {selected.team_b}</h2><p className="sheet-note"><CalendarDays size={14} /> {new Date(selected.starts_at).toLocaleString()} · <MapPin size={14} /> {selected.venue}</p><MatchWorkflow match={selected} /><div className="sheet-actions"><button className="button button-outline" onClick={() => setSelectedId('')}>{t('Close')}</button></div></dialog>}
+  </>;
+}
 
-      {sorted.length === 0 ? (
-        <Empty title="No matches yet"
-          description="A league leader schedules real matches and appoints an organizer to record them." />
-      ) : (
-        <>
-        {/* The demo match centre opens with a hero block for the featured match. Live
-            went straight to a table, so the screen looked like an admin list rather
-            than a matchday page. */}
-        <div className="match-center-hero panel">
-          <Badge kind={featured.revision_state === 'approved' ? 'lime' : 'neutral'}>
-            {t(featured.revision_state === 'approved' ? 'Full time' : 'Upcoming match')}
-          </Badge>
-          <div className="center-teams">
-            <div>
-              <div className="team-crest crest-lime"><Shield size={30} /></div>
-              <strong>{featured.team_a}</strong>
-            </div>
-            <div>
-              <small>{t(featured.team_a_score == null ? 'Upcoming' : 'Final score')}</small>
-              <b>{featured.team_a_score == null ? 'VS' : `${featured.team_a_score} : ${featured.team_b_score}`}</b>
-            </div>
-            <div>
-              <div className="team-crest crest-orange"><Zap size={30} /></div>
-              <strong>{featured.team_b}</strong>
-            </div>
-          </div>
-          <div className="match-info">
-            <span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span>
-            <span><MapPin size={16} /> {featured.venue}</span>
-            <span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span>
-          </div>
-        </div>
-        <div className="panel table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>{t('MATCH')}</th><th>{t('Kick-off')}</th><th>{t('Venue')}</th>
-                <th>{t('Score')}</th><th>{t('Status')}</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((m) => (
-                <tr key={m.id}>
-                  <td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td>
-                  <td>{new Date(m.starts_at).toLocaleString()}</td>
-                  <td>{m.venue}</td>
-                  <td>{m.team_a_score == null ? '—' : `${m.team_a_score} – ${m.team_b_score}`}</td>
-                  <td>
-                    <Badge kind={m.revision_state === 'approved' ? 'lime' : 'neutral'}>
-                      {t(m.revision_state ?? 'scheduled')}
-                    </Badge>
-                  </td>
-                  <td>
-                    <button className="button button-small button-outline" onClick={() => setSelected(m)}>
-                      {t('Open')}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        </>
-      )}
+function MatchWorkflow({ match }: { match: ApiMatch }) {
+  const live = useLive();
+  const [busy, setBusy] = useState(false);
+  const [forkRequestId, setForkRequestId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [reason, setReason] = useState('');
+  const [playersBySide, setPlayersBySide] = useState<Record<string, Record<string, 'starter' | 'substitute'>>>({});
+  const [scoreA, setScoreA] = useState(0); const [scoreB, setScoreB] = useState(0);
+  const [eventPlayer, setEventPlayer] = useState(''); const [eventType, setEventType] = useState('goal');
+  const [eventMinute, setEventMinute] = useState(''); const [relatedPlayer, setRelatedPlayer] = useState('');
+  const history = match.history ?? [];
+  const current: ApiMatchRevision | undefined = history[0];
+  const canOrganize = live.isLeader || match.organizer_id === live.myUserId;
+  const approvedLineups = history.flatMap((r) => r.submissions.filter((s) => s.kind === 'lineup' && s.approval?.decision === 'approved').map((s) => ({ revision: r, approval: s.approval! })));
+  const approvedLineup = approvedLineups[0];
+  const currentLineups = current?.lineups ?? [];
+  const selectedPlayers = playersBySide;
+  const eventPlayers = currentLineups.flatMap((l) => l.players);
 
-      {selected && (
-        <dialog open className="player-sheet" aria-labelledby="match-title">
-          <div className="sheet-handle" aria-hidden="true" />
-          <button className="sheet-close" aria-label={t('Close')} onClick={() => setSelected(null)}><X size={20} /></button>
-          <div className="eyebrow">{t('MATCHDAY')}</div>
-          <h2 id="match-title">{selected.team_a} vs {selected.team_b}</h2>
-          <p className="sheet-note">
-            <CalendarDays size={14} /> {new Date(selected.starts_at).toLocaleString()} ·{' '}
-            <MapPin size={14} /> {selected.venue}
-          </p>
-          <div className="sheet-stats">
-            <div><small>{t('A')}</small><strong>{selected.team_a_score ?? '—'}</strong></div>
-            <div><small>{t('State')}</small><strong>{t(selected.revision_state ?? 'scheduled')}</strong></div>
-            <div><small>{t('B')}</small><strong>{selected.team_b_score ?? '—'}</strong></div>
-          </div>
+  useEffect(() => {
+    const seeded: Record<string, Record<string, 'starter' | 'substitute'>> = {};
+    for (const l of current?.lineups ?? []) seeded[l.team_id] = Object.fromEntries(l.players.map((p) => [p.player_id, p.selection]));
+    setPlayersBySide(seeded);
+    setScoreA(current?.team_a_score ?? 0); setScoreB(current?.team_b_score ?? 0);
+  }, [current?.revision_id]);
 
-          {selected.events.length > 0 && (
-            <>
-              <h3 className="roster-heading">{t('Match events')}</h3>
-              {selected.events.map((e) => (
-                <div className="event-row" key={e.id}>
-                  <span>{e.minute ?? '—'}′</span>
-                  <b>{eventGlyph(e.type)}</b>
-                  <div><strong>{t(e.type)}</strong><small>{e.player_name ?? ''}</small></div>
-                </div>
-              ))}
-            </>
-          )}
+  async function run(action: () => Promise<unknown>, success: string) {
+    if (!live.leagueId) return;
+    setBusy(true); setError(''); setNotice('');
+    try { await action(); await live.refreshMatches(); setNotice(success); }
+    catch (e) {
+      setError(e instanceof Error ? e.message : 'The server refused this action');
+      // A multi-call action (saving two side lineups) can partially persist before
+      // a later RPC is refused. Refresh even on failure so the UI reflects the
+      // server's actual state instead of hiding that committed first step.
+      try { await live.refreshMatches(); } catch { /* keep the original action error visible */ }
+    }
+    finally { setBusy(false); }
+  }
+  async function openResultRevision(approvalId: string) {
+    if (!live.leagueId) return;
+    const requestId = forkRequestId ?? crypto.randomUUID();
+    setForkRequestId(requestId); setBusy(true); setError(''); setNotice('');
+    try {
+      const opened = await api.forkResult(live.leagueId, approvalId, requestId);
+      await live.refreshMatches();
+      const persisted = await api.matches(live.leagueId);
+      if (!persisted.some((row) => row.id === match.id && row.revision_id === opened.revision_id)) {
+        throw new Error('The result draft was created but could not be verified. Retry to safely retrieve the same revision.');
+      }
+      setForkRequestId(null);
+      setNotice('Editable result revision opened.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The result revision could not be opened');
+      // Reuse the same key after a lost response; the RPC returns the original
+      // revision rather than creating a second result draft on retry.
+      try { await live.refreshMatches(); } catch { /* retain the retry key */ }
+    } finally { setBusy(false); }
+  }
+  const togglePlayer = (team: string, id: string, checked: boolean) => setPlayersBySide((prev) => {
+    const side = { ...(prev[team] ?? {}) };
+    if (checked) side[id] = 'starter'; else delete side[id];
+    return { ...prev, [team]: side };
+  });
+  const setSelection = (team: string, id: string, selection: 'starter' | 'substitute') => setPlayersBySide((prev) => ({ ...prev, [team]: { ...(prev[team] ?? {}), [id]: selection } }));
+  const pending = history.flatMap((r) => r.submissions.filter((s) => !s.approval).map((s) => ({ revision: r, submission: s })));
+  const canEditDraft = canOrganize && !!current && (current.state === 'draft' || current.state === 'corrected');
+  const isResultDraft = !!current && current.state === 'draft' && !!approvedLineup && current.revision_id !== approvedLineup.revision.revision_id && !current.correction && current.lineups.length === 2;
 
-          <p className="notice">
-            {t('Only an approved result creates official points. Scoring values are not approved yet, so no fantasy points are calculated.')}
-          </p>
-          <div className="sheet-actions">
-            <button className="button button-outline" onClick={() => setSelected(null)}>{t('Close')}</button>
-          </div>
-        </dialog>
-      )}
-    </>
-  );
+  return <div className="match-workflow">
+    <div className="sheet-stats"><div><small>A</small><strong>{match.team_a_score ?? '—'}</strong></div><div><small>Workflow</small><strong>{current?.state ?? 'Scheduled'}</strong></div><div><small>B</small><strong>{match.team_b_score ?? '—'}</strong></div></div>
+    {error && <p className="error-text" role="alert">{error}</p>}{notice && <p className="success-text" role="status">{notice}</p>}
+    {live.isLeader && <p className="notice">League Leader can schedule and review. Only the match’s assigned Organizer (or Leader) can edit its record. Fantasy scoring remains pending until scoring rules are approved.</p>}
+    {canOrganize && !current && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'Match record opened.')}>Open match record</button>}
+    {canOrganize && current?.state === 'rejected' && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'A new immutable revision is open for correction.')}>Open new revision</button>}
+    {canEditDraft && <section className="workflow-section"><h3>Lineups · published League Market</h3><p className="muted">Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.</p>
+      {[{id:match.team_a_id,name:match.team_a},{id:match.team_b_id,name:match.team_b}].map((side) => <fieldset className="match-side-picker" key={side.id}><legend>{side.name} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'starter').length}/{match.starters_per_side} starters · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'substitute').length}/{match.max_substitutes} substitutes</legend>
+        {live.players.filter((p) => p.active).map((player) => <label className="match-player-choice" key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={!!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span>{player.name} <small>{player.position}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} selection`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">Starter</option><option value="substitute">Substitute</option></select>}</label>)}
+        {live.players.filter((p) => p.active).length === 0 && <p className="muted">No active published Market players are available.</p>}
+      </fieldset>)}
+      <button className="button button-outline" disabled={busy || live.players.filter((p) => p.active).length === 0} onClick={() => void run(async () => {
+        for (const sideId of [match.team_a_id, match.team_b_id]) {
+          const rows = Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({ player_id, selection, actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position, eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' } }));
+          await api.setMatchLineup(live.leagueId!, current!.revision_id, sideId, rows);
+        }
+      }, 'Both side lineups saved.')}>Save both lineups</button>
+      <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), 'Lineup submitted to the League Leader.')}>Submit lineups for review</button>
+    </section>}
+    {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}
+    {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>Record match result</button>}
+    {canEditDraft && isResultDraft && <section className="workflow-section"><h3>Score and match events</h3><div className="score-editor"><label>{match.team_a}<input type="number" min={0} value={scoreA} onChange={(e) => setScoreA(Number(e.target.value))} /></label><span>–</span><label>{match.team_b}<input type="number" min={0} value={scoreB} onChange={(e) => setScoreB(Number(e.target.value))} /></label><button className="button button-outline" disabled={busy} onClick={() => void run(() => api.setMatchScore(live.leagueId!, current.revision_id, scoreA, scoreB), 'Score saved.')}>Save score</button></div>
+      <div className="event-editor"><label>Player<select value={eventPlayer} onChange={(e) => setEventPlayer(e.target.value)}><option value="">Select lineup player</option>{eventPlayers.map((p) => <option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select></label><label>Event<select value={eventType} onChange={(e) => setEventType(e.target.value)}>{['appearance','goal','assist','clean_sheet','yellow_card','red_card','own_goal','mvp','penalty_saved','penalty_missed','substitution_out','substitution_in'].map((x) => <option key={x} value={x}>{x.replace(/_/g, ' ')}</option>)}</select></label><label>Minute<input type="number" min={0} max={130} value={eventMinute} onChange={(e) => setEventMinute(e.target.value)} /></label>{eventType.startsWith('substitution_') && <label>Related player<select value={relatedPlayer} onChange={(e) => setRelatedPlayer(e.target.value)}><option value="">Optional related player</option>{eventPlayers.filter((p) => p.player_id !== eventPlayer).map((p) => <option key={p.player_id} value={p.player_id}>{p.name}</option>)}</select></label>}<button className="button button-outline" disabled={busy || !eventPlayer} onClick={() => void run(() => api.recordMatchEvent(live.leagueId!, current.revision_id, eventPlayer, eventType, { minute: eventMinute ? Number(eventMinute) : null, relatedPlayerId: relatedPlayer || null }), 'Event recorded.')}>Record event</button></div>
+      <button className="button button-primary" disabled={busy || !approvedLineup} onClick={() => void run(() => api.submitMatchResult(live.leagueId!, current.revision_id, approvedLineup!.approval.id), 'Result submitted to the League Leader.')}>Submit result for review</button>
+    </section>}
+    {live.isLeader && match.revision_state === 'approved' && match.team_a_score !== null && <section className="workflow-section"><h3>Corrections</h3><p className="muted">Corrections create a new immutable revision and require lineup and result reapproval. Existing approval history stays intact.</p><button className="button button-outline" disabled={busy} onClick={() => { const why = window.prompt('Reason for opening this correction?'); if (why?.trim()) void run(() => api.openCorrection(live.leagueId!, match.id, why), 'Correction revision opened.'); }}>Open correction</button></section>}
+    {match.events.length > 0 && <><h3>Latest revision events</h3>{match.events.map((e) => <div className="event-row" key={e.id}><span>{e.minute ?? '—'}′</span><b>{eventGlyph(e.type)}</b><div><strong>{e.type.replace(/_/g, ' ')}</strong><small>{e.player_name ?? ''}</small></div></div>)}</>}
+    <section className="workflow-section"><h3>Revision and approval history</h3>{history.length === 0 ? <p className="muted">No revisions or submissions yet.</p> : history.map((revision) => <div className="history-item" key={revision.revision_id}><strong>Revision {revision.version} · {revision.state}</strong>{revision.team_a_score !== null && <span> · {revision.team_a_score}–{revision.team_b_score}</span>}{revision.correction && <p>Correction: {revision.correction.reason}</p>}{revision.events.length > 0 && <p>Events: {revision.events.map((event) => `${event.minute ?? '—'}′ ${event.type.replace(/_/g, ' ')} · ${event.player_name ?? 'player'}`).join('; ')}</p>}{revision.submissions.map((submission) => <p key={submission.id}>{submission.kind} submitted {new Date(submission.submitted_at).toLocaleString()} — {submission.approval ? `${submission.approval.decision}${submission.approval.reason ? `: ${submission.approval.reason}` : ''}` : 'awaiting League Leader review'}</p>)}</div>)}</section>
+    <p className="notice">Only an approved result becomes official. Fantasy scoring is intentionally pending until the league has an approved scoring configuration.</p>
+  </div>;
 }
 
 function eventGlyph(type: string): string {
-  switch (type) {
-    case 'goal': return '⚽';
-    case 'assist': return '↗';
-    case 'yellow_card': return '▮';
-    case 'red_card': return '▮▮';
-    case 'mvp': return '★';
-    case 'clean_sheet': return '🧤';
-    case 'own_goal': return '↩';
-    default: return '•';
-  }
+  switch (type) { case 'goal': return '⚽'; case 'assist': return '↗'; case 'yellow_card': return '▮'; case 'red_card': return '▮▮'; case 'mvp': return '★'; case 'clean_sheet': return '🧤'; case 'own_goal': return '↩'; default: return '•'; }
 }
 
 export function LiveFixtures() {

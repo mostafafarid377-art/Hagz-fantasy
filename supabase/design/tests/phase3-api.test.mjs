@@ -32,7 +32,7 @@ const PKG = [
   // helper. Hosted PostgREST sets only request.jwt.claims, so without it every
   // definer sees an anonymous caller.
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
-  '20261115000017_squad_captaincy',
+  '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -583,44 +583,65 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   // Appoint Bob as an organizer, and register two real teams.
   await expectDenied(() => rpc(BOB, 'ff_league_set_organizer', LEAGUE.id, BOB, true), '42501', 'manager appointing an organizer');
   await rpc(ALICE, 'ff_league_set_organizer', LEAGUE.id, BOB, true);
+  await rpc(ALICE, 'ff_league_set_organizer', LEAGUE.id, CAROL, true);
 
   const teamA = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Goal Diggers');
   const teamB = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'The Invincibles');
   await expectDenied(() => rpc(BOB, 'ff_tournament_create', LEAGUE.id, 'Rogue FC'), '42501', 'manager creating a real team');
 
-  // Register real players for the sides, or the lineup guard refuses them.
-  const prof = await scalar(
-    `insert into public.player_profiles(league_id, display_name) values ($1,'Fares Ashraf') returning id`, [LEAGUE.id]);
-  const profB = await scalar(
-    `insert into public.player_profiles(league_id, display_name) values ($1,'Youssef Adel') returning id`, [LEAGUE.id]);
-  await q(`insert into public.real_team_players(league_id, team_id, player_id, valid_from) values ($1,$2,$3,'2025-01-01Z')`,
-    [LEAGUE.id, teamA.id, prof]);
-  await q(`insert into public.real_team_players(league_id, team_id, player_id, valid_from) values ($1,$2,$3,'2025-01-01Z')`,
-    [LEAGUE.id, teamB.id, profB]);
+  // Create active published Market entries and deliberately do NOT register
+  // them to real_team_players or buy them into a fantasy squad. Match eligibility
+  // is sourced from the league Market, not roster registration or ownership.
+  const marketA = await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81);
+  const marketB = await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Youssef Market', 'FWD', 6200000, 79);
+  const prof = marketA.player_id;
+  const profB = marketB.player_id;
+  assert.equal(await scalar('select count(*)::int from public.real_team_players where league_id=$1 and player_id=any($2::uuid[])', [LEAGUE.id, [prof, profB]]), 0);
+  assert.equal(await scalar('select count(*)::int from public.fantasy_squad_players where league_id=$1 and league_player_id=any($2::uuid[])', [LEAGUE.id, [marketA.id, marketB.id]]), 0);
 
   await expectDenied(() => rpc(BOB, 'ff_match_create', LEAGUE.id, GAMEWEEK, teamA.id, teamB.id, BOB,
     '2025-08-10T19:00:00Z', 'The Cage', 1, 1), '42501', 'manager scheduling a match');
+  await expectDenied(() => rpc(ALICE, 'ff_match_create', LEAGUE.id, GAMEWEEK, teamA.id, teamB.id, BOB,
+    '2025-08-10T19:00:00Z', '   ', 1, 1), '23514', 'venue is required');
+  await rpc(ALICE, 'ff_league_set_member', LEAGUE.id, BOB, 'manager', 'inactive');
+  await expectDenied(() => rpc(ALICE, 'ff_match_create', LEAGUE.id, GAMEWEEK, teamA.id, teamB.id, BOB,
+    '2025-08-10T19:00:00Z', 'The Cage', 1, 1), '23514', 'inactive appointed organizer cannot be assigned');
+  await rpc(ALICE, 'ff_league_set_member', LEAGUE.id, BOB, 'manager', 'active');
 
   const match = await rpc(ALICE, 'ff_match_create', LEAGUE.id, GAMEWEEK, teamA.id, teamB.id, BOB,
     '2025-08-10T19:00:00Z', 'The Cage', 1, 1);
   assert.ok(match.id);
 
   // Only the assigned organizer (or leader) may open a revision.
-  await expectDenied(() => rpc(CAROL, 'ff_match_open_revision', LEAGUE.id, match.id), '42501', 'non-organizer opening a revision');
+  await expectDenied(() => rpc(CAROL, 'ff_match_open_revision', LEAGUE.id, match.id), '42501', 'appointed organizer opening a match assigned to someone else');
   const revision = await rpc(BOB, 'ff_match_open_revision', LEAGUE.id, match.id);
   assert.equal(revision.state, 'draft');
 
   await expectDenied(() => rpc(CAROL, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamA.id,
-    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID' }])), '42501', 'non-organizer setting a lineup');
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }])), '42501', 'non-organizer setting a lineup');
 
   const lineup = await rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamA.id,
-    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID' }]));
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]));
   assert.equal(lineup.players, 1);
+
+  // The server rejects an arbitrary profile: the identity must resolve to an
+  // active same-league Market row.
+  const unpublishedProfile = await scalar(`insert into public.player_profiles(league_id, display_name) values ($1,'Unpublished Player') returning id`, [LEAGUE.id]);
+  await q(`insert into public.real_team_players(league_id,team_id,player_id,valid_from) values ($1,$2,$3,'2025-01-01Z')`, [LEAGUE.id, teamB.id, unpublishedProfile]);
+  await expectDenied(() => rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
+    JSON.stringify([{ player_id: unpublishedProfile, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }])), '23514', 'profile not published in the League Market');
+  await expectDenied(() => rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
+    JSON.stringify([{ player_id: unpublishedProfile, selection: 'starter', actual_position: 'MID', eligibility_kind: 'registered' }])), '23514', 'client cannot bypass Market eligibility using legacy registration');
 
   // Submission validates that BOTH sides have a lineup - one side is an error.
   await expectDenied(() => rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id), '23514', 'submitting with one side only');
+  await expectDenied(() => rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }])), '23505', 'one Market player cannot be selected for both match sides');
   await rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
-    JSON.stringify([{ player_id: profB, selection: 'starter', actual_position: 'MID' }]));
+    JSON.stringify([{ player_id: profB, selection: 'starter', actual_position: 'FWD', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]));
+  await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, false, null, null, marketA.player_id);
+  await expectDenied(() => rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id), '23514', 'inactive Market player cannot be submitted');
+  await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, true, null, null, marketA.player_id);
 
   const submitted = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
   assert.ok(submitted.submission_id);
@@ -632,8 +653,11 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   assert.equal(approved.decision, 'approved');
 
   // Result path: fork, score, record an event, submit, approve.
-  const forked = await rpc(BOB, "ff_match_fork_result", LEAGUE.id, approved.approval_id, crypto.randomUUID());
+  const forkRequestId = crypto.randomUUID();
+  const forked = await rpc(BOB, "ff_match_fork_result", LEAGUE.id, approved.approval_id, forkRequestId);
   assert.ok(forked.revision_id);
+  const retriedFork = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, approved.approval_id, forkRequestId);
+  assert.equal(retriedFork.revision_id, forked.revision_id, 'retrying the same fork request is idempotent');
   await rpc(BOB, 'ff_match_set_score', LEAGUE.id, forked.revision_id, 3, 1);
   await expectDenied(() => rpc(BOB, 'ff_match_record_event', LEAGUE.id, forked.revision_id, prof,
     'teleportation', 12), '23514', 'unsupported event type');
@@ -655,12 +679,18 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   const matches = await rpc(CAROL, 'ff_matches', LEAGUE.id);
   assert.equal(matches.length, 1);
   assert.equal(matches[0].revision_state, 'approved');
+  assert.equal(matches[0].history.length, 2, 'the read RPC includes append-only revision history');
+  assert.equal(matches[0].history[0].events.length, 1, 'result events are retained in revision history');
+  assert.equal(matches[0].history[0].submissions[0].approval.decision, 'approved');
+  assert.equal(matches[0].history[1].lineups[0].players[0].selection, 'starter');
 
   globalThis.MATCH = match;
+  globalThis.MATCH_LINEUP = { teamA: teamA.id, teamB: teamB.id, playerA: prof, playerB: profB };
+  globalThis.LINEUP_APPROVAL = approved.approval_id;
 });
 
 test('matches: a correction preserves history and supersedes the old result', async () => {
-  const { LEAGUE, MATCH } = globalThis;
+  const { LEAGUE, MATCH, LINEUP_APPROVAL } = globalThis;
   await expectDenied(() => rpc(BOB, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'typo'), '42501', 'organizer opening a correction');
   await expectDenied(() => rpc(ALICE, 'ff_match_open_correction', LEAGUE.id, MATCH.id, '   '), '23514', 'correction without a reason');
 
@@ -679,6 +709,20 @@ test('matches: a correction preserves history and supersedes the old result', as
   const record = await scalar(
     `select count(*)::int from public.match_corrections where league_id=$1 and match_id=$2`, [LEAGUE.id, MATCH.id]);
   assert.equal(record, 1, 'the correction is recorded with its reason');
+  const history = await rpc(ALICE, 'ff_matches', LEAGUE.id);
+  assert.equal(history[0].history[0].correction.reason, 'Goal was disallowed', 'the history read exposes correction reasons');
+
+  // A correction must get its own lineup approval before it can back another
+  // result. The immutable copied lineup is already complete and eligible.
+  const correctionRevision = history[0].history[0].revision_id;
+  const correctionSubmission = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, correctionRevision);
+  const correctionLineupApproval = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, correctionSubmission.submission_id, 'approved');
+  await expectDenied(() => rpc(BOB, 'ff_match_fork_result', LEAGUE.id, LINEUP_APPROVAL, crypto.randomUUID()), '23514', 'old lineup approval cannot bypass correction reapproval');
+  const correctedDraft = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, correctionLineupApproval.approval_id, crypto.randomUUID());
+  await rpc(BOB, 'ff_match_set_score', LEAGUE.id, correctedDraft.revision_id, 2, 1);
+  const correctedSubmission = await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, correctedDraft.revision_id, correctionLineupApproval.approval_id);
+  await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, correctedSubmission.submission_id, 'approved');
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, MATCH.id]), 1, 'reapproved correction replaces the official pointer without deleting history');
 });
 
 // ---------------------------------------------------------------------------
@@ -839,4 +883,18 @@ test('fixtures: a team from another league is refused with a clear 42501', async
     assert.equal(err.code, '42501');
     assert.match(err.message, /both teams must belong to this league/);
   } finally { await db.exec('rollback'); }
+});
+
+// The additive migration replaces the bodies of existing RPCs without opening
+// new execute access to anon or changing the authenticated application surface.
+test('match RPCs retain authenticated-only execute permissions after migration 018', async () => {
+  const create = await scalar(`select has_function_privilege('authenticated', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
+  const anonCreate = await scalar(`select has_function_privilege('anon', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
+  const read = await scalar(`select has_function_privilege('authenticated', 'public.ff_matches(uuid)'::regprocedure, 'execute')`);
+  const anonRead = await scalar(`select has_function_privilege('anon', 'public.ff_matches(uuid)'::regprocedure, 'execute')`);
+  const lineup = await scalar(`select has_function_privilege('authenticated', 'public.ff_match_set_lineup(uuid,uuid,uuid,jsonb)'::regprocedure, 'execute')`);
+  const anonLineup = await scalar(`select has_function_privilege('anon', 'public.ff_match_set_lineup(uuid,uuid,uuid,jsonb)'::regprocedure, 'execute')`);
+  assert.equal(create, true); assert.equal(anonCreate, false);
+  assert.equal(read, true); assert.equal(anonRead, false);
+  assert.equal(lineup, true); assert.equal(anonLineup, false);
 });

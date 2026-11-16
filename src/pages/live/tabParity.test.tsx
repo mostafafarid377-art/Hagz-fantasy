@@ -11,7 +11,7 @@
  * so the file stays honest about what it covers.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, fireEvent, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -163,10 +163,22 @@ describe('fixtures look like the demo fixtures', () => {
   });
 });
 
-describe('the match centre looks like the demo match centre', () => {
+describe('the live match center', () => {
   it('opens with a hero block for the featured match', async () => {
     await mountLive('matchcenter');
     expect(document.querySelector('.match-center-hero')).toBeTruthy();
+  });
+
+  it('shows the real match creation workflow to the League Leader', async () => {
+    await mountLive('matchcenter');
+    fireEvent.click(screen.getByRole('button', { name: 'Schedule match' }));
+    expect(screen.getByText('Schedule a real match')).toBeTruthy();
+    expect(screen.getByLabelText('New real team')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add team' })).toBeTruthy();
+    expect(screen.getByLabelText('Gameweek')).toBeTruthy();
+    expect(screen.getByLabelText('Assigned Organizer')).toBeTruthy();
+    expect(screen.getByLabelText('Date & kick-off')).toBeTruthy();
+    expect(screen.getByText(/does not create player profiles or affect fantasy squads/i)).toBeTruthy();
   });
 });
 
