@@ -104,30 +104,30 @@ test('anonymous and cross-tenant callers cannot reserve or attach a forged path'
   await denied(()=>insert(mallory,forged));
 });
 
-// SECURITY FINDING (not an endorsement): the guard lets a leader attach any
-// pending suggestion image to a different published player, without approving the
-// suggestion. This reproduces a privacy bypass in the current draft. Replace this
-// test with a denial assertion when the guard is fixed.
-test('SECURITY FINDING: a leader can publish another pending suggestion image without approving it', async () => {
+// Regression for the previously reproduced pending-image publication bypass.
+test('only approval of the exact suggestion can publish its image', async () => {
   const charlie = '00000000-0000-0000-0000-000000000004';
   await q('insert into auth.users(id) values ($1)',[charlie]);
   await rpc(charlie,'ff_bootstrap','Charlie');
   await rpc(charlie,'ff_league_join',league.code);
   const privateSuggestion=await rpc(bob,'ff_suggestion_submit',league.id,'Private Pending','MID');
+  const unrelated=await rpc(bob,'ff_suggestion_submit',league.id,'Another Pending','MID');
   const path=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',privateSuggestion.id,'png')).path;
   await insert(bob,path);
   await rpc(bob,'ff_image_set',league.id,'suggestion',privateSuggestion.id,null,path);
-  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0,
-    'the pending suggestion image is private to the author and leader');
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0);
   await denied(()=>rpc(charlie,'ff_image_reserve',league.id,'suggestion',privateSuggestion.id,'png'));
   await denied(()=>rpc(charlie,'ff_image_set',league.id,'suggestion',privateSuggestion.id,path,null));
-  assert.equal((await remove(charlie,path)).rowCount,0,'another manager cannot delete the object');
-
-  const leaked=await rpc(alice,'ff_market_upsert_player',league.id,'Unrelated Player','MID',1000000,75,true,path,null);
-  assert.equal(leaked.image_path,path);
-  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,1,
-    'the same object is now readable by another league member without approving its suggestion');
+  assert.equal((await remove(charlie,path)).rowCount,0);
+  await denied(()=>rpc(alice,'ff_market_upsert_player',league.id,'Unrelated Player','MID',1000000,75,true,path,null));
+  await denied(()=>rpc(alice,'ff_market_upsert_player',league.id,'Image Player','MID',1000000,75,true,path,null,player.player_id));
+  await denied(()=>rpc(alice,'ff_suggestion_review',league.id,unrelated.id,'approved',null,1000000,75,path));
+  await denied(()=>rpc(mallory,'ff_suggestion_review',other.id,unrelated.id,'approved',null,1000000,75,path));
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,0);
   assert.equal((await rpc(bob,'ff_suggestions',league.id)).find(s=>s.id===privateSuggestion.id).status,'pending');
+  await rpc(alice,'ff_suggestion_review',league.id,privateSuggestion.id,'approved',null,1000000,75,null);
+  assert.equal((await as(charlie,()=>q('select name from storage.objects where name=$1',[path]))).rowCount,1,
+    'matching approved suggestion image is readable only after approval');
 });
 
 // SECURITY/RELIABILITY FINDING: path-only compare-and-swap does not cover an

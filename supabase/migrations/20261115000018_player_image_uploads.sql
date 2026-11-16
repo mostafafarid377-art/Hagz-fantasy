@@ -79,8 +79,11 @@ begin
   elsif not exists (select 1 from ff_private.image_upload_reservations r
       where r.object_name=new.image_path and r.league_id=new.league_id and r.target_kind='player'
         and r.target_id=new.id and r.actor_id=ff_private.current_actor_id() and r.state='staged' and r.expires_at > now())
-    and not (ff_private.is_leader(new.league_id) and exists (select 1 from public.player_suggestions s
-      where s.league_id=new.league_id and s.status='pending' and s.image_path=new.image_path)) then
+    and not (ff_private.is_leader(new.league_id) and exists (
+      select 1 from public.player_suggestions s
+      join public.league_players lp on lp.id=s.league_player_id and lp.league_id=s.league_id
+      where s.league_id=new.league_id and s.status='approved' and s.image_path=new.image_path
+        and lp.player_id=new.id)) then
     raise exception 'Image is not reserved for this player.' using errcode='42501';
   end if;
   return new;
@@ -143,3 +146,71 @@ revoke all on function ff_private.image_target_allowed(uuid,text,uuid), ff_priva
 grant execute on function ff_private.can_write_reserved_image(text,text) to authenticated;
 revoke all on function public.ff_image_reserve(uuid,text,uuid,text), public.ff_image_set(uuid,text,uuid,text,text) from public,anon;
 grant execute on function public.ff_image_reserve(uuid,text,uuid,text), public.ff_image_set(uuid,text,uuid,text,text) to authenticated;
+
+-- Publish a suggestion image only after linking the exact approved suggestion
+-- to its new player inside this transaction; intermediate rows are not visible.
+create or replace function public.ff_suggestion_review(
+  p_league uuid, p_suggestion uuid, p_decision text, p_reason text default null,
+  p_price numeric default null, p_rating integer default null, p_image_path text default null)
+returns jsonb
+language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+declare s public.player_suggestions; v_profile public.player_profiles; v_market public.league_players;
+begin
+  perform ff_private.require_leader(p_league);
+  if p_decision not in ('approved', 'rejected') then
+    raise exception 'decision must be approved or rejected' using errcode = '23514';
+  end if;
+  select * into s from public.player_suggestions
+   where league_id = p_league and id = p_suggestion for update;
+  if not found then raise exception 'suggestion not found' using errcode = '42501'; end if;
+  if s.status <> 'pending' then raise exception 'suggestion was already reviewed' using errcode = '23514'; end if;
+  -- A leader may not approve their own suggestion: the manager's proposal must
+  -- be reviewed by someone else, matching the self-approval ban on matches.
+  if s.submitted_by = ff_private.current_actor_id() then
+    raise exception 'self review of a suggestion is forbidden' using errcode = '42501';
+  end if;
+
+  if p_decision = 'rejected' then
+    if p_reason is null or length(btrim(p_reason)) = 0 then
+      raise exception 'rejection needs a reason' using errcode = '23514';
+    end if;
+    update public.player_suggestions set status = 'rejected' where league_id = p_league and id = s.id;
+    insert into public.player_approval_logs(league_id, suggestion_id, actor_id, decision, reason)
+    values (p_league, s.id, ff_private.current_actor_id(), 'rejected', btrim(p_reason));
+    perform ff_private.notify(p_league, s.submitted_by, 'suggestion_rejected',
+      jsonb_build_object('suggestion_id', s.id, 'name', s.name, 'league_id', p_league, 'reason', btrim(p_reason)));
+    perform ff_private.audit(p_league, 'suggestion_rejected', 'player_suggestion', s.id,
+      null, btrim(p_reason));
+    return jsonb_build_object('id', s.id, 'status', 'rejected', 'reason', btrim(p_reason));
+  end if;
+
+  if p_price is null or p_price <= 0 then raise exception 'approved player needs a positive price' using errcode = '23514'; end if;
+  if p_rating is null or p_rating < 1 or p_rating > 99 then raise exception 'approved player needs a rating between 1 and 99' using errcode = '23514'; end if;
+
+  -- A review cannot select the image of a different suggestion.
+  if p_image_path is not null and p_image_path is distinct from s.image_path then
+    raise exception 'Image does not belong to this suggestion.' using errcode='42501';
+  end if;
+  insert into public.player_profiles(league_id, display_name, image_path, image_url)
+  values (p_league, s.name, null, s.image_url)
+  returning * into v_profile;
+  insert into public.league_players(league_id, player_id, position, price, rating, active)
+  values (p_league, v_profile.id, s.position, p_price, p_rating, true)
+  returning * into v_market;
+
+  update public.player_suggestions
+     set status = 'approved', league_player_id = v_market.id
+   where league_id = p_league and id = s.id;
+  -- The guard permits only the exact profile linked by this approved suggestion.
+  update public.player_profiles set image_path=s.image_path where league_id=p_league and id=v_profile.id;
+  insert into public.player_approval_logs(league_id, suggestion_id, actor_id, decision, reason)
+  values (p_league, s.id, ff_private.current_actor_id(), 'approved', nullif(btrim(coalesce(p_reason, '')), ''));
+
+  perform ff_private.notify(p_league, s.submitted_by, 'suggestion_approved',
+    jsonb_build_object('suggestion_id', s.id, 'name', s.name, 'league_id', p_league,
+                       'league_player_id', v_market.id, 'price', p_price, 'rating', p_rating));
+  perform ff_private.audit(p_league, 'suggestion_approved', 'player_suggestion', s.id,
+    jsonb_build_object('league_player_id', v_market.id, 'price', p_price, 'rating', p_rating));
+  return jsonb_build_object('id', s.id, 'status', 'approved', 'league_player_id', v_market.id,
+                            'price', v_market.price, 'rating', v_market.rating);
+end $$;
