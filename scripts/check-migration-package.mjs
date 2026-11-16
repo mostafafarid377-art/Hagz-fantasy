@@ -45,6 +45,9 @@ const DESIGN_MIGRATIONS = {
   '020_leader_match_result_finalization.sql': '8dd3a1756902e995c84bf5a65d16c592988b5e468b331f5d68581a78aef19e4d',
   // Phase 4 duplicate-name identity, batch suggestions and transfer history.
   '021_phase4_market_and_transfer_gaps.sql': 'a269f86b4f5ae0244dd033f204b61fc015a7ffb0d1e2b57b2383481f5b473594',
+  // Forward-only correction: restore real-team name uniqueness accidentally
+  // removed by 021; player-profile names remain non-unique.
+  '022_restore_real_team_name_uniqueness.sql': 'eba5ffdd2c7362658912b94f6f4d97f1387f42cab4cf54e5db4620b1e49fc73a',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -97,6 +100,7 @@ const PACKAGE = [
   ['20261115000019_optional_match_gameweek.sql', 'design/migrations/019_optional_match_gameweek.sql'],
   ['20261115000020_leader_match_result_finalization.sql', 'design/migrations/020_leader_match_result_finalization.sql'],
   ['20261116210000_phase4_market_and_transfer_gaps.sql', 'design/migrations/021_phase4_market_and_transfer_gaps.sql'],
+  ['20261116220000_restore_real_team_name_uniqueness.sql', 'design/migrations/022_restore_real_team_name_uniqueness.sql'],
 ];
 
 /**
@@ -121,6 +125,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261115000019_optional_match_gameweek.sql',
   '20261115000020_leader_match_result_finalization.sql',
   '20261116210000_phase4_market_and_transfer_gaps.sql',
+  '20261116220000_restore_real_team_name_uniqueness.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -331,9 +336,19 @@ if (!(await exists(execDir))) {
         && /grant\s+execute\s+on\s+function\s+public\.ff_transfers\(uuid,\s*integer\)\s+to\s+authenticated/i.test(stripped);
       const broadDdl = /^\s*(drop\s+(function|policy|table)|create\s+policy|truncate|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (broadDdl) fail(`post-verification migration ${repair}`, `forbidden destructive or broad privilege change: ${broadDdl[0].trim()}`);
-      else if (!dropsOnlyNameKeys) fail(`post-verification migration ${repair}`, 'only the reviewed display-name uniqueness keys may be removed');
+      else if (!dropsOnlyNameKeys) fail(`post-verification migration ${repair}`, 'must match the historically reviewed Phase 4 DDL; correction 022 separately restores real-team name uniqueness');
       else if (!batchAuth || !batchLimit || !limitedReads || !grantedOnly) fail(`post-verification migration ${repair}`, 'new RPCs must enforce membership, bounded inputs, owner-scoped transfer reads and authenticated-only execute grants');
-      else ok(`post-verification migration ${repair} is scoped`, 'removes name-as-identity keys and adds bounded member-scoped batch/history RPCs');
+      else ok(`post-verification migration ${repair} is scoped`, 'adds bounded member-scoped batch/history RPCs; migration 022 restores real-team name uniqueness');
+    } else if (repair === '20261116220000_restore_real_team_name_uniqueness.sql') {
+      const restoresOriginalKey = /add\s+constraint\s+real_football_teams_league_id_name_key\s+unique\s*\(\s*league_id\s*,\s*name\s*\)/i.test(stripped);
+      const refusesAmbiguousDuplicates = /group\s+by\s+league_id\s*,\s*name\s+having\s+count\(\*\)\s*>\s*1/i.test(stripped)
+        && /resolve them by ID before retrying/i.test(body);
+      const validatesExistingDefinition = /v_constraint\.contype\s*<>\s*'u'/i.test(stripped)
+        && /v_columns\s+is\s+distinct\s+from\s+array\s*\[\s*'league_id'\s*,\s*'name'\s*\]/i.test(stripped);
+      const noPrivilegeOrDestructiveDdl = !/^\s*(drop\s+(function|policy|table|index)|create\s+policy|grant\b|revoke\b|truncate\b)/im.test(stripped);
+      if (!restoresOriginalKey || !refusesAmbiguousDuplicates || !validatesExistingDefinition) fail(`post-verification migration ${repair}`, 'must safely and idempotently restore the exact original real-team name key, refusing ambiguous duplicates');
+      else if (!noPrivilegeOrDestructiveDdl) fail(`post-verification migration ${repair}`, 'must not alter privileges or perform destructive DDL');
+      else ok(`post-verification migration ${repair} is scoped`, 'restores only real-team name uniqueness; leaves same-name player identities unchanged');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {
