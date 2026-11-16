@@ -140,6 +140,14 @@ describe('last game points use the latest approved match only', () => {
       points.seasonPointsForPlayer(snapshot, 'lp-a'));
   });
 
+  it('includes the only approved match in season totals', async () => {
+    const tables = baseTables();
+    tables.official_match_results = tables.official_match_results.filter((row) => (row as { match_id: string }).match_id === 'm2');
+    const points = await load(tables);
+    const snapshot = await points.leaguePoints('L1', SEASON);
+    expect(points.seasonPointsForPlayer(snapshot, 'lp-a')).toBe(12);
+  });
+
   it('sums each fantasy team from the score items', async () => {
     const points = await load(baseTables());
     const snapshot = await points.leaguePoints('L1', SEASON);

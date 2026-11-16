@@ -7,7 +7,7 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { BackLink } from '../../components/Navigation';
@@ -136,7 +136,7 @@ export function LiveMarket() {
 export function LivePlayerProfile() {
   const { t } = useTranslation();
   const live = useLive();
-  const id = window.location.pathname.split('/').pop();
+  const { id } = useParams<{ id: string }>();
   const player = live.players.find((p) => p.id === id || p.player_id === id);
   if (live.loading) return <Loading />;
   if (!player) return <Empty title="No match found" description="This player is not in your league market." to="/market" action="Player Market" />;

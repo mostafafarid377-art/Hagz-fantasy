@@ -17,8 +17,9 @@ import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
-import { formations, limits } from '../../services/rules';
+import { formations, limits, substitutionTargets } from '../../services/rules';
 import { lastGamePointsForPlayer } from '../../services/points';
+import { LivePlayerSheet } from './LivePlayerSheet';
 import { AddLivePlayerSheet } from './AddLivePlayerSheet';
 import type { Formation, Player, Position } from '../../types';
 
@@ -47,6 +48,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     setCaptain(live.squad?.captain_id ?? null);
     setVice(live.squad?.vice_captain_id ?? null);
   }, [live.leagueId, live.squad?.formation, live.squad?.captain_id, live.squad?.vice_captain_id]);
+  const [selectedId, setSelectedId] = useState('');
+  const [swapSource, setSwapSource] = useState('');
   const [outPlayer, setOutPlayer] = useState('');
   const [inPlayer, setInPlayer] = useState('');
   /** Which position's "+" opened the picker; undefined when it is closed. */
@@ -146,8 +149,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   // then drew the last 4 again in the bench strip below it, so the same players
   // appeared twice and "11 starters / 4 substitutes" was not visible anywhere.
   // Builder/edit mode is the exception: it shows the whole squad and hides the bench.
-  const starters = builder || editing ? ordered : ordered.slice(0, 11);
-  const pitchPlayers: Player[] = starters.map((p) => ({
+  const allPlayers: Player[] = ordered.map((p) => ({
     id: p.league_player_id,
     leagueId: '',
     name: p.name,
@@ -160,12 +162,27 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     points: 0,
     color: '#a9b9a5',
   }));
+  const pitchPlayers = builder || editing ? allPlayers : allPlayers.slice(0, 11);
   const captainId = ordered.find((p) => p.league_player_id === captain) ? (captain ?? undefined) : undefined;
   /** Last-game points for a squad entry, or undefined when there is no valid score. */
   const lastGamePointsFor = (p: { league_player_id: string }) =>
     lastGamePointsForPlayer(live.points, p.league_player_id);
   const viceId = ordered.find((p) => p.league_player_id === vice) ? (vice ?? undefined) : undefined;
   const benchPlayers = ordered.slice(11);
+  const ids = ordered.map(p => p.league_player_id);
+  const ruleSquad = { leagueId: '', managerId: '', playerIds: ids, formation };
+  const targets = swapSource ? substitutionTargets(ruleSquad, allPlayers, swapSource) : [];
+  const selected = allPlayers.find(p => p.id === selectedId);
+  const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
+  const save = (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
+  function selectPlayer(p: Player) {
+    if (!swapSource) { setError(''); setSelectedId(p.id); return; }
+    if (!targets.includes(p.id)) return;
+    const next = [...ids]; const a = next.indexOf(swapSource), b = next.indexOf(p.id);
+    [next[a], next[b]] = [next[b], next[a]];
+    // Captaincy must belong to the starting XI.
+    void run('lineup', async () => { await save(next, next.slice(0, 11).includes(captain ?? '') ? captain : null, next.slice(0, 11).includes(vice ?? '') ? vice : null); setSwapSource(''); }, 'Players swapped.');
+  }
 
   return (
     <>
@@ -198,6 +215,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       <Success message={notice} />
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
+      {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={builder || editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={live.points?.season?.byPlayer[selected.id]} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => { const c = type === 'captain' ? selected.id : (captain === selected.id ? null : captain); const v = type === 'vice' ? selected.id : (vice === selected.id ? null : vice); void run('lineup', () => save(ids, c, v), 'Lineup saved.'); }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} />}
       <div className="squad-layout">
         <div className="panel">
           <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !builder ? 'Starting XI' : 'Your squad'} />
@@ -223,6 +242,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               saved formation, which still drives the shape server-side. */}
           <Pitch players={pitchPlayers} formation={formation}
             captainId={captainId} viceCaptainId={viceId}
+            onPlayerClick={selectPlayer} swapSource={swapSource} swapTargets={targets}
             onAddPosition={setAddPosition}
             squadSlots={!hasSquad || builder || editing}
             canAddStarting={builder || editing || ordered.length < 11}
@@ -234,11 +254,11 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             <div className="bench-players">
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
               {benchPlayers.map((p) => (
-                <div className="bench-player" key={p.league_player_id}>
+                <button type="button" className={`bench-player ${targets.includes(p.league_player_id) ? 'swap-target' : ''} ${swapSource && !targets.includes(p.league_player_id) ? 'swap-dim' : ''}`} key={p.league_player_id} disabled={!!swapSource && !targets.includes(p.league_player_id)} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}`} onClick={() => { const player = allPlayers.find(x => x.id === p.league_player_id); if (player) selectPlayer(player); }}>
                   <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
                   <strong>{p.name}</strong>
-                  <small>{p.position} · {formatCompactMoney(p.price)}</small>
-                </div>
+                  <small>{p.position} · {lastGamePointsFor(p) != null ? `${lastGamePointsFor(p)} ${t('pts')}` : '—'}</small>
+                </button>
               ))}
             </div>
           </div>}
