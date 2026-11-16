@@ -24,8 +24,8 @@ export function ScheduleMatchForm({ leagueId, gameweeks, members, onCreated, onC
   const [organizerId, setOrganizerId] = useState('');
   const [startsAt, setStartsAt] = useState('');
   const [venue, setVenue] = useState('');
-  const [starters, setStarters] = useState(7);
-  const [substitutes, setSubstitutes] = useState(5);
+  const [starters, setStarters] = useState('7');
+  const [substitutes, setSubstitutes] = useState('5');
   const organizers = members.filter(m => m.is_organizer && m.status === 'active');
 
   useEffect(() => {
@@ -52,7 +52,7 @@ export function ScheduleMatchForm({ leagueId, gameweeks, members, onCreated, onC
     try {
       const created = await api.createMatch(leagueId, {
         gameweekId: gameweekId || null, teamA, teamB, organizerId,
-        startsAt: new Date(startsAt).toISOString(), venue, startersPerSide: starters, maxSubstitutes: substitutes,
+        startsAt: new Date(startsAt).toISOString(), venue, startersPerSide: Number(starters), maxSubstitutes: Number(substitutes),
       });
       const persisted = await api.matches(leagueId);
       if (!persisted.some(match => match.id === created.id)) {
@@ -75,8 +75,8 @@ export function ScheduleMatchForm({ leagueId, gameweeks, members, onCreated, onC
       <label>{t('Assigned Organizer')}<select required value={organizerId} onChange={e => setOrganizerId(e.target.value)}><option value="">{t('Choose appointed organizer')}</option>{organizers.map(x => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}</select></label>
       <label>{t('Date & kick-off')}<input required type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)} /></label>
       <label>{t('Venue')}<input required minLength={1} maxLength={200} value={venue} onChange={e => setVenue(e.target.value)} /></label>
-      <label>{t('Starters per side')}<input required type="number" min={1} max={11} value={starters} onChange={e => setStarters(Number(e.target.value))} /></label>
-      <label>{t('Maximum substitutes')}<input required type="number" min={0} max={30} value={substitutes} onChange={e => setSubstitutes(Number(e.target.value))} /></label>
+      <label>{t('Starters per side')}<input required type="number" min={1} max={11} value={starters} onChange={e => setStarters(e.target.value)} /></label>
+      <label>{t('Maximum substitutes')}<input required type="number" min={0} max={30} value={substitutes} onChange={e => setSubstitutes(e.target.value)} /></label>
       {error && <p className="error-text" role="alert">{error}</p>}
       <div className="form-actions"><button className="button button-primary" disabled={busy || teams.length < 2 || organizers.length === 0}>{busy ? t('Saving…') : t('Create match')}</button><button type="button" className="button button-outline" onClick={onCancel}>{t('Cancel')}</button></div>
       {teams.length < 2 && !teamError && <p className="notice">{t('At least two active real teams are required.')}</p>}
