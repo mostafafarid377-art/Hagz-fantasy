@@ -50,7 +50,9 @@ test('squad add and remove preserves position and budget constraints',async({pag
   await page.goto('/squad-builder');await page.getByLabel('Remove: Tamer Hany').click();await page.goto('/market');
   await page.getByLabel('Search players').fill('Adam Sherif');await page.getByRole('button',{name:'Add to squad'}).click();
   await expect(page.getByRole('button',{name:'Remove'})).toBeVisible();await page.goto('/squad-builder');
-  await expect(page.locator('.roster-row').filter({hasText:'Adam Sherif'})).toBeVisible();
+  // The roster list under the pitch was removed, so the squad is now read from the
+  // pitch itself. The builder shows on-pitch players with a "Player details" label.
+  await expect(page.locator('.pitch-player[aria-label*="Adam Sherif"]')).toBeVisible();
 });
 test('transfer preview and confirmation update the squad',async({page})=>{
   await page.goto('/transfers');await page.getByLabel('Player to transfer out').selectOption('p15');await page.getByLabel('Replacement player').selectOption('p17');

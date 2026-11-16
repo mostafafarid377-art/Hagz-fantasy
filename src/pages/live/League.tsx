@@ -199,7 +199,10 @@ export function LiveDashboard() {
 
       <div className="dashboard-grid">
         <section className="panel squad-panel">
-          <SectionHead eyebrow="YOUR TEAM" title="Your starting XI" action="Edit squad" to="/squad-builder" />
+          {/* Editing a live squad means going to the market to add players. It used to
+              link to /squad-builder, which in live mode re-rendered the squad screen
+              itself, so the button appeared to do nothing. */}
+          <SectionHead eyebrow="YOUR TEAM" title="Your starting XI" action="Edit squad" to="/market" />
           <div className="panel-subline">
             <span>{t(live.squad?.status === 'confirmed' ? 'Confirmed lineup' : 'Draft lineup')}</span>
             <span className="formation">{t('FORMATION')} <strong>{live.squad?.formation ?? '—'}</strong></span>

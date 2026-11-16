@@ -8,18 +8,17 @@
 // Starters are the first 11 entries of the lineup array and the bench is the last
 // 4 - the same convention ff_lineup_save() validates server-side.
 
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { AlertCircle, Check, Star, UserMinus, UserPlus } from 'lucide-react';
+import { AlertCircle, Check, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
-import { formations, limits } from '../../services/rules';
-import type { ApiSquadPlayer } from '../../types/api';
-import type { Formation, Position } from '../../types';
+import { formations } from '../../services/rules';
+import type { Formation, Player, Position } from '../../types';
 
 const FORMATIONS = Object.keys(formations) as Formation[];
 
@@ -39,12 +38,6 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const squad = live.squad;
   const players = squad?.players ?? [];
 
-  const counts = useMemo(() => {
-    const result: Record<Position, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-    for (const p of players) result[p.position] += 1;
-    return result;
-  }, [players]);
-
   const spent = squad?.spent ?? 0;
   const budget = squad?.budget ?? 0;
   const remaining = budget - spent;
@@ -58,8 +51,6 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     const order: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
     return order.indexOf(a.position) - order.indexOf(b.position) || a.name.localeCompare(b.name);
   });
-  const starters = ordered.slice(0, 11);
-  const bench = ordered.slice(11);
 
   async function run(key: string, action: () => Promise<void>, success?: string) {
     setBusy(key); setError(''); setNotice('');
@@ -141,6 +132,29 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   }
 
   // ---- squad / builder -----------------------------------------------------
+  //
+  // Layout follows the demo squad screen: the pitch is the page. The roster list
+  // that used to sit under it is gone - it repeated every player the pitch already
+  // shows. Captain, vice captain and selling moved into a compact panel below the
+  // pitch so no control was lost with the list.
+  const hasSquad = ordered.length > 0;
+  const pitchPlayers: Player[] = ordered.map((p) => ({
+    id: p.league_player_id,
+    leagueId: '',
+    name: p.name,
+    position: p.position,
+    price: p.price,
+    rating: p.rating,
+    attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 },
+    image: p.image_url ?? undefined,
+    active: p.active,
+    points: 0,
+    color: '#a9b9a5',
+  }));
+  const captainId = ordered.find((p) => p.league_player_id === captain) ? (captain ?? undefined) : undefined;
+  const viceId = ordered.find((p) => p.league_player_id === vice) ? (vice ?? undefined) : undefined;
+  const benchPlayers = ordered.slice(11);
+
   return (
     <>
       <PageTitle eyebrow="YOUR TEAM" title={builder ? 'Squad Builder' : 'My Squad'}
@@ -149,119 +163,109 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {live.error && <ErrorNote message={live.error} />}
       {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
       <Success message={notice} />
+      {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
-      <div className="stat-grid">
-        {(['GK', 'DEF', 'MID', 'FWD'] as Position[]).map((position) => (
-          <div className="stat-card" key={position}>
-            <div className="stat-top"><span>{position}</span></div>
-            <div className="stat-number">{counts[position]}<small>/{limits[position]}</small></div>
-            <div className="stat-foot">{t('Position limit')}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Actions below the squad, not in the header: opening this screen should
-          show the team first. */}
-      <div className="squad-actions">
-        <Link className="button button-outline" to="/transfers">{t('Make a transfer')}</Link>
-        <Link className="button" to="/market"><UserPlus size={15} /> {t('Add players')}</Link>
-      </div>
-
-      {ordered.length === 0 ? (
-        /* An empty squad shows the EMPTY PITCH, not a "your squad is empty" card.
-           The pitch is the thing the user is meant to fill, so it should be the
-           first thing they see - with an add slot in every position, exactly like
-           a partially-built squad. The old card made the page look like a dead end
-           with a link on it. */
-        <div className="panel section-spacer">
-          <SectionHead eyebrow="YOUR TEAM" title="Your squad" />
-          <p className="section-description">
-            {t('Tap an empty position to add a player. The first 11 players are starters; reorder them in My Squad.')}
-          </p>
+      <div className="squad-layout">
+        <div className="panel">
+          <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !builder ? 'Starting XI' : 'Your squad'} />
+          {(!hasSquad || builder) && (
+            <p className="section-description">
+              {t('Tap an empty position to add a player. The first 11 players are starters.')}
+            </p>
+          )}
           <label className="formation-select">{t('Formation')}
             <select aria-label={t('Formation')} value={formation}
               onChange={(e) => setFormation(e.target.value as Formation)}>
               {FORMATIONS.map((f) => <option key={f} value={f}>{f}</option>)}
             </select>
           </label>
-          <Pitch players={[]} formation={formation} squadSlots onAddPosition={() =>navigate('/market')} />
+
+          <Pitch players={pitchPlayers} formation={formation}
+            captainId={captainId} viceCaptainId={viceId}
+            onAddPosition={() => navigate('/market')}
+            squadSlots={!hasSquad || builder}
+            canAddStarting={builder || ordered.length < 11} />
+
           <div className="bench-strip">
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
             <div className="bench-players">
-              <small>{t('No substitutes yet.')}</small>
+              {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
+              {benchPlayers.map((p) => (
+                <div className="bench-player" key={p.league_player_id}>
+                  <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                  <strong>{p.name}</strong>
+                  <small>{p.position} · {formatMoney(p.price)}</small>
+                </div>
+              ))}
             </div>
           </div>
         </div>
-      ) : (
-        <>
-          <div className="panel section-spacer">
-            <SectionHead eyebrow="THE LINEUP" title="Starting XI and bench"
-              action="Player Market" to="/market" />
-            <div className="validation-panel" role="status">
-              <span>{badgeText(squad?.status, t)}</span>
-            </div>
+      </div>
 
-            <h3 className="roster-heading">{t('Starting lineup')}</h3>
-            <div className="roster">
-              {starters.map((p) => (
-                <RosterRow key={p.league_player_id} player={p} t={t}
-                  isCaptain={captain === p.league_player_id}
-                  isVice={vice === p.league_player_id}
-                  onCaptain={() => setCaptain(p.league_player_id === captain ? null : p.league_player_id)}
-                  onVice={() => setVice(p.league_player_id === vice ? null : p.league_player_id)}
-                  onSell={() => void run(`sell-${p.league_player_id}`, () => live.sell(p.league_player_id), 'Player sold.')}
-                  busy={busy === `sell-${p.league_player_id}`} />
-              ))}
-            </div>
+      {/* Actions BELOW the pitch, as on the demo squad screen. */}
+      <div className="squad-actions">
+        <Link className="button button-outline" to="/transfers">{t('Make a transfer')}</Link>
+        <Link className="button" to="/market"><UserPlus size={15} /> {t('Add players')}</Link>
+      </div>
 
-            <h3 className="roster-heading">{t('Substitutes')} ({bench.length}/4)</h3>
-            <div className="roster">
-              {bench.length === 0 && <small>{t('No substitutes yet.')}</small>}
-              {bench.map((p) => (
-                <RosterRow key={p.league_player_id} player={p} t={t}
-                  isCaptain={captain === p.league_player_id}
-                  isVice={vice === p.league_player_id}
-                  onCaptain={() => setCaptain(p.league_player_id === captain ? null : p.league_player_id)}
-                  onVice={() => setVice(p.league_player_id === vice ? null : p.league_player_id)}
-                  onSell={() => void run(`sell-${p.league_player_id}`, () => live.sell(p.league_player_id), 'Player sold.')}
-                  busy={busy === `sell-${p.league_player_id}`} />
-              ))}
-            </div>
+      {hasSquad && (
+        <div className="panel section-spacer">
+          <SectionHead eyebrow="THE LINEUP" title="Formation and captaincy" />
+          <div className="validation-panel" role="status">
+            <span>{badgeText(squad?.status, t)}</span>
           </div>
 
-          <div className="panel section-spacer">
-            <SectionHead eyebrow="THE FORMATION" title="Formation and captaincy" />
-            <div className="formation-select">
-              <label>{t('Formation')}
-                <select value={formation} onChange={(e) => setFormation(e.target.value as Formation)}>
-                  {FORMATIONS.map((f) => <option key={f} value={f}>{f}</option>)}
-                </select>
-              </label>
-            </div>
-            <p className="section-description">
-              {t('Captain and vice captain must be different players from your squad.')}
-            </p>
-            <div className="sheet-captains">
-              <div className={`button button-outline ${captain ? 'is-selected' : ''}`}>
-                {t('Captain')}: {ordered.find((p) => p.league_player_id === captain)?.name ?? t('Not set')}
-              </div>
-              <div className={`button button-outline ${vice ? 'is-selected' : ''}`}>
-                {t('Vice captain')}: {ordered.find((p) => p.league_player_id === vice)?.name ?? t('Not set')}
-              </div>
-            </div>
-            <p className="sheet-note">
-              {t('Use the star buttons on each player row to set the captain (C) and vice captain (V).')}
-            </p>
-            <div className="confirm-lineup">
-              <button className="button button-outline" disabled={busy === 'save'} onClick={() => void save()}>
-                {busy === 'save' ? t('Saving…') : t('Save draft lineup')}
-              </button>
-              <button className="button" disabled={busy === 'confirm' || !squad?.lineup_id} onClick={() => void confirm()}>
-                <Check size={15} /> {busy === 'confirm' ? t('Confirming…') : t('Confirm lineup')}
-              </button>
-            </div>
+          {/* Captaincy and selling live here now that the roster list is gone. */}
+          <div className="formation-select">
+            <label>{t('Captain')}
+              <select aria-label={t('Captain')} value={captain ?? ''}
+                onChange={(e) => setCaptain(e.target.value || null)}>
+                <option value="">{t('Not set')}</option>
+                {ordered.map((p) => (
+                  <option key={p.league_player_id} value={p.league_player_id}>{p.name} · {p.position}</option>
+                ))}
+              </select>
+            </label>
+            <label>{t('Vice captain')}
+              <select aria-label={t('Vice captain')} value={vice ?? ''}
+                onChange={(e) => setVice(e.target.value || null)}>
+                <option value="">{t('Not set')}</option>
+                {ordered.filter((p) => p.league_player_id !== captain).map((p) => (
+                  <option key={p.league_player_id} value={p.league_player_id}>{p.name} · {p.position}</option>
+                ))}
+              </select>
+            </label>
+            <label>{t('Sell a player')}
+              <select aria-label={t('Sell a player')} value={outPlayer}
+                onChange={(e) => setOutPlayer(e.target.value)}>
+                <option value="">{t('Select a player')}</option>
+                {ordered.map((p) => (
+                  <option key={p.league_player_id} value={p.league_player_id}>
+                    {p.name} · {p.position} · {formatMoney(p.price)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-        </>
+
+          <div className="confirm-lineup">
+            {outPlayer && (
+              <button className="button button-outline" disabled={busy === 'sell'}
+                onClick={() => void run('sell', async () => {
+                  await live.sell(outPlayer);
+                  setOutPlayer('');
+                }, 'Player sold.')}>
+                <UserMinus size={15} /> {busy === 'sell' ? t('Selling…') : t('Sell selected player')}
+              </button>
+            )}
+            <button className="button button-outline" disabled={busy === 'save'} onClick={() => void save()}>
+              {busy === 'save' ? t('Saving…') : t('Save draft lineup')}
+            </button>
+            <button className="button" disabled={busy === 'confirm' || !squad?.lineup_id} onClick={() => void confirm()}>
+              <Check size={15} /> {busy === 'confirm' ? t('Confirming…') : t('Confirm lineup')}
+            </button>
+          </div>
+        </div>
       )}
     </>
   );
@@ -274,37 +278,6 @@ function badgeText(status: string | undefined, t: (key: string) => string): stri
     case 'superseded': return t('This lineup was replaced by a newer one.');
     default: return t('No lineup saved yet.');
   }
-}
-
-function RosterRow({ player, t, isCaptain, isVice, onCaptain, onVice, onSell, busy }: {
-  player: ApiSquadPlayer; t: (key: string) => string;
-  isCaptain: boolean; isVice: boolean;
-  onCaptain: () => void; onVice: () => void; onSell: () => void; busy: boolean;
-}) {
-  return (
-    <div className="roster-row">
-      <Avatar name={player.name} image={player.image_url ?? undefined} size="sm" />
-      <div>
-        <strong>{player.name}</strong>
-        <small>{player.position} · {formatMoney(player.price)}</small>
-      </div>
-      <div className="roster-buttons">
-        <button className={`captain-button ${isCaptain ? 'is-selected' : ''}`} title={t('Captain')}
-          aria-label={`${t('Captain')}: ${player.name}`} onClick={onCaptain}>
-          <Star size={14} fill={isCaptain ? 'currentColor' : 'none'} />
-        </button>
-        <button className={`captain-button ${isVice ? 'is-selected' : ''}`} title={t('Vice captain')}
-          aria-label={`${t('Vice captain')}: ${player.name}`} onClick={onVice}>
-          V
-        </button>
-        <button className="tiny-button" title={t('Sell player')} aria-label={`${t('Sell player')}: ${player.name}`}
-          disabled={busy} onClick={onSell}>
-          <UserMinus size={14} />
-        </button>
-      </div>
-      {(isCaptain || isVice) && <Badge kind="lime">{isCaptain ? 'C' : 'V'}</Badge>}
-    </div>
-  );
 }
 
 /** Standings / statistics in live mode. */
