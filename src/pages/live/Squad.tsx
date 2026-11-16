@@ -10,8 +10,8 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate } from 'react-router-dom';
-import { AlertCircle, Check, Shield, Trophy, UserMinus, UserPlus } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { AlertCircle, Shield, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
@@ -19,18 +19,18 @@ import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
 import { formations, limits } from '../../services/rules';
 import { lastGamePointsForPlayer } from '../../services/points';
+import { AddLivePlayerSheet } from './AddLivePlayerSheet';
 import type { Formation, Player, Position } from '../../types';
-
-const FORMATIONS = Object.keys(formations) as Formation[];
 
 export function LiveSquad({ builder = false, transfers = false }: { builder?: boolean; transfers?: boolean }) {
   const { t } = useTranslation();
   const live = useLive();
-  const navigate = useNavigate();
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [formation, setFormation] = useState<Formation>((live.squad?.formation as Formation) ?? '4-3-3');
+  // Read-only: the pitch shows the C / VC badges for whatever the server has stored.
+  // The two selects that set them were removed from this screen on request.
   const [captain, setCaptain] = useState<string | null>(live.squad?.captain_id ?? null);
   const [vice, setVice] = useState<string | null>(live.squad?.vice_captain_id ?? null);
 
@@ -49,6 +49,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   }, [live.leagueId, live.squad?.formation, live.squad?.captain_id, live.squad?.vice_captain_id]);
   const [outPlayer, setOutPlayer] = useState('');
   const [inPlayer, setInPlayer] = useState('');
+  /** Which position's "+" opened the picker; undefined when it is closed. */
+  const [addPosition, setAddPosition] = useState<Position>();
+  /** "Edit squad" / "View squad": builder mode for an existing squad. */
+  const [editing, setEditing] = useState(builder);
 
   const squad = live.squad;
   const players = squad?.players ?? [];
@@ -72,21 +76,6 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     try { await action(); if (success) setNotice(t(success)); }
     catch (caught) { setError(caught instanceof Error ? caught.message : t('That did not work')); }
     finally { setBusy(''); }
-  }
-
-  async function save() {
-    if (ordered.length !== 15) { setError(t('Select exactly 15 players.')); return; }
-    await run('save', () => live.saveLineup({
-      formation, playerIds: ordered.map((p) => p.league_player_id),
-      captainId: captain, viceCaptainId: vice,
-    }), 'Draft lineup saved.');
-  }
-
-  async function confirm() {
-    const lineupId = squad?.lineup_id;
-    if (!lineupId) { setError(t('Save a draft lineup before confirming it.')); return; }
-    if (captain && vice && captain === vice) { setError(t('Captain and vice captain must be different players.')); return; }
-    await run('confirm', () => live.confirmLineup(lineupId), 'Lineup confirmed.');
   }
 
   // ---- transfers -----------------------------------------------------------
@@ -156,8 +145,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   // The pitch is the starting XI. Rendering `ordered` drew all 15 on the pitch and
   // then drew the last 4 again in the bench strip below it, so the same players
   // appeared twice and "11 starters / 4 substitutes" was not visible anywhere.
-  // The builder is the exception: it is where you arrange the whole squad.
-  const starters = builder ? ordered : ordered.slice(0, 11);
+  // Builder/edit mode is the exception: it shows the whole squad and hides the bench.
+  const starters = builder || editing ? ordered : ordered.slice(0, 11);
   const pitchPlayers: Player[] = starters.map((p) => ({
     id: p.league_player_id,
     leagueId: '',
@@ -217,25 +206,30 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               {t('Tap an empty position to add a player. The first 11 players are starters.')}
             </p>
           )}
-          <label className="formation-select">{t('Formation')}
-            <select aria-label={t('Formation')} value={formation}
-              onChange={(e) => setFormation(e.target.value as Formation)}>
-              {FORMATIONS.map((f) => <option key={f} value={f}>{f}</option>)}
-            </select>
-          </label>
+          {/* The formation selector lives in the BUILDER only, matching the demo. It
+              was removed from the My Squad tab on request; there the SAVED formation
+              still decides the pitch shape and which players are the starting XI. */}
+          {builder && (
+            <label className="formation-select">{t('Formation')}
+              <select aria-label={t('Formation')} value={formation}
+                onChange={(e) => setFormation(e.target.value as Formation)}>
+                {(Object.keys(formations) as Formation[]).map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </label>
+          )}
 
-          {/* An empty squad (or the builder) shows all 15 capacity places, so every
-              position can be filled; a squad with players shows the formation's
-              starting XI. Same rule as the demo squad screen. */}
+          {/* An empty squad (or edit mode) shows all 15 capacity places, so every
+              position can be filled; otherwise the pitch is the starting XI in the
+              saved formation, which still drives the shape server-side. */}
           <Pitch players={pitchPlayers} formation={formation}
             captainId={captainId} viceCaptainId={viceId}
-            onAddPosition={() => navigate('/market')}
-            squadSlots={!hasSquad || builder}
-            canAddStarting={builder || ordered.length < 11}
+            onAddPosition={setAddPosition}
+            squadSlots={!hasSquad || builder || editing}
+            canAddStarting={builder || editing || ordered.length < 11}
             pointsFor={(p) => lastGamePointsFor({ league_player_id: p.id })}
             pointsLabel={t('Last game points')} />
 
-          {!builder && <div className="bench-strip">
+          {!builder && !editing && <div className="bench-strip">
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
             <div className="bench-players">
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
@@ -251,39 +245,37 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
         </div>
       </div>
 
-      {/* Actions BELOW the pitch, as on the demo squad screen. */}
+      {/* Actions BELOW the pitch, as on the demo squad screen.
+          "Edit squad" toggles builder mode rather than linking to another route: in
+          live mode /squad-builder rendered this same screen, so the button looked
+          dead. Builder mode is what makes the pitch span the whole squad (below), so
+          the two buttons now do what they say and nothing is lost - /squad-builder
+          still works as a direct link. */}
       <div className="squad-actions">
-        <Link className="button button-outline" to="/transfers">{t('Make a transfer')}</Link>
+        <button type="button" className="button button-outline" onClick={() => setEditing((value) => !value)}>
+          {t(editing ? 'View squad' : 'Edit squad')}
+        </button>
         <Link className="button" to="/market"><UserPlus size={15} /> {t('Add players')}</Link>
       </div>
 
+      {/* Formation and captaincy were removed from this screen on request, matching
+          the demo squad tab, which shows neither. What remains is only what cannot be
+          expressed on the pitch: the lineup status and the sell control. The formation
+          is still stored server-side and still decides which players are starters (the
+          first 11 of the saved lineup), so no product rule is lost - only the two
+          selects that duplicated what the pitch already shows.
+
+          Saving/confirming a lineup is no longer offered here either: the demo tab has
+          no lineup form, and the pitch plus the add-player sheet is the whole
+          interaction model. */}
       {hasSquad && (
         <div className="panel section-spacer">
-          <SectionHead eyebrow="THE LINEUP" title="Formation and captaincy" />
+          <SectionHead eyebrow="THE LINEUP" title="Squad status" />
           <div className="validation-panel" role="status">
             <span>{badgeText(squad?.status, t)}</span>
           </div>
 
-          {/* Captaincy and selling live here now that the roster list is gone. */}
           <div className="formation-select">
-            <label>{t('Captain')}
-              <select aria-label={t('Captain')} value={captain ?? ''}
-                onChange={(e) => setCaptain(e.target.value || null)}>
-                <option value="">{t('Not set')}</option>
-                {ordered.map((p) => (
-                  <option key={p.league_player_id} value={p.league_player_id}>{p.name} · {p.position}</option>
-                ))}
-              </select>
-            </label>
-            <label>{t('Vice captain')}
-              <select aria-label={t('Vice captain')} value={vice ?? ''}
-                onChange={(e) => setVice(e.target.value || null)}>
-                <option value="">{t('Not set')}</option>
-                {ordered.filter((p) => p.league_player_id !== captain).map((p) => (
-                  <option key={p.league_player_id} value={p.league_player_id}>{p.name} · {p.position}</option>
-                ))}
-              </select>
-            </label>
             <label>{t('Sell a player')}
               <select aria-label={t('Sell a player')} value={outPlayer}
                 onChange={(e) => setOutPlayer(e.target.value)}>
@@ -297,8 +289,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             </label>
           </div>
 
-          <div className="confirm-lineup">
-            {outPlayer && (
+          {outPlayer && (
+            <div className="confirm-lineup">
               <button className="button button-outline" disabled={busy === 'sell'}
                 onClick={() => void run('sell', async () => {
                   await live.sell(outPlayer);
@@ -306,15 +298,22 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
                 }, 'Player sold.')}>
                 <UserMinus size={15} /> {busy === 'sell' ? t('Selling…') : t('Sell selected player')}
               </button>
-            )}
-            <button className="button button-outline" disabled={busy === 'save'} onClick={() => void save()}>
-              {busy === 'save' ? t('Saving…') : t('Save draft lineup')}
-            </button>
-            <button className="button" disabled={busy === 'confirm' || !squad?.lineup_id} onClick={() => void confirm()}>
-              <Check size={15} /> {busy === 'confirm' ? t('Confirming…') : t('Confirm lineup')}
-            </button>
-          </div>
+            </div>
+          )}
         </div>
+      )}
+
+      {addPosition && (
+        <AddLivePlayerSheet
+          position={addPosition}
+          market={live.players}
+          ownedIds={ordered.map((p) => p.league_player_id)}
+          remaining={remaining}
+          marketOpen={live.league.market_open}
+          busy={busy === 'add'}
+          onPick={(player) => run('add', () => live.buy(player.id), 'Player added to your squad.')}
+          close={() => setAddPosition(undefined)}
+        />
       )}
     </>
   );
@@ -352,15 +351,6 @@ export function LiveStandings() {
       <PageTitle eyebrow="THE TABLE" title="League Standings"
         description="The race is on" />
       {live.error && <ErrorNote message={live.error} />}
-
-      {/* The demo standings open with a scoring strip that states the ranking rule.
-          Live explained it in a notice at the BOTTOM of the page, where nobody
-          reads it before interpreting the table. */}
-      <div className="scoring-strip">
-        <Trophy size={20} />
-        <strong>{t('Ranked by fantasy points')}</strong>
-        <small>{t('Equal fantasy points share a rank.')}</small>
-      </div>
 
       {ranked.length === 0 ? (
         <Empty title="No standings yet"
@@ -402,10 +392,6 @@ export function LiveStandings() {
           </table>
         </div>
       )}
-
-      <p className="notice">
-        {t('The table is ranked by fantasy points. Head-to-head results are not part of the ranking.')}
-      </p>
     </>
   );
 }

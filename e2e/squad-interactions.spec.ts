@@ -16,7 +16,7 @@ test('edit squad opens player details and confirms a same-position replacement',
   await sheet.getByRole('button',{name:'Confirm replacement'}).click();
   await expect(sheet).toHaveCount(0);await expect(page.getByText('Transfer confirmed.')).toBeVisible();
   const squad=(await state(page)).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1');expect(squad.playerIds).toHaveLength(15);expect(squad.playerIds).toContain('p17');expect(squad.playerIds).not.toContain('p15');expect(squad.captainId).toBeUndefined();expect(squad.confirmed).toBe(false);
-  await page.reload();await expect(page.locator('.roster-row').filter({hasText:'Mazen Wael'})).toBeVisible();
+  await page.reload();await expect(page.locator('.pitch-player[aria-label="Player details: Mazen Wael"]')).toBeVisible();
 });
 
 test('replacement respects budget and closed market without changing the squad',async({page})=>{
@@ -42,12 +42,30 @@ test('swap starter and bench players in either direction and persist lineup',asy
 });
 
 test('corrective swaps fix formation mismatches and can be cancelled',async({page})=>{
-  await fresh(page,'/squad');await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();await page.getByRole('dialog').getByRole('button',{name:'Make substitution'}).click();
-  await page.getByRole('button',{name:'Cancel swap'}).first().click();expect((await state(page)).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1').playerIds[10]).toBe('p22');
-  await page.getByLabel('Formation').selectOption('4-4-2');
-  await expect(page.getByText('Starting positions do not match the selected formation. Swap starters and substitutes to fix it.')).toBeVisible();
-  await page.locator('.pitch-player[aria-label="Player details: Ramy Fathy"]').click();await page.getByRole('dialog').getByRole('button',{name:'Make substitution'}).click();await page.locator('.bench-player[aria-label="Select swap player: Tamer Hany"]').click();
-  await expect(page.getByText('Squad is valid')).toBeVisible();await expect(page.getByRole('button',{name:'Confirm lineup'})).toBeEnabled();
+  await fresh(page,'/squad');
+  const team=async()=> (await state(page)).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1');
+
+  // A swap can be started and cancelled without changing the squad.
+  await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();
+  await page.getByRole('dialog').getByRole('button',{name:'Make substitution'}).click();
+  await page.getByRole('button',{name:'Cancel swap'}).first().click();
+  expect((await team()).playerIds[10]).toBe('p22');
+
+  // Swapping a starter for a substitute that breaks the shape surfaces the mismatch.
+  // The formation select was removed from this tab on request, so a swap is now the
+  // only way a user can invalidate the lineup from here - which is what this covers.
+  const swap=async()=>{
+    await page.locator('.pitch-player[aria-label="Player details: Ramy Fathy"]').click();
+    await page.getByRole('dialog').getByRole('button',{name:'Make substitution'}).click();
+    await page.locator('.bench-player[aria-label="Select swap player: Tamer Hany"]').click();
+  };
+  await swap();
+  await expect(page.getByText(/Starting positions do not match the selected formation/i)).toBeVisible();
+
+  // Swapping back restores a valid squad.
+  await swap();
+  await expect(page.getByText('Squad is valid')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Confirm lineup'})).toBeEnabled();
 });
 
 test('player sheet captain controls, escape and Arabic mobile layout work',async({page})=>{
