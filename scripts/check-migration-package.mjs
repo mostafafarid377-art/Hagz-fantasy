@@ -42,7 +42,7 @@ const DESIGN_MIGRATIONS = {
   '017_squad_captaincy.sql': 'd260c92899e425eccec8a501ab63e554c0588276c3539e464b5ba1ec7ca515fa',
   '018_live_match_market_workflow.sql': '1fc188f00962a3ea2fd8dd70357133d75c9c9907f94792f54eb062c13d5edc76',
   '019_optional_match_gameweek.sql': 'c3021373a0028be016a88522c8905e53b815b14e2a0749c4ee51d4d12c7bbf15',
-  '020_leader_match_result_finalization.sql': '0d99953a7ddc46ad63c358340eb2b8ac83b7f8a001355f747315cefe4f039c02',
+  '020_leader_match_result_finalization.sql': '8dd3a1756902e995c84bf5a65d16c592988b5e468b331f5d68581a78aef19e4d',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
