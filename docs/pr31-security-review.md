@@ -1,6 +1,6 @@
 # PR 31 independent security review
 
-**Verdict: NOT safe to execute migration/owner step 018 or proceed to hosted testing of this implementation. Keep the PR in draft.** The tests below are local PGlite or mocked browser tests, not hosted Supabase tests. Nothing in this review executes hosted SQL, changes production, or modifies migrations 001–015.
+**Verdict: NOT safe to execute migration/owner step 018 or proceed to hosted testing of this implementation. Keep the PR in draft.** The complete proposed enforcement chain, atomic lifecycle, trust assumptions and real multi-session test plan are in [`pr31-trusted-image-architecture.md`](pr31-trusted-image-architecture.md); the proposal is not implemented. The tests below are local PGlite or mocked browser tests, not hosted Supabase tests. Nothing in this review executes hosted SQL, changes production, or modifies migrations 001–015.
 
 ## Findings
 
@@ -48,8 +48,8 @@ Before remediation, `supabase/migrations/20261115000018_player_image_uploads.sql
 
 ## Local test evidence and limits
 
-- `supabase/design/tests/player-image-security.test.mjs`: PGlite with mocked Supabase auth, Storage tables and stand-in policies; tests local leader/manager/outsider authorization, same-league other-manager denial, forged paths, replacement/removal, and two explicitly marked reproductions of privacy and stale-URL findings. Passing finding tests demonstrate bugs; they do **not** mean the implementation is secure.
-- `src/pages/live/imageUploadFlows.test.tsx`: mocked component/service tests for manager submission, leader approval and management upload, plus the approval/removal ordering finding. No actual Storage upload.
+- `supabase/design/tests/player-image-security.test.mjs`: PGlite with mocked Supabase auth, Storage tables and stand-in policies; tests local leader/manager/outsider authorization, same-league other-manager denial, forged paths, replacement/removal, a privacy-bypass denial regression, and an explicitly marked reproduction of the stale-URL finding. Passing finding tests demonstrate bugs; they do **not** mean the implementation is secure.
+- `src/pages/live/imageUploadFlows.test.tsx`: mocked component/service tests for manager submission, leader approval and management upload, plus mocked approval/removal and failure-retry checks. No actual Storage upload.
 - `src/hooks/useImageSource.test.tsx`: mocked signed URL/fallback/remount and 45-minute renewal behavior. No hosted expiration, revocation, login transition or second-device test.
 - `src/services/storage.test.ts` and `src/services/image.test.ts`: mocks cover progress/failure and Demo validation/IndexedDB; no trusted backend byte validation.
 - The full unit, typecheck, build, migration-check and database design verification results are recorded in the PR update. Seven database tests are intentionally skipped by the existing suite.
@@ -84,7 +84,7 @@ The migration now creates the profile with no image, links it to the exact appro
 
 ### Partial approval improvement (HIGH still open)
 
-The review RPC now accepts the reserved `__remove__` decision to publish neither the pending path nor its legacy URL in the approval transaction. The approval UI sends this when the leader chooses removal, a replacement file, or a different URL, before attempting any later image update. A disposable PGlite test verifies the resulting published record has no old path or URL and that a different member cannot read the removed suggestion image. A mocked UI test checks the decision is sent; another injects an upload failure and checks retry does not re-approve. These are partial mitigations, not proof of the full fix: replacement still uploads directly without trusted validation; the final replacement is not part of the approval transaction; the service and all concurrent editor/approval interleavings are not tested. An in-flight suggestion upload can still race an approval that chooses the default image. The stale URL compare-and-swap weakness also remains. Do not enable or deploy.
+The review RPC now accepts the reserved `__remove__` decision to publish neither the pending path nor its legacy URL in the approval transaction. The approval UI sends this when the leader chooses removal, a replacement file, or a different URL, before attempting any later image update. A disposable PGlite test verifies the resulting published record has no old path or URL and that a different member cannot read the removed suggestion image. A mocked UI test checks the decision is sent; another injects an upload failure and checks retry does not re-approve. These are partial mitigations, not proof of the full fix: replacement still uploads directly without trusted validation; the final replacement is not part of the approval transaction; the service and all concurrent editor/approval interleavings are not tested. The later reservation/approval coordination below blocks an active reservation, but a completed change can still race a stale approval selection. The stale URL compare-and-swap weakness also remains. Do not enable or deploy.
 
 ### Reservation/approval coordination (partial, local only)
 
