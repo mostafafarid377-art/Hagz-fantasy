@@ -44,6 +44,12 @@ describe('Live market player dialog', () => {
     const dialog = await screen.findByRole('dialog') as HTMLDialogElement;
     expect(dialog.open).toBe(true);
     expect(showModal).toHaveBeenCalledOnce();
+    const form = dialog.querySelector<HTMLFormElement>('#player-editor-form');
+    const actionBar = dialog.querySelector('.player-editor-actions');
+    expect(form).not.toBeNull();
+    expect(actionBar?.parentElement).toBe(dialog);
+    expect(form?.contains(actionBar)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Save' }).getAttribute('form')).toBe('player-editor-form');
 
     fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'New Market Player' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));

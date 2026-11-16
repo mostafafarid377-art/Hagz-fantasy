@@ -300,7 +300,7 @@ function PlayerDialog({ player, onClose, onSaved, onDeleted }: {
       <button type="button" className="sheet-close" aria-label={t('Close')} onClick={onClose}><X size={20} /></button>
       <div className="eyebrow">{t('THE MARKET')}</div>
       <h2 id="player-dialog-title">{t(player ? 'Edit player' : 'Add player')}</h2>
-      <form className="form-panel player-editor-form" onSubmit={save}>
+      <form id="player-editor-form" className="form-panel player-editor-form" onSubmit={save}>
         <label>{t('Player name')}
           <input required minLength={2} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
         </label>
@@ -328,11 +328,11 @@ function PlayerDialog({ player, onClose, onSaved, onDeleted }: {
           <div className="button-row"><button className="button button-danger" type="button" disabled={busy} onClick={() => void removeFromMarket()}>{busy ? t('Deleting…') : t('Confirm delete')}</button>
             <button className="button button-outline" type="button" disabled={busy} onClick={() => setConfirmDelete(false)}>{t('Cancel')}</button></div>
         </div>}
-        <div className="button-row player-editor-actions">
-          <button className="button sheet-primary" disabled={busy || !name.trim()}>{busy ? t('Saving…') : t('Save')}</button>
-          {player?.active && <button className="button button-danger" type="button" disabled={busy} onClick={() => setConfirmDelete(true)}>{t('Delete player')}</button>}
-        </div>
       </form>
+      <div className="button-row player-editor-actions">
+        <button className="button sheet-primary" type="submit" form="player-editor-form" disabled={busy || !name.trim()}>{busy ? t('Saving…') : t('Save')}</button>
+        {player?.active && <button className="button button-danger" type="button" disabled={busy} onClick={() => setConfirmDelete(true)}>{t('Delete player')}</button>}
+      </div>
     </dialog>
   );
 }
