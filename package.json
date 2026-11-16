@@ -18,7 +18,8 @@
     "migrations:promote": "node scripts/promote-migrations.mjs",
     "test:api": "node --test supabase/design/tests/phase3-api.test.mjs",
     "verify:all": "npm run typecheck && npm test && npm run test:image:server && npm run check:migrations && npm run test:db:design && npm run build",
-    "test:image:server": "node --test server/image/*.test.mjs"
+    "test:image:server": "node --test server/image/*.test.mjs",
+    "test:postgres:security": "node --test supabase/design/tests/postgres/*.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",
@@ -48,6 +49,7 @@
     "autoprefixer": "^10.4.20",
     "fake-indexeddb": "^6.2.8",
     "jsdom": "^31.0.1",
+    "pg": "^8.23.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
