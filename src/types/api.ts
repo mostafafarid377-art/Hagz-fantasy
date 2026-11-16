@@ -97,6 +97,40 @@ export interface ApiMatchEvent {
   quantity: number;
   player_id: string;
   player_name: string | null;
+  related_player_id?: string | null;
+}
+
+export interface ApiMatchLineupPlayer {
+  player_id: string;
+  name: string;
+  selection: 'starter' | 'substitute';
+  actual_position: Position;
+}
+
+export interface ApiMatchSubmission {
+  id: string;
+  kind: 'lineup' | 'result';
+  submitted_by: string;
+  submitted_at: string;
+  approval: null | {
+    id: string;
+    decision: 'approved' | 'rejected';
+    reason: string | null;
+    reviewed_by: string;
+    reviewed_at: string;
+  };
+}
+
+export interface ApiMatchRevision {
+  revision_id: string;
+  version: number;
+  state: 'draft' | 'submitted' | 'approved' | 'rejected' | 'corrected';
+  team_a_score: number | null;
+  team_b_score: number | null;
+  submissions: ApiMatchSubmission[];
+  events: ApiMatchEvent[];
+  correction: null | { reason: string; actor_id: string; created_at: string };
+  lineups: Array<{ team_id: string; players: ApiMatchLineupPlayer[] }>;
 }
 
 export interface ApiMatch {
@@ -117,6 +151,7 @@ export interface ApiMatch {
   team_a_score: number | null;
   team_b_score: number | null;
   events: ApiMatchEvent[];
+  history: ApiMatchRevision[];
 }
 
 export interface ApiStanding {

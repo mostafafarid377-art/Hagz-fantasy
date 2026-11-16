@@ -40,6 +40,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DESIGN_MIGRATIONS = {
   // Forward-only captaincy persistence and partial-squad selection support.
   '017_squad_captaincy.sql': 'd260c92899e425eccec8a501ab63e554c0588276c3539e464b5ba1ec7ca515fa',
+  '018_live_match_market_workflow.sql': '1fc188f00962a3ea2fd8dd70357133d75c9c9907f94792f54eb062c13d5edc76',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -88,6 +89,7 @@ const PACKAGE = [
   ['20261115000015_actor_identity_claim_fallback.sql', 'design/migrations/015_actor_identity_claim_fallback.sql'],
   ['20261115000016_league_archive.sql', 'design/migrations/016_league_archive.sql'],
   ['20261115000017_squad_captaincy.sql', 'design/migrations/017_squad_captaincy.sql'],
+  ['20261115000018_live_match_market_workflow.sql', 'design/migrations/018_live_match_market_workflow.sql'],
 ];
 
 /**
@@ -108,6 +110,7 @@ const POST_VERIFICATION_REPAIRS = [
   // migration, not because it needs to escape the assertions.
   '20261115000016_league_archive.sql',
   '20261115000017_squad_captaincy.sql',
+  '20261115000018_live_match_market_workflow.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -268,6 +271,24 @@ if (!(await exists(execDir))) {
       else if (!hasScopedColumns) fail(`post-verification migration ${repair}`, 'captaincy columns must be added only to public.fantasy_teams');
       else if (!hasAuthenticatedOnlyRpc) fail(`post-verification migration ${repair}`, 'captaincy RPC must be revoked from PUBLIC/anon/authenticated then granted only to authenticated');
       else ok(`post-verification migration ${repair} is scoped`, 'team columns + authenticated-only RPC; no table grants or policy changes');
+    } else if (repair === '20261115000018_live_match_market_workflow.sql') {
+      const hasMarketEligibility = /eligibility_kind\s+in\s*\('registered',\s*'temporary',\s*'market'\)/i.test(stripped);
+      const validatesMarketLeagueAndActive = /p\.league_id=l and p\.player_id=new\.player_id and p\.active/i.test(stripped);
+      const validatesOnSubmit = /mp\.league_id=p\.league_id and mp\.player_id=p\.player_id and mp\.active/i.test(stripped);
+      const validatesActiveOrganizer = /lm\.status='active'/i.test(stripped);
+      const validatesVenue = /p_venue is null or length\(btrim\(p_venue\)\)=0/i.test(stripped);
+      const clientAssignmentPathIsMarketOnly = /new lineup assignments must come from this league market/i.test(stripped);
+      const deletesOnlyDraftLineup = /delete from public\.real_match_lineup_players where league_id=p_league and revision_id=p_revision and lineup_id=v_lineup\.id/i.test(stripped);
+      const alterStatements = stripped.match(/^\s*alter\s+table[^;]+;/gim) ?? [];
+      const scopedEligibilityAlter = alterStatements.length === 1 && /alter table public\.real_match_lineup_players\s+drop constraint real_match_lineup_players_eligibility_kind_check,\s*add constraint real_match_lineup_players_eligibility_kind_check/i.test(alterStatements[0]);
+      const forbidden = /^\s*(drop\s+(function|policy|table)|create\s+policy|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema)|truncate)/im.exec(stripped);
+      if (forbidden) fail(`post-verification migration ${repair}`, `forbidden destructive or privilege DDL: ${forbidden[0].trim()}`);
+      else if (!hasMarketEligibility || !validatesMarketLeagueAndActive || !validatesOnSubmit) fail(`post-verification migration ${repair}`, 'Market eligibility must be same-league and active at lineup write and submission');
+      else if (!validatesActiveOrganizer || !validatesVenue) fail(`post-verification migration ${repair}`, 'Match scheduling must reject inactive organizers and blank venues');
+      else if (!clientAssignmentPathIsMarketOnly) fail(`post-verification migration ${repair}`, 'The client lineup RPC must not accept legacy non-Market eligibility modes');
+      else if (!deletesOnlyDraftLineup) fail(`post-verification migration ${repair}`, 'Lineup replacement may delete only the editable draft side rows');
+      else if (!scopedEligibilityAlter) fail(`post-verification migration ${repair}`, 'Only the lineup eligibility-kind constraint may be expanded');
+      else ok(`post-verification migration ${repair} is scoped`, 'same-league Market eligibility; existing authenticated RPC surface and grants retained');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {

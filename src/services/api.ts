@@ -282,7 +282,7 @@ export const openRevision = (leagueId: string, matchId: string) =>
 
 export const setMatchLineup = (leagueId: string, revisionId: string, teamId: string, players: Array<{
   player_id: string; selection: 'starter' | 'substitute'; actual_position: 'GK' | 'DEF' | 'MID' | 'FWD';
-  eligibility_kind?: 'registered' | 'temporary'; eligibility_evidence?: Record<string, unknown>;
+  eligibility_kind?: 'registered' | 'temporary' | 'market'; eligibility_evidence?: Record<string, unknown>;
 }>) => call<{ lineup_id: string; players: number }>(
   'ff_match_set_lineup', { p_league: leagueId, p_revision: revisionId, p_team: teamId, p_players: players });
 
