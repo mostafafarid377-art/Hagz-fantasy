@@ -208,7 +208,10 @@ export function LiveDashboard() {
             <span className="formation">{t('FORMATION')} <strong>{live.squad?.formation ?? '—'}</strong></span>
           </div>
           {pitchPlayers.length > 0 ? (
-            <Pitch players={pitchPlayers} formation={(live.squad?.formation ?? '4-3-3') as Formation} />
+            // showPoints is off: a live squad player carries no points field, so the
+            // pitch would print "0 pts" for everyone, which reads as a real zero.
+            <Pitch players={pitchPlayers} formation={(live.squad?.formation ?? '4-3-3') as Formation}
+              showPoints={false} />
           ) : (
             <Empty title="Your squad is empty"
               description="Add players from the league market to build your 15."

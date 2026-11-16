@@ -184,9 +184,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             captainId={captainId} viceCaptainId={viceId}
             onAddPosition={() => navigate('/market')}
             squadSlots={!hasSquad || builder}
-            canAddStarting={builder || ordered.length < 11} />
+            canAddStarting={builder || ordered.length < 11}
+            showPoints={false} />
 
-          <div className="bench-strip">
+          {!builder && <div className="bench-strip">
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
             <div className="bench-players">
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
@@ -198,7 +199,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
                 </div>
               ))}
             </div>
-          </div>
+          </div>}
         </div>
       </div>
 

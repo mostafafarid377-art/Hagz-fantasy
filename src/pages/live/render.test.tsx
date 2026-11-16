@@ -80,7 +80,8 @@ describe('demo screens still render', () => {
     // Seeded demo data must render: the welcome heading is the demo user, and
     // the squad/points cards come from the demo store, not from the network.
     expect(await screen.findByText(/Welcome back/i)).toBeTruthy();
-    expect(screen.getByText(/TOTAL POINTS/i)).toBeTruthy();
+    // The first card reports the LAST GAMEWEEK, not a season total.
+    expect(screen.getByText(/LAST GAME POINTS/i)).toBeTruthy();
     expect(screen.getByText(/SQUAD VALUE/i)).toBeTruthy();
     // The demo is explicitly labelled as static data, which must not regress.
     expect(screen.getByText(/static demo data/i)).toBeTruthy();
