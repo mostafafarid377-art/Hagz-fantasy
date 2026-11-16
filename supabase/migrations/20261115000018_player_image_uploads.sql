@@ -35,6 +35,11 @@ create function public.ff_image_reserve(p_league uuid, p_kind text, p_target uui
 returns jsonb language plpgsql security definer set search_path = pg_catalog, ff_private as $$
 declare v_path text;
 begin
+  -- Serialize a suggestion upload reservation with approval of the same row.
+  -- Recheck authorization after taking the lock: approval may have won first.
+  if p_kind = 'suggestion' then
+    perform 1 from public.player_suggestions where league_id=p_league and id=p_target for update;
+  end if;
   if not ff_private.image_target_allowed(p_league,p_kind,p_target) then
     raise exception 'Not authorized to manage this image.' using errcode='42501';
   end if;
@@ -92,6 +97,30 @@ create trigger image_reference_guard before insert or update of image_path on pu
 for each row execute function ff_private.guard_player_image_reference();
 create trigger image_reference_guard before insert or update of image_path on public.player_suggestions
 for each row execute function ff_private.guard_player_image_reference();
+
+-- Cancel an unbound reservation without deleting bytes. The shared row lock
+-- ensures approval or attachment cannot race a cancellation for a suggestion.
+create function public.ff_image_cancel(p_league uuid, p_kind text, p_target uuid, p_path text)
+returns void language plpgsql security definer set search_path = pg_catalog, ff_private as $$
+begin
+  if p_kind='suggestion' then
+    perform 1 from public.player_suggestions where league_id=p_league and id=p_target for update;
+  elsif p_kind='player' then
+    perform 1 from public.player_profiles where league_id=p_league and id=p_target for update;
+  else
+    raise exception 'Invalid image target.' using errcode='42501';
+  end if;
+  if not ff_private.image_target_allowed(p_league,p_kind,p_target) then
+    raise exception 'Not authorized to manage this image.' using errcode='42501';
+  end if;
+  update ff_private.image_upload_reservations set state='retired', expires_at=clock_timestamp()+interval '1 hour'
+    where object_name=p_path and league_id=p_league and target_kind=p_kind and target_id=p_target
+      and actor_id=ff_private.current_actor_id() and state='staged';
+  if not found then raise exception 'Reservation is no longer staged.' using errcode='23514'; end if;
+end $$;
+alter function public.ff_image_cancel(uuid,text,uuid,text) owner to ff_migration_owner;
+revoke all on function public.ff_image_cancel(uuid,text,uuid,text) from public,anon;
+grant execute on function public.ff_image_cancel(uuid,text,uuid,text) to authenticated;
 
 -- Compare-and-swap protects concurrent edits from silently replacing each other.
 -- A NULL path explicitly removes the picture; it never deletes referenced objects.
@@ -182,6 +211,14 @@ begin
     perform ff_private.audit(p_league, 'suggestion_rejected', 'player_suggestion', s.id,
       null, btrim(p_reason));
     return jsonb_build_object('id', s.id, 'status', 'rejected', 'reason', btrim(p_reason));
+  end if;
+
+  -- An author may be replacing the pending image. Never publish the prior
+  -- image while that replacement is still capable of being attached.
+  if exists (select 1 from ff_private.image_upload_reservations r
+      where r.league_id=p_league and r.target_kind='suggestion' and r.target_id=s.id
+        and r.state='staged' and r.expires_at > clock_timestamp()) then
+    raise exception 'Suggestion image upload is in progress; retry after it finishes.' using errcode='40001';
   end if;
 
   if p_price is null or p_price <= 0 then raise exception 'approved player needs a positive price' using errcode = '23514'; end if;

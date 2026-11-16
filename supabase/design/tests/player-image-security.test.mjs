@@ -158,3 +158,31 @@ test('approval with removal also drops a legacy URL without any uploaded path', 
   const profile=(await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id);
   assert.equal(profile.image_path,null); assert.equal(profile.image_url,null);
 });
+
+test('an in-flight suggestion upload blocks approval until attached or cancelled', async () => {
+  const pending=await rpc(bob,'ff_suggestion_submit',league.id,'Concurrent draft','MID');
+  const first=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png')).path;
+  await insert(bob,first); await rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,null,first);
+  const next=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png')).path;
+  await denied(()=>rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,null),'40001');
+  await denied(()=>rpc(alice,'ff_image_cancel',league.id,'suggestion',pending.id,next));
+  await insert(bob,next);
+  await rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,first,next);
+  const approved=await rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,null);
+  const profile=(await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id);
+  assert.equal(profile.image_path,next);
+  await denied(()=>rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png'));
+  await denied(()=>rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,next,first));
+});
+
+test('a failed suggestion upload can be cancelled and retried before approval', async () => {
+  const pending=await rpc(bob,'ff_suggestion_submit',league.id,'Retry draft','MID');
+  const abandoned=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png')).path;
+  await denied(()=>rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,null),'40001');
+  await rpc(bob,'ff_image_cancel',league.id,'suggestion',pending.id,abandoned);
+  await denied(()=>rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,null,abandoned));
+  const retry=(await rpc(bob,'ff_image_reserve',league.id,'suggestion',pending.id,'png')).path;
+  await insert(bob,retry); await rpc(bob,'ff_image_set',league.id,'suggestion',pending.id,null,retry);
+  const approved=await rpc(alice,'ff_suggestion_review',league.id,pending.id,'approved',null,1000000,75,null);
+  assert.equal((await rpc(alice,'ff_market_players',league.id)).find(p=>p.id===approved.league_player_id).image_path,retry);
+});

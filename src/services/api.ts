@@ -162,6 +162,8 @@ export const upsertMarketPlayer = (leagueId: string, input: UpsertPlayerInput) =
 
 export const reserveImage = (leagueId: string, kind: 'player' | 'suggestion', target: string, extension: string) =>
   call<{ path: string }>('ff_image_reserve', { p_league: leagueId, p_kind: kind, p_target: target, p_extension: extension });
+export const cancelImage = (leagueId: string, kind: 'player' | 'suggestion', target: string, path: string) =>
+  call<void>('ff_image_cancel', { p_league: leagueId, p_kind: kind, p_target: target, p_path: path });
 export const setImage = (leagueId: string, kind: 'player' | 'suggestion', target: string, expected: string | null, path: string | null) =>
   call<{ path: string | null; previous_path: string | null }>('ff_image_set', { p_league: leagueId, p_kind: kind, p_target: target, p_expected: expected, p_path: path });
 

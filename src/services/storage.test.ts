@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const f = vi.hoisted(() => ({ reserve: vi.fn(), set: vi.fn(), validate: vi.fn(), signed: vi.fn(), remove: vi.fn(), session: vi.fn() }));
-vi.mock('./api', () => ({ reserveImage: f.reserve, setImage: f.set }));
+const f = vi.hoisted(() => ({ reserve: vi.fn(), cancel: vi.fn(), set: vi.fn(), validate: vi.fn(), signed: vi.fn(), remove: vi.fn(), session: vi.fn() }));
+vi.mock('./api', () => ({ reserveImage: f.reserve, cancelImage: f.cancel, setImage: f.set }));
 vi.mock('./image', () => ({ validateImage: f.validate }));
 vi.mock('../lib/supabase', () => ({
   PLAYER_IMAGES_BUCKET: 'player-images', getPublishableKey: () => 'publishable-key', getStorageBaseUrl: () => 'https://example.test/storage/v1',
@@ -20,7 +20,7 @@ class MockXHR {
 }
 beforeEach(() => {
   vi.stubGlobal('XMLHttpRequest', MockXHR); MockXHR.status=200;
-  f.reserve.mockResolvedValue({ path: 'new-path' }); f.set.mockResolvedValue({ path: 'new-path' });
+  f.reserve.mockResolvedValue({ path: 'new-path' }); f.cancel.mockResolvedValue(undefined); f.set.mockResolvedValue({ path: 'new-path' });
   f.validate.mockResolvedValue(undefined); f.signed.mockResolvedValue({ data: { signedUrl: 'https://example.test/upload' }, error: null });
   f.remove.mockResolvedValue({ error: null }); f.session.mockResolvedValue({ data: { session: { access_token: 'token' } } });
 });
@@ -42,7 +42,12 @@ describe('authenticated private image uploads', () => {
   it('does not bind an object on upload failure and attempts to clean the draft', async () => {
     MockXHR.status=403;
     await expect(uploadPlayerImage(target,file(),vi.fn())).rejects.toThrow('Image upload was rejected');
-    expect(f.set).not.toHaveBeenCalled(); expect(f.remove).toHaveBeenCalledWith(['new-path']);
+    expect(f.set).not.toHaveBeenCalled(); expect(f.cancel).toHaveBeenCalledWith('league','player','player','new-path'); expect(f.remove).toHaveBeenCalledWith(['new-path']);
+  });
+  it('does not delete a possibly bound object if cancellation fails', async () => {
+    MockXHR.status=403; f.cancel.mockRejectedValueOnce(new Error('already bound'));
+    await expect(uploadPlayerImage(target,file(),vi.fn())).rejects.toThrow('Image upload was rejected');
+    expect(f.cancel).toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
   });
   it('unlinks the record before attempting safe orphan cleanup', async () => {
     await removePlayerImage(target);

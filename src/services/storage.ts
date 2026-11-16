@@ -1,7 +1,7 @@
 // Authenticated uploads to the private player-images bucket. A server-issued
 // reservation restricts each immutable object to one authorized player/suggestion.
 import { getPublishableKey, getStorageBaseUrl, getSupabase, PLAYER_IMAGES_BUCKET } from '../lib/supabase';
-import { reserveImage, setImage } from './api';
+import { cancelImage, reserveImage, setImage } from './api';
 import { validateImage } from './image';
 import { imageSignature, MAX_UPLOAD_BYTES, validImageFile } from '../utils/image';
 
@@ -50,7 +50,11 @@ export async function uploadPlayerImage(target: Target, file: File, onProgress: 
     await uploadAuthenticated(objectUrl, file, key, session.session.access_token, onProgress);
     await setImage(target.leagueId, target.kind, target.targetId, target.previousPath, path);
     onProgress(100);
-  } catch (error) { await cleanup(path); throw error; }
+  } catch (error) {
+    // Cancellation only retires unbound reservations; never delete on a failed cancellation.
+    try { await cancelImage(target.leagueId, target.kind, target.targetId, path); await cleanup(path); } catch { /* An operator must clean abandoned objects. */ }
+    throw error;
+  }
   await cleanup(target.previousPath);
   return path;
 }
