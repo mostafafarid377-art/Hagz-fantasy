@@ -8,16 +8,17 @@
 // Starters are the first 11 entries of the lineup array and the bench is the last
 // 4 - the same convention ff_lineup_save() validates server-side.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Check, Shield, Trophy, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
-import { formatMoney } from '../../utils/format';
+import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
 import { formations, limits } from '../../services/rules';
+import { lastGamePointsForPlayer } from '../../services/points';
 import type { Formation, Player, Position } from '../../types';
 
 const FORMATIONS = Object.keys(formations) as Formation[];
@@ -29,9 +30,23 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const [formation, setFormation] = useState<Formation>(live.squad?.formation ?? '4-3-3');
+  const [formation, setFormation] = useState<Formation>((live.squad?.formation as Formation) ?? '4-3-3');
   const [captain, setCaptain] = useState<string | null>(live.squad?.captain_id ?? null);
   const [vice, setVice] = useState<string | null>(live.squad?.vice_captain_id ?? null);
+
+  /**
+   * useState only reads its initial value on the FIRST render, and on that render
+   * `live.squad` is still null because the RPC has not resolved. Without this the
+   * saved formation was ignored: the pitch always opened as 4-3-3 and the database's
+   * formation only appeared after a reload. Keyed on the league so switching leagues
+   * re-syncs instead of carrying the previous league's shape over.
+   */
+  useEffect(() => {
+    const saved = live.squad?.formation as Formation | undefined;
+    if (saved) setFormation(saved);
+    setCaptain(live.squad?.captain_id ?? null);
+    setVice(live.squad?.vice_captain_id ?? null);
+  }, [live.leagueId, live.squad?.formation, live.squad?.captain_id, live.squad?.vice_captain_id]);
   const [outPlayer, setOutPlayer] = useState('');
   const [inPlayer, setInPlayer] = useState('');
 
@@ -100,7 +115,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               <option value="">{t('Select a player')}</option>
               {outOptions.map((p) => (
                 <option key={p.league_player_id} value={p.league_player_id}>
-                  {p.name} · {p.position} · {formatMoney(p.price)}
+                  {p.name} · {p.position} · {formatCompactMoney(p.price)}
                 </option>
               ))}
             </select>
@@ -109,13 +124,13 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             <select value={inPlayer} onChange={(e) => setInPlayer(e.target.value)} disabled={!outgoing}>
               <option value="">{t('Select a player')}</option>
               {inOptions.map((p) => (
-                <option key={p.id} value={p.id}>{p.name} · {formatMoney(p.price)}</option>
+                <option key={p.id} value={p.id}>{p.name} · {formatCompactMoney(p.price)}</option>
               ))}
             </select>
           </label>
           {outgoing && (
             <div className="transfer-preview">
-              <span>{t('After transfer')}: {formatMoney(remaining + outgoing.price - (inOptions.find((p) => p.id === inPlayer)?.price ?? 0))}</span>
+              <span>{t('After transfer')}: {formatCompactMoney(remaining + outgoing.price - (inOptions.find((p) => p.id === inPlayer)?.price ?? 0))}</span>
             </div>
           )}
           <button className="button" disabled={!outPlayer || !inPlayer || busy === 'transfer'}
@@ -138,7 +153,12 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   // shows. Captain, vice captain and selling moved into a compact panel below the
   // pitch so no control was lost with the list.
   const hasSquad = ordered.length > 0;
-  const pitchPlayers: Player[] = ordered.map((p) => ({
+  // The pitch is the starting XI. Rendering `ordered` drew all 15 on the pitch and
+  // then drew the last 4 again in the bench strip below it, so the same players
+  // appeared twice and "11 starters / 4 substitutes" was not visible anywhere.
+  // The builder is the exception: it is where you arrange the whole squad.
+  const starters = builder ? ordered : ordered.slice(0, 11);
+  const pitchPlayers: Player[] = starters.map((p) => ({
     id: p.league_player_id,
     leagueId: '',
     name: p.name,
@@ -152,6 +172,9 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     color: '#a9b9a5',
   }));
   const captainId = ordered.find((p) => p.league_player_id === captain) ? (captain ?? undefined) : undefined;
+  /** Last-game points for a squad entry, or undefined when there is no valid score. */
+  const lastGamePointsFor = (p: { league_player_id: string }) =>
+    lastGamePointsForPlayer(live.points, p.league_player_id);
   const viceId = ordered.find((p) => p.league_player_id === vice) ? (vice ?? undefined) : undefined;
   const benchPlayers = ordered.slice(11);
 
@@ -164,12 +187,19 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           four position counts. */}
       <div className="squad-summary">
         <div><small>{t('Squad')}</small><strong>{ordered.length}<span>/15</span></strong></div>
-        <div><small>{t('Squad value')}</small><strong>{formatMoney(spent)}</strong></div>
-        <div><small>{t('Budget remaining')}</small><strong className="lime">{formatMoney(remaining)}</strong></div>
+        <div><small>{t('Squad value')}</small><strong>{formatCompactMoney(spent)}</strong></div>
+        <div><small>{t('Budget remaining')}</small><strong className="lime">{formatCompactMoney(remaining)}</strong></div>
         {(['GK', 'DEF', 'MID', 'FWD'] as Position[]).map((pos) => (
           <div key={pos}>
             <small>{pos}</small>
-            <strong>{ordered.filter((p) => p.position === pos).length}<span>/{limits[pos]}</span></strong>
+            {/* The denominator is the FORMATION's requirement for that band plus
+                the bench allowance, i.e. the squad's real capacity: 2/5/5/3. When a
+                formation asks for more in one band than the capacity allows (never
+                happens with the supported shapes) the larger number wins. */}
+            <strong>
+              {ordered.filter((p) => p.position === pos).length}
+              <span>/{Math.max(limits[pos], (formations[formation] ?? formations['4-3-3'])[pos])}</span>
+            </strong>
           </div>
         ))}
       </div>
@@ -194,12 +224,16 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             </select>
           </label>
 
+          {/* An empty squad (or the builder) shows all 15 capacity places, so every
+              position can be filled; a squad with players shows the formation's
+              starting XI. Same rule as the demo squad screen. */}
           <Pitch players={pitchPlayers} formation={formation}
             captainId={captainId} viceCaptainId={viceId}
             onAddPosition={() => navigate('/market')}
             squadSlots={!hasSquad || builder}
             canAddStarting={builder || ordered.length < 11}
-            showPoints={false} />
+            pointsFor={(p) => lastGamePointsFor({ league_player_id: p.id })}
+            pointsLabel={t('Last game points')} />
 
           {!builder && <div className="bench-strip">
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
@@ -209,7 +243,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
                 <div className="bench-player" key={p.league_player_id}>
                   <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
                   <strong>{p.name}</strong>
-                  <small>{p.position} · {formatMoney(p.price)}</small>
+                  <small>{p.position} · {formatCompactMoney(p.price)}</small>
                 </div>
               ))}
             </div>
@@ -256,7 +290,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
                 <option value="">{t('Select a player')}</option>
                 {ordered.map((p) => (
                   <option key={p.league_player_id} value={p.league_player_id}>
-                    {p.name} · {p.position} · {formatMoney(p.price)}
+                    {p.name} · {p.position} · {formatCompactMoney(p.price)}
                   </option>
                 ))}
               </select>
@@ -510,7 +544,7 @@ export function LiveStatistics() {
                   </td>
                   <td>{p.position}</td>
                   <td>{p.rating}</td>
-                  <td>{formatMoney(p.price)}</td>
+                  <td>{formatCompactMoney(p.price)}</td>
                   <td>{p.owned_by ?? 0}</td>
                 </tr>
               ))}

@@ -92,7 +92,10 @@ describe('the pitch shows last gameweek points, not season totals', () => {
 describe('the first stat card reports the last game', () => {
   it('says LAST GAME POINTS, not TOTAL POINTS', async () => {
     await mountDashboard();
-    expect(screen.getByText(/LAST GAME POINTS/i)).toBeTruthy();
+    // Scope to the stat card: the page also has a dedicated "Last game points"
+    // SECTION now, so a bare text query matches two headings.
+    const card = document.querySelector('.stat-card');
+    expect(card?.textContent).toMatch(/LAST GAME POINTS/i);
     expect(screen.queryByText(/TOTAL POINTS/i)).toBeNull();
   });
 
@@ -107,12 +110,24 @@ describe('the first stat card reports the last game', () => {
 describe('the demo gameweek data is internally consistent', () => {
   it('no player scores more in a week than across the whole season', () => {
     for (const p of demoPlayers) {
-      expect(lastGameweekPoints(p.name)).toBeLessThanOrEqual(p.points);
+      const last = lastGameweekPoints(p.name);
+      // A player with no entry has NO last-game score; only compare real values.
+      if (last === undefined) continue;
+      expect(last).toBeLessThanOrEqual(p.points);
     }
   });
 
-  it('a player with no gameweek entry reads as zero, not undefined', () => {
-    expect(lastGameweekPoints('Nobody At All')).toBe(0);
+  /**
+   * Requirement: "If a player did not participate in that match, do not reuse their
+   * previous match points. Show - when no valid score exists."
+   *
+   * This used to assert a fabricated 0, which claims the player featured and scored
+   * nothing. `undefined` lets the pitch render an explicit "-".
+   */
+  it('a player with no entry in the latest approved match has no score, not a zero', () => {
+    expect(lastGameweekPoints('Nobody At All')).toBeUndefined();
+    // Team totals still read as zero: the team exists and simply has no figure, which
+    // is not the same claim as "this player played".
     expect(lastGameweekTeamPoints('No Such Team')).toBe(0);
   });
 });

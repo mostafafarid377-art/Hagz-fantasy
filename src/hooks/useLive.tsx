@@ -14,6 +14,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import * as api from '../services/api';
+import { leaguePoints, EMPTY_POINTS, type PointsSnapshot } from '../services/points';
 import { ApiError } from '../services/api';
 import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion } from '../types/api';
 import type { Bootstrap } from '../services/api';
@@ -32,6 +33,13 @@ export interface LiveState {
   matches: ApiMatch[];
   standings: ApiStanding[];
   notifications: ApiNotification[];
+  /**
+   * Official points, kept as TWO separate figures. `lastGame` is the latest
+   * approved match only; `season` is the approved season total. The UI must use the
+   * matching one and never substitute. See services/points.ts for why a deployment
+   * without the read API reports 'unavailable' instead of zeros.
+   */
+  points: PointsSnapshot;
   error: string | null;
   /**
    * Reads that failed while the rest of the screen loaded. Non-empty means the
@@ -82,6 +90,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
   const [state, setState] = useState<LiveState>({
     loading: true, leagueId: null, leagues: [], members: [], players: [], squad: null,
     suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+    points: EMPTY_POINTS,
     error: null, partialFailures: [],
   });
   const generation = useRef(0);
@@ -101,6 +110,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
         commit({
           loading: false, leagueId: null, leagues: usable, members: [], players: [], squad: null,
           suggestions: [], gameweeks: [], matches: [], standings: [], notifications: [],
+          points: EMPTY_POINTS,
           error: null, partialFailures: [],
         });
         return;
@@ -137,11 +147,27 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       if (mine !== generation.current) return;
       commit({
         loading: false, leagueId: chosen, leagues: usable, members, players, squad,
-        suggestions, gameweeks, matches, standings, notifications,
+        suggestions, gameweeks, matches, standings, notifications, points: EMPTY_POINTS,
         error: null,
         partialFailures: failures,
       });
       try { localStorage.setItem(LEAGUE_KEY, chosen); } catch { /* private mode */ }
+
+      // Points load AFTER the rest of the screen. They are the one read that may be
+      // slow or absent on a deployment without official scoring, and the dashboard
+      // must not sit on a spinner waiting for them. A failure here never clears the
+      // data already rendered: it only marks the points figures unavailable.
+      try {
+        const snapshot = await leaguePoints(chosen);
+        if (mine !== generation.current) return;
+        commit((current) => ({ ...current, points: snapshot }));
+      } catch (error) {
+        if (mine !== generation.current) return;
+        commit((current) => ({
+          ...current,
+          points: { ...EMPTY_POINTS, error: error instanceof Error ? error.message : 'points unavailable' },
+        }));
+      }
     } catch (error) {
       if (mine !== generation.current) return;
       commit((s) => ({ ...s, loading: false, error: message(error) }));
