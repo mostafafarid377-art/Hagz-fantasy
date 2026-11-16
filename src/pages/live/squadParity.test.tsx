@@ -143,11 +143,19 @@ describe('there is no squad list under the pitch', () => {
   });
 });
 
-describe('captaincy and selling survive the roster removal', () => {
-  it('still offers captain and vice captain controls', async () => {
+describe('formation and captaincy are not on the squad tab', () => {
+  /**
+   * Changed on request: "Remove formation and captaincy from squad tab."
+   *
+   * The demo squad tab has neither, and the pitch already communicates the shape and
+   * the C / VC badges. What must NOT happen is losing the information itself, so the
+   * badges still render from whatever the server stored - only the two selects are
+   * gone. Selling stays: it cannot be expressed on a pitch.
+   */
+  it('offers no captain or vice captain selects', async () => {
     await mountLiveSquad();
-    expect(screen.getByLabelText('Captain')).toBeTruthy();
-    expect(screen.getByLabelText('Vice captain')).toBeTruthy();
+    expect(screen.queryByLabelText('Captain')).toBeNull();
+    expect(screen.queryByLabelText('Vice captain')).toBeNull();
   });
 
   it('still offers a way to sell a player', async () => {

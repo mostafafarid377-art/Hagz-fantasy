@@ -112,9 +112,11 @@ test('player photos appear in profile, lineup, bench and transfers with fallback
   await role(page,'manager');await page.goto('/market');await page.getByLabel('Search players').fill('Omar Khaled');await expect(page.locator('.player-card img')).toBeVisible();
   await page.goto('/players/p1');await expect(page.locator('.profile-hero .avatar img')).toBeVisible();
   await page.goto('/squad-builder');await expect(page.locator('.pitch-player[aria-label="Player details: Omar Khaled"] img')).toBeVisible();
-  await expect(page.locator('.roster-row').filter({hasText:'Omar Khaled'}).locator('img')).toBeVisible();
-  await expect(page.locator('.roster-row').filter({hasText:'Samy Ibrahim'}).locator('img')).toBeVisible();
-  await expect(page.locator('.roster-row').filter({hasText:'Youssef Adel'}).locator('.avatar span')).toHaveText('YA');
+  // The roster list was removed from the builder, so the images are checked on the
+  // PITCH, which is where those players are rendered now.
+  await expect(page.locator('.pitch-player[aria-label="Player details: Omar Khaled"] img')).toBeVisible();
+  await expect(page.locator('.pitch-player[aria-label="Player details: Samy Ibrahim"] img')).toBeVisible();
+  await expect(page.locator('.pitch-player[aria-label="Player details: Youssef Adel"] .avatar span')).toHaveText('YA');
   await page.goto('/transfers');await expect(page.locator('.suggestion-row').filter({hasText:'Omar Khaled'}).locator('img')).toBeVisible();
   await page.getByLabel('Player to transfer out').selectOption('p1');await expect(page.locator('.transfer-person').filter({hasText:'Omar Khaled'}).locator('img')).toBeVisible();
 });
@@ -168,10 +170,13 @@ test('browser storage failure is surfaced instead of reporting a saved suggestio
 
 test('all formations preserve the squad, and captain and vice-captain remain distinct', async ({page})=>{
   await fresh(page); await page.goto('/squad-builder');
-  const originals=await page.locator('.roster-row strong').allTextContents();
+  // The roster list was removed from the builder, so "the squad is preserved" is read
+  // off the pitch instead: changing the formation redraws the shape but must never add
+  // or drop a squad member.
+  const originals=await page.locator('.pitch-player strong').allTextContents();
   for(const f of ['4-3-3','4-4-2','3-5-2','3-4-3','4-5-1','5-3-2','5-4-1']){
     await page.getByLabel('Formation').selectOption(f); await expect(page.getByLabel('Formation')).toHaveValue(f);
-    expect(await page.locator('.roster-row strong').allTextContents()).toEqual(originals);
+    expect((await page.locator('.pitch-player strong').allTextContents()).sort()).toEqual([...originals].sort());
   }
   await page.getByLabel('Formation').selectOption('4-3-3');
   await page.getByLabel('Set captain: Hassan Magdy').click(); await expect(page.getByText('Select a vice captain from your squad.')).toBeVisible();

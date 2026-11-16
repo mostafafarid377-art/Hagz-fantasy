@@ -114,9 +114,10 @@ async function mountLive(which: 'fixtures' | 'standings' | 'matchcenter' | 'noti
 }
 
 describe('standings look like the demo standings', () => {
-  it('opens with the scoring strip that states the ranking rule', async () => {
+  it('no longer shows the scoring strip above the table', async () => {
+    // Removed on request (it was one of the two circled annotations).
     await mountLive('standings');
-    expect(document.querySelector('.scoring-strip')).toBeTruthy();
+    expect(document.querySelector('.scoring-strip')).toBeNull();
   });
 
   it('puts the team and its manager in one cell, like the demo table', async () => {

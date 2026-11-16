@@ -15,12 +15,28 @@
  *     separators and forced a trailing ".0".
  *  3. The summary strip clipped its 7th cell on a 360px phone.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, cleanup, act } from '@testing-library/react';
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
+import { render, screen, cleanup, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
 afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+/**
+ * jsdom implements <dialog> as an inert element and does not ship showModal()/close().
+ * The component calls showModal() on mount, so without these two stubs every picker
+ * test throws "dialog.current.showModal is not a function". This is a gap in the test
+ * environment, not in the component: real browsers have had <dialog> since 2022.
+ */
+beforeAll(() => {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() { this.open = true; };
+    HTMLDialogElement.prototype.close = function close() {
+      this.open = false;
+      this.dispatchEvent(new Event('close'));
+    };
+  }
+});
 
 const league = {
   league_id: 'L1', name: 'Real League FC', role: 'manager', status: 'active',
@@ -42,7 +58,7 @@ const FULL_SQUAD = [
   ...Array.from({ length: 3 }, (_, i) => squadPlayer(13 + i, 'FWD')),
 ];
 
-async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean } = {}) {
+async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean; market?: unknown[] } = {}) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
@@ -78,6 +94,7 @@ async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | 
           error: null,
         };
       }
+      if (fn === 'ff_market_players') return { data: opts.market ?? [], error: null };
       return { data: [], error: null };
     },
   };
@@ -249,7 +266,9 @@ describe('mobile actions stay reachable below the pitch', () => {
     // Document order: the pitch comes first, the actions follow it.
     expect(pitch!.compareDocumentPosition(actions!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(actions!.textContent).toMatch(/add players/i);
-    expect(actions!.textContent).toMatch(/transfer/i);
+    // "Make a transfer" was replaced by "Edit squad", matching the demo tab.
+    expect(actions!.textContent).toMatch(/edit squad/i);
+    expect(actions!.textContent).not.toMatch(/transfer/i);
   });
 
   it('does not put the market actions in the page title', async () => {
@@ -287,5 +306,97 @@ describe('the squad screen uses real server data only', () => {
     await mountLiveSquad({ players: [], formation: '4-3-3', builder: true });
     expect(document.querySelectorAll('.pitch .pitch-add').length).toBe(15);
     expect(emptySlotsByPosition()).toEqual({ GK: 2, DEF: 5, MID: 5, FWD: 3 });
+  });
+
+  it('no formation or captain selects remain on the My Squad tab', async () => {
+    await mountLiveSquad();
+    // Removed on request: "Remove formation and captaincy from squad tab."
+    expect(document.querySelector('select[aria-label="Captain"]')).toBeNull();
+    expect(document.querySelector('select[aria-label="Vice captain"]')).toBeNull();
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
+    expect(screen.queryByText(/formation and captaincy/i)).toBeNull();
+  });
+
+  it('the BUILDER still offers the formation, which is where a shape is chosen', async () => {
+    // Arranging a shape is a builder concern, so the control moves there rather than
+    // disappearing - no capability is lost, it is just not on a read-mostly tab.
+    await mountLiveSquad({ builder: true });
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
+  });
+});
+
+describe('the + on a pitch slot opens a position-filtered player list', () => {
+  const market = [
+    { id: 'mp-gk', name: 'Gk One', position: 'GK', price: 4_000_000, rating: 76, active: true, image_url: null },
+    { id: 'mp-def', name: 'Def One', position: 'DEF', price: 5_000_000, rating: 79, active: true, image_url: null },
+    { id: 'mp-mid', name: 'Mid One', position: 'MID', price: 6_000_000, rating: 82, active: true, image_url: null },
+  ];
+
+  it('lists only players in the position that was tapped', async () => {
+    // An empty squad draws all 15 capacity slots, including a DEF slot to tap.
+    await mountLiveSquad({ players: [], market });
+
+    const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
+    expect(slot).toBeTruthy();
+    await act(async () => { slot!.click(); });
+
+    const dialog = document.querySelector('dialog.add-player-sheet');
+    expect(dialog, 'the picker opens instead of navigating away').toBeTruthy();
+    expect(dialog!.textContent).toContain('Add player · DEF');
+    // Only the defender is offered.
+    expect(dialog!.textContent).toContain('Def One');
+    expect(dialog!.textContent).not.toContain('Gk One');
+    expect(dialog!.textContent).not.toContain('Mid One');
+  });
+
+  it('shows the price compactly in the list', async () => {
+    await mountLiveSquad({ players: [], market });
+    const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
+    await act(async () => { slot!.click(); });
+    const dialog = document.querySelector('dialog.add-player-sheet');
+    // Rendered compactly ("5 M"), never as raw units ("5,000,000.0 M").
+    expect(dialog!.textContent).toMatch(/5\s*M/);
+    expect(dialog!.textContent).not.toMatch(/5,000,000/);
+  });
+
+  it('excludes players already in the squad', async () => {
+    // The single DEF in the squad is lp3; the market row for it must not be offered.
+    const withOwned = [
+      ...market,
+      { id: 'lp3', name: 'Already Mine', position: 'DEF', price: 5_000_000, rating: 70, active: true, image_url: null },
+    ];
+    await mountLiveSquad({ players: [squadPlayer(3, 'DEF')], market: withOwned });
+    const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
+    await act(async () => { slot!.click(); });
+    const dialog = document.querySelector('dialog.add-player-sheet');
+    expect(dialog!.textContent).not.toContain('Already Mine');
+    expect(dialog!.textContent).toContain('Def One');
+  });
+
+  it('says so when the position has nobody available', async () => {
+    await mountLiveSquad({ players: [], market: [market[0]] }); // GK only
+    const slot = document.querySelector('.pitch-add[aria-label="Add player: FWD"]') as HTMLElement | null;
+    await act(async () => { slot!.click(); });
+    const dialog = document.querySelector('dialog.add-player-sheet');
+    expect(dialog!.textContent).toMatch(/no available players in this position/i);
+  });
+
+  it('Edit squad switches the pitch to the whole squad and hides the bench', async () => {
+    await mountLiveSquad();
+    // Normal view: 11 on the pitch, 4 on the bench.
+    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
+    expect(document.querySelector('.bench-strip')).toBeTruthy();
+
+    const edit = screen.getByRole('button', { name: /edit squad/i });
+    await act(async () => { edit.click(); });
+
+    // Edit view: all 15 on the pitch, no bench strip, and a way back.
+    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(15);
+    expect(document.querySelector('.bench-strip')).toBeNull();
+    expect(screen.getByRole('button', { name: /view squad/i })).toBeTruthy();
+
+    await act(async () => { screen.getByRole('button', { name: /view squad/i }).click(); });
+    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
+    expect(document.querySelector('.bench-strip')).toBeTruthy();
   });
 });

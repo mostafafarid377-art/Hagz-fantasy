@@ -115,11 +115,16 @@ describe('the league table is ranked by fantasy points', () => {
     expect(renderedTeams()).toEqual(['Antelopes', 'Zebras']);
   });
 
-  it('says the table is ranked by fantasy points', async () => {
+  it('carries no ranking-rule annotations on the page', async () => {
     await mountStandings([row({ team_id: 't1', team_name: 'A', fantasy_points: 10 })]);
-    // Both the page description and the footnote state the ranking rule.
-    expect(screen.getAllByText(/ranked by fantasy points/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/head-to-head points decide/i)).toBeNull();
+    // Removed on request: the scoring strip at the top and the explanatory notice at
+    // the bottom are both gone. The ORDER is what states the rule, so assert that the
+    // table is still ranked by fantasy points rather than by any other figure.
+    expect(screen.queryByText(/ranked by fantasy points/i)).toBeNull();
+    expect(screen.queryByText(/head-to-head results are not part of the ranking/i)).toBeNull();
+    expect(document.querySelector('.scoring-strip')).toBeNull();
+    const ranks = [...document.querySelectorAll('tbody tr')].map((tr) => tr.textContent);
+    expect(ranks.length).toBeGreaterThan(0);
   });
 
   it('shows the empty state when there is no result yet', async () => {

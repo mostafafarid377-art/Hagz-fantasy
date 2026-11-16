@@ -69,7 +69,8 @@ for (const width of [320, 360, 390]) {
     expect(row!.y).toBeGreaterThan(pitch!.y);
 
     // Both controls are clickable targets, not 0-width slivers.
-    for (const button of [actions.getByRole('link', { name: /transfer/i }), actions.getByRole('link', { name: /add players/i })]) {
+    // "Make a transfer" became "Edit squad" (a button, not a link), matching the demo.
+    for (const button of [actions.getByRole('button', { name: /edit squad/i }), actions.getByRole('link', { name: /add players/i })]) {
       await expect(button).toBeVisible();
       const box = await button.boundingBox();
       expect(box!.width).toBeGreaterThan(80);
@@ -87,27 +88,34 @@ test('money is compact and never shows raw units', async ({ page }) => {
   expect(text).not.toMatch(/\d\.0M/);
 });
 
-test('the formation selector changes the pitch on a phone', async ({ page }) => {
+test('Edit squad reveals the whole squad and keeps the page inside the viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepare(page);
-  // The builder shows capacity slots; use My Squad, which draws the starting XI.
   await page.goto('/squad');
 
-  const shapeOf = async () => page.evaluate(() => {
-    const counts: Record<string, number> = {};
-    for (const row of document.querySelectorAll('.pitch .pitch-row')) {
-      const placed = row.querySelectorAll('.pitch-player').length;
-      const empty = row.querySelectorAll('.pitch-add, .pitch-empty').length;
-      const label = row.querySelector('.pitch-add small, .pitch-player small')?.textContent?.trim() ?? '?';
-      counts[label] = placed + empty;
-    }
-    return counts;
-  });
+  // The My Squad tab shows the starting XI only; "Edit squad" shows all 15 and hides
+  // the bench, matching the demo tab. (The formation select was removed from this tab
+  // on request, so the shape is no longer switchable from here.)
+  await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  await page.getByRole('button', { name: 'Edit squad' }).click();
+  await expect(page.locator('.pitch .pitch-player')).toHaveCount(15);
+  await expect(page.locator('.bench-strip')).toHaveCount(0);
 
-  const before = await shapeOf();
-  await page.getByLabel('Formation').selectOption('4-4-2');
-  const after = await shapeOf();
-  expect(after).not.toEqual(before);
+  await page.getByRole('button', { name: 'View squad' }).click();
+  await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  expect(await noHorizontalOverflow(page)).toBe(true);
+});
+
+test('tapping + opens a position-filtered player list', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page);
+  await page.goto('/squad-builder'); // an empty-squad view draws every slot
+
+  await page.locator('.pitch-add[aria-label="Add player: GK"]').first().click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: /Add player . GK/ })).toBeVisible();
+  // Every offered player is a goalkeeper.
+  await expect(dialog.locator('.replacement-row small')).toHaveText(/^GK/);
   expect(await noHorizontalOverflow(page)).toBe(true);
 });
 
