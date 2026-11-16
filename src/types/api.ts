@@ -135,7 +135,7 @@ export interface ApiMatchRevision {
 
 export interface ApiMatch {
   id: string;
-  gameweek_id: string;
+  gameweek_id: string | null;
   starts_at: string;
   venue: string;
   team_a_id: string;

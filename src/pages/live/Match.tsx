@@ -2,7 +2,7 @@
 // the authenticated ff_match_* RPCs; visibility here is convenience only, while
 // authorization and immutable-history rules remain enforced in PostgreSQL.
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowRight, CalendarDays, Check, MapPin, RefreshCw, Shield, X, Zap } from 'lucide-react';
@@ -11,6 +11,7 @@ import { useLive } from '../../hooks/useLive';
 import * as api from '../../services/api';
 import { ErrorNote, Loading, PartialDataNote } from './League';
 import type { ApiMatch, ApiMatchRevision, Position } from '../../types/api';
+import { ScheduleMatchForm } from './ScheduleMatchForm';
 import './matchWorkflow.css';
 
 export function LiveMatchCenter() {
@@ -19,111 +20,30 @@ export function LiveMatchCenter() {
   const { matchId: routeMatchId } = useParams();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [teams, setTeams] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
-  const [teamError, setTeamError] = useState('');
-  const [newTeamName, setNewTeamName] = useState('');
-  const [teamSaveBusy, setTeamSaveBusy] = useState(false);
-  const [teamSaveError, setTeamSaveError] = useState('');
-  const [createBusy, setCreateBusy] = useState(false);
-  const [createError, setCreateError] = useState('');
-  const [gameweekId, setGameweekId] = useState('');
-  const [teamA, setTeamA] = useState('');
-  const [teamB, setTeamB] = useState('');
-  const [organizerId, setOrganizerId] = useState('');
-  const [startsAt, setStartsAt] = useState('');
-  const [venue, setVenue] = useState('');
-  const [starters, setStarters] = useState(7);
-  const [substitutes, setSubstitutes] = useState(5);
 
   const sorted = useMemo(() => [...live.matches].sort((a, b) => +new Date(b.starts_at) - +new Date(a.starts_at)), [live.matches]);
   const selected = live.matches.find((m) => m.id === (selectedId ?? routeMatchId)) ?? null;
 
-  useEffect(() => {
-    if (!live.leagueId || !live.isLeader) return;
-    let active = true;
-    api.realTeams(live.leagueId).then((rows) => { if (active) setTeams(rows.filter((x) => x.active)); })
-      .catch((e) => { if (active) setTeamError(e instanceof Error ? e.message : 'Could not load league teams'); });
-    return () => { active = false; };
-  }, [live.leagueId, live.isLeader]);
 
-  async function addRealTeam() {
-    if (!live.leagueId || !newTeamName.trim()) return;
-    setTeamSaveBusy(true); setTeamSaveError('');
-    try {
-      const saved = await api.createRealTeam(live.leagueId, newTeamName.trim());
-      const rows = await api.realTeams(live.leagueId);
-      if (!rows.some((x) => x.id === saved.id)) throw new Error('Team was created, but could not be loaded. Refresh before creating it again.');
-      setTeams(rows.filter((x) => x.active));
-      setTeamError('');
-      setNewTeamName('');
-    } catch (error) { setTeamSaveError(error instanceof Error ? error.message : 'Could not create real team'); }
-    finally { setTeamSaveBusy(false); }
-  }
-
-  async function createMatch(e: FormEvent) {
-    e.preventDefault();
-    if (!live.leagueId) return;
-    setCreateBusy(true); setCreateError('');
-    let created = false;
-    try {
-      const saved = await api.createMatch(live.leagueId, {
-        gameweekId, teamA, teamB, organizerId, startsAt: new Date(startsAt).toISOString(), venue,
-        startersPerSide: starters, maxSubstitutes: substitutes,
-      });
-      created = true;
-      await live.refreshMatches();
-      const persisted = await api.matches(live.leagueId);
-      if (!persisted.some((m) => m.id === saved.id)) {
-        throw new Error('The match was created, but could not be verified in the current match list. Refresh before scheduling another.');
-      }
-      setCreateOpen(false); setGameweekId(''); setTeamA(''); setTeamB(''); setOrganizerId(''); setStartsAt(''); setVenue('');
-    } catch (error) {
-      setCreateError(error instanceof Error ? error.message : 'Could not create match');
-      if (created) setCreateOpen(false);
-    }
-    finally { setCreateBusy(false); }
-  }
 
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
   const featured = sorted[0];
-  const organizers = live.members.filter((m) => m.is_organizer && m.status === 'active');
 
   return <>
     <PageTitle eyebrow="MATCHDAY" title="Match Center" description="Schedule real matches, record matchday details and review submissions.">
-      {live.isLeader && <button className="button button-primary" onClick={() => { setCreateError(''); setCreateOpen((v) => !v); }}>Schedule match</button>}
+      {live.isLeader && <button className="button button-primary" onClick={() => setCreateOpen((v) => !v)}>{t('Schedule match')}</button>}
       <button className="button button-outline" onClick={() => void live.refreshMatches()}><RefreshCw size={15} /> {t('Refresh')}</button>
     </PageTitle>
     {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
     <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
-    {createOpen && live.isLeader && <section className="panel match-create-panel">
-      <h2>Schedule a real match</h2>
-      <p className="muted">Only published League Market players can be selected in lineups. Scheduling does not create player profiles or affect fantasy squads.</p>
-      {teamError && <p className="error-text" role="alert">Teams could not be loaded: {teamError}</p>}
-      <div className="inline-team-create"><label>New real team<input value={newTeamName} maxLength={100} onChange={(e) => setNewTeamName(e.target.value)} placeholder="Enter real team name" /></label><button type="button" className="button button-outline" disabled={teamSaveBusy || !newTeamName.trim()} onClick={() => void addRealTeam()}>{teamSaveBusy ? 'Saving…' : 'Add team'}</button>{teamSaveError && <p className="error-text" role="alert">{teamSaveError}</p>}</div>
-      <form className="match-form" onSubmit={(e) => void createMatch(e)}>
-        <label>Gameweek<select required value={gameweekId} onChange={(e) => setGameweekId(e.target.value)}><option value="">Choose gameweek</option>{live.gameweeks.map((g) => <option key={g.id} value={g.id}>Gameweek {g.number}{g.season_name ? ` · ${g.season_name}` : ''}</option>)}</select></label>
-        <label>Team A<select required value={teamA} onChange={(e) => setTeamA(e.target.value)}><option value="">Choose team</option>{teams.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
-        <label>Team B<select required value={teamB} onChange={(e) => setTeamB(e.target.value)}><option value="">Choose team</option>{teams.filter((x) => x.id !== teamA).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
-        <label>Assigned Organizer<select required value={organizerId} onChange={(e) => setOrganizerId(e.target.value)}><option value="">Choose appointed organizer</option>{organizers.map((x) => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}</select></label>
-        <label>Date & kick-off<input required type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} /></label>
-        <label>Venue<input required minLength={1} maxLength={200} value={venue} onChange={(e) => setVenue(e.target.value)} /></label>
-        <label>Starters per side<input required type="number" min={1} max={11} value={starters} onChange={(e) => setStarters(Number(e.target.value))} /></label>
-        <label>Maximum substitutes<input required type="number" min={0} max={30} value={substitutes} onChange={(e) => setSubstitutes(Number(e.target.value))} /></label>
-        {createError && <p className="error-text" role="alert">{createError}</p>}
-        <div className="form-actions"><button className="button button-primary" disabled={createBusy || live.gameweeks.length === 0 || teams.length < 2 || organizers.length === 0}>{createBusy ? 'Saving…' : 'Create match'}</button><button type="button" className="button button-outline" onClick={() => setCreateOpen(false)}>Cancel</button></div>
-        {live.gameweeks.length === 0 && <p className="notice">Create a season and gameweek before scheduling a match.</p>}
-        {teams.length < 2 && !teamError && <p className="notice">At least two active real teams are required.</p>}
-        {organizers.length === 0 && <p className="notice">Appoint an active league member as Match Organizer in league management first.</p>}
-      </form>
-    </section>}
-    {createError && !createOpen && <ErrorNote message={createError} onRetry={() => void live.refreshMatches()} />}
+    {createOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} gameweeks={live.gameweeks} members={live.members} onCancel={() => setCreateOpen(false)} onCreated={async () => { await live.refreshMatches(); setCreateOpen(false); }} />}
 
     {sorted.length === 0 ? <Empty title="No matches yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'A League Leader schedules matches and appoints an organizer.'} /> : <>
       {featured && <div className="match-center-hero panel">
         <Badge kind={featured.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(featured.revision_state === 'approved' ? 'Full time' : 'Scheduled')}</Badge>
         <div className="center-teams"><div><div className="team-crest crest-lime"><Shield size={30} /></div><strong>{featured.team_a}</strong></div><div><small>{featured.team_a_score == null ? t('Upcoming') : t('Final score')}</small><b>{featured.team_a_score == null ? 'VS' : `${featured.team_a_score} : ${featured.team_b_score}`}</b></div><div><div className="team-crest crest-orange"><Zap size={30} /></div><strong>{featured.team_b}</strong></div></div>
-        <div className="match-info"><span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span><span><MapPin size={16} /> {featured.venue}</span><span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span></div>
+        <div className="match-info"><span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span><span><MapPin size={16} /> {featured.venue}</span>{featured.gameweek_id && <span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span>}</div>
       </div>}
       <div className="panel table-wrap"><table><thead><tr><th>{t('MATCH')}</th><th>{t('Kick-off')}</th><th>{t('Venue')}</th><th>{t('Score')}</th><th>{t('Status')}</th><th /></tr></thead><tbody>
         {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.team_a_score == null ? '—' : `${m.team_a_score} – ${m.team_b_score}`}</td><td><Badge kind={m.revision_state === 'approved' ? 'lime' : 'neutral'}>{t(m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
@@ -243,22 +163,32 @@ export function LiveFixtures() {
   const { t } = useTranslation();
   const live = useLive();
   const [filter, setFilter] = useState('All');
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
-  const played = (m: { starts_at: string }) => new Date(m.starts_at).getTime() < Date.now();
+  const played = (m: ApiMatch) => new Date(m.starts_at).getTime() < Date.now();
+  const statusLabel = (m: ApiMatch) => m.revision_state === 'approved' ? 'Full time'
+    : m.revision_state === 'submitted' ? 'Awaiting review'
+      : m.revision_state === 'rejected' ? 'Needs correction'
+        : m.revision_state === 'corrected' ? 'Correction in progress'
+          : m.revision_state === 'draft' ? 'In progress' : played(m) ? 'Awaiting result' : 'Upcoming';
   const visible = live.matches.filter((m) =>
     filter === 'All' ? true : filter === 'Played' ? played(m) : !played(m));
 
   return (
     <>
-      <PageTitle eyebrow="MATCHDAY" title="Fixtures" description="Matches scheduled for this league." />
+      <PageTitle eyebrow="MATCHDAY" title="Fixtures" description="Matches scheduled for this league.">
+        {live.isLeader && <button className="button button-primary" onClick={() => setScheduleOpen(v => !v)}>{t('Schedule match')}</button>}
+        <button className="button button-outline" onClick={() => void live.refreshMatches()}><RefreshCw size={15}/> {t('Refresh')}</button>
+      </PageTitle>
+      {scheduleOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} gameweeks={live.gameweeks} members={live.members} onCancel={() => setScheduleOpen(false)} onCreated={async () => { await live.refreshMatches(); setScheduleOpen(false); }} />}
 
       {/* Same shape as the demo fixtures screen: filter tabs over a fixture list of
           rows that link to the match centre. Live showed a bare panel of rows with
           no filtering and no way through to a match. */}
       {live.matches.length === 0 ? (
-        <Empty title="No fixtures yet" description="Your league leader schedules the matches." />
+        <Empty title="No fixtures yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'Your league leader schedules the matches.'} />
       ) : (
         <>
           <div className="tabs">
@@ -270,24 +200,24 @@ export function LiveFixtures() {
           </div>
           <div className="fixture-list">
             {visible.map((m) => (
-              <Link to={`/match-center/${m.id}`} className="fixture-row panel" key={m.id}>
+              <Link to={`/match-center/${m.id}`} aria-label={`${t('Show match')}: ${m.team_a} versus ${m.team_b}`} className="fixture-row panel" key={m.id}>
                 <div>
                   <div className="eyebrow">
-                    {t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === m.gameweek_id)?.number ?? '—'}
+                    {m.gameweek_id ? `${t('GAMEWEEK')} ${live.gameweeks.find((g) => g.id === m.gameweek_id)?.number ?? '—'}` : t('No gameweek link')}
                   </div>
                   <small>{new Date(m.starts_at).toLocaleString()} · {m.venue}</small>
                 </div>
                 <div className="fixture-score">
                   <strong>{m.team_a}</strong>
                   <span className="mini-crest c0"><Shield size={17} /></span>
-                  <b>vs</b>
+                  <b>{m.team_a_score == null ? 'vs' : `${m.team_a_score} – ${m.team_b_score}`}</b>
                   <span className="mini-crest c1"><Zap size={17} /></span>
                   <strong>{m.team_b}</strong>
                 </div>
-                <Badge kind={played(m) ? 'neutral' : 'lime'}>
-                  {t(played(m) ? 'Played' : 'Upcoming')}
+                <Badge kind={m.revision_state === 'approved' ? 'lime' : m.revision_state === 'submitted' ? 'orange' : 'neutral'}>
+                  {t(statusLabel(m))}
                 </Badge>
-                <ArrowRight size={17} />
+                <span className="fixture-show-link">{t('Show match')} <ArrowRight size={17} /></span>
               </Link>
             ))}
           </div>

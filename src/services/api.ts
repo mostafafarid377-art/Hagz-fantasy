@@ -267,10 +267,10 @@ export const realTeams = (leagueId: string) =>
   call<Array<{ id: string; name: string; active: boolean }>>('ff_real_teams', { p_league: leagueId });
 
 export const createMatch = (leagueId: string, input: {
-  gameweekId: string; teamA: string; teamB: string; organizerId: string;
+  gameweekId?: string | null; teamA: string; teamB: string; organizerId: string;
   startsAt: string; venue: string; startersPerSide?: number; maxSubstitutes?: number;
 }) => call<{ id: string; starts_at: string; organizer_id: string }>('ff_match_create', {
-  p_league: leagueId, p_gameweek: input.gameweekId, p_team_a: input.teamA, p_team_b: input.teamB,
+  p_league: leagueId, p_gameweek: input.gameweekId ?? null, p_team_a: input.teamA, p_team_b: input.teamB,
   p_organizer: input.organizerId, p_starts_at: input.startsAt, p_venue: input.venue,
   p_starters_per_side: input.startersPerSide ?? 7, p_max_substitutes: input.maxSubstitutes ?? 5,
 });

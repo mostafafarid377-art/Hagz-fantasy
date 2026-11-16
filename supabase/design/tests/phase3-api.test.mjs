@@ -33,6 +33,7 @@ const PKG = [
   // definer sees an anonymous caller.
   '20261115000015_actor_identity_claim_fallback', '20261115000016_league_archive',
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
+  '20261115000019_optional_match_gameweek',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -725,6 +726,20 @@ test('matches: a correction preserves history and supersedes the old result', as
   assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2 and is_current', [LEAGUE.id, MATCH.id]), 1, 'reapproved correction replaces the official pointer without deleting history');
 });
 
+test('matches: Gameweek is optional and old matches retain their Gameweek links', async () => {
+  const { LEAGUE, GAMEWEEK, MATCH } = globalThis;
+  assert.equal(await scalar('select gameweek_id from public.real_matches where id=$1', [MATCH.id]), GAMEWEEK, 'existing match keeps its optional historical link');
+  const teamA = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Standalone A');
+  const teamB = await rpc(ALICE, 'ff_tournament_create', LEAGUE.id, 'Standalone B');
+  await rpc(ALICE, 'ff_league_set_organizer', LEAGUE.id, CAROL, true);
+  const standalone = await rpc(ALICE, 'ff_match_create', LEAGUE.id, null, teamA.id, teamB.id, CAROL,
+    '2025-08-11T19:00:00Z', 'Community Ground', 1, 1);
+  assert.ok(standalone.id);
+  assert.equal(await scalar('select gameweek_id from public.real_matches where id=$1', [standalone.id]), null);
+  const read = await rpc(ALICE, 'ff_matches', LEAGUE.id);
+  assert.equal(read.find(match => match.id === standalone.id).gameweek_id, null);
+});
+
 // ---------------------------------------------------------------------------
 test('standings: reads work, ranking modes stay separate, and fabrication is blocked', async () => {
   const { LEAGUE } = globalThis;
@@ -887,7 +902,7 @@ test('fixtures: a team from another league is refused with a clear 42501', async
 
 // The additive migration replaces the bodies of existing RPCs without opening
 // new execute access to anon or changing the authenticated application surface.
-test('match RPCs retain authenticated-only execute permissions after migration 018', async () => {
+test('match RPCs retain authenticated-only execute permissions after migration 019', async () => {
   const create = await scalar(`select has_function_privilege('authenticated', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const anonCreate = await scalar(`select has_function_privilege('anon', 'public.ff_match_create(uuid,uuid,uuid,uuid,uuid,timestamptz,text,integer,integer)'::regprocedure, 'execute')`);
   const read = await scalar(`select has_function_privilege('authenticated', 'public.ff_matches(uuid)'::regprocedure, 'execute')`);
