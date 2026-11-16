@@ -5,7 +5,7 @@
 // the approval queue. Hiding a control is a courtesy, NOT a control - the same
 // action from a manager is refused by the database (see phase3-api.test.mjs).
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import { AlertCircle, Check, Plus, Search, SlidersHorizontal, Upload, X } from 'lucide-react';
@@ -254,6 +254,14 @@ function PlayerDialog({ player, onClose, onSaved, onDeleted }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element || element.open) return;
+    if (typeof element.showModal === 'function') element.showModal();
+    else element.setAttribute('open', '');
+  }, []);
 
   async function removeFromMarket() {
     if (!player) return;
@@ -286,7 +294,8 @@ function PlayerDialog({ player, onClose, onSaved, onDeleted }: {
   }
 
   return (
-    <dialog open className="player-sheet player-edit-sheet" aria-labelledby="player-dialog-title">
+    <dialog ref={dialog} className="player-sheet player-edit-sheet" aria-labelledby="player-dialog-title"
+      onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="sheet-handle" aria-hidden="true" />
       <button type="button" className="sheet-close" aria-label={t('Close')} onClick={onClose}><X size={20} /></button>
       <div className="eyebrow">{t('THE MARKET')}</div>
