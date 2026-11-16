@@ -18,6 +18,7 @@ import type { Position } from '../../types/api';
 
 const positions: readonly Position[] = ['GK', 'DEF', 'MID', 'FWD'];
 import type { ApiPlayer, ApiSuggestion } from '../../types/api';
+import './approvalReview.css';
 import { inspectImage, StorageError, uploadBlocked } from '../../services/storage';
 import { lastGamePointsForPlayer, seasonPointsForPlayer } from '../../services/points';
 
@@ -509,6 +510,12 @@ export function LiveApprovals() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const reviewDialog = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = reviewDialog.current;
+    if (selected && dialog && !dialog.open) dialog.showModal();
+  }, [selected]);
 
   const pending = live.suggestions.filter((s) => s.status === 'pending');
 
@@ -562,7 +569,8 @@ export function LiveApprovals() {
         )}
 
       {selected && (
-        <dialog open className="player-sheet" aria-labelledby="review-title">
+        <dialog ref={reviewDialog} className="player-sheet approval-review-sheet" aria-labelledby="review-title"
+          onClose={() => setSelected(null)}>
           <div className="sheet-handle" aria-hidden="true" />
           <button className="sheet-close" aria-label={t('Close')} onClick={() => setSelected(null)}><X size={20} /></button>
           <div className="eyebrow">{t('NEW SUGGESTION')}</div>
@@ -570,19 +578,19 @@ export function LiveApprovals() {
           <p className="sheet-note">{selected.position} · {t('Submitted by')} {selected.submitted_by_name}</p>
           {selected.notes && <p className="sheet-note">{selected.notes}</p>}
 
-          <div className="form-row">
+          <div className="approval-review-fields">
             <label>{t('Final price (millions)')}
               <input type="number" min="0.1" step="0.1" value={priceM} onChange={(e) => setPriceM(e.target.value)} />
             </label>
             <label>{t('Final rating')}
-              <input type="number" min="1" max="99" value={rating} onChange={(e) => setRating(e.target.value)} />
+              <input type="number" min="1" max="99" step="1" value={rating} onChange={(e) => setRating(e.target.value)} />
             </label>
           </div>
-          <label>{t('Rejection reason (required to reject)')}
-            <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={300} />
+          <label className="approval-review-reason">{t('Rejection reason (required to reject)')}
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} rows={3} />
           </label>
           {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
-          <div className="sheet-actions">
+          <div className="sheet-actions approval-review-actions">
             <button className="button button-outline" disabled={busy || !reason.trim()} onClick={() => void decide('rejected')}>
               {t('Reject suggestion')}
             </button>
