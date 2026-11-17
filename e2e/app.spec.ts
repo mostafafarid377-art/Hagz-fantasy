@@ -58,7 +58,7 @@ test('leader rejection feedback is visible to the manager',async({page})=>{
 });
 test('formation mismatch can be fixed by swapping a starter and substitute',async({page})=>{
   await page.goto('/squad-builder');await page.getByLabel('Formation').selectOption('4-4-2');
-  await expect(page.getByText(/Formation requires: .*Starting XI currently has:/)).toBeVisible();
+  await expect(page.getByRole('status').filter({hasText:/Formation requires: .*Starting XI currently has:/})).toBeVisible();
   await page.getByLabel('Starter',{exact:true}).selectOption('p22');await page.getByLabel('Substitute',{exact:true}).selectOption('p14');await page.getByRole('button',{name:'Swap players'}).click();
   await expect(page.getByText('Squad is valid')).toBeVisible();await page.getByRole('button',{name:'Confirm lineup'}).click();await expect(page.getByText('Squad confirmed')).toBeVisible();
 });
@@ -68,7 +68,7 @@ test('squad add and remove preserves position and budget constraints',async({pag
   await expect(page.getByRole('button',{name:'Remove'})).toBeVisible();await page.goto('/squad-builder');
   // The roster list under the pitch was removed, so the squad is now read from the
   // pitch itself. The builder shows on-pitch players with a "Player details" label.
-  await expect(page.locator('.pitch-player[aria-label*="Adam Sherif"]')).toBeVisible();
+  await expect(page.locator('.bench-player[aria-label="Player details: Adam Sherif"], .pitch-player[aria-label="Player details: Adam Sherif"]')).toBeVisible();
 });
 test('transfer preview and confirmation update the squad',async({page})=>{
   await page.goto('/transfers');await page.getByLabel('Player to transfer out').selectOption('p15');await page.getByLabel('Replacement player').selectOption('p17');

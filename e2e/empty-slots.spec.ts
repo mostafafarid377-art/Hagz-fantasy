@@ -17,15 +17,19 @@ test('empty squad shows fifteen position slots and builds via filtered local mar
   for(const [pos,count] of [['GK',2],['DEF',5],['MID',5],['FWD',3]] as const)await expect(pitch.getByRole('button',{name:`Add player: ${pos}`})).toHaveCount(count);
   await pitch.getByRole('button',{name:'Add player: GK'}).first().click();const dialog=page.getByRole('dialog');
   await expect(dialog.getByRole('heading',{name:'Add player · GK'})).toBeVisible();await expect(dialog.getByRole('button',{name:/Omar Khaled/})).toBeVisible();await expect(dialog.getByRole('button',{name:/Youssef Adel/})).toHaveCount(0);
-  await dialog.getByRole('button',{name:/Omar Khaled/}).click();await expect(dialog).toHaveCount(0);await expect(pitch.locator('.pitch-add')).toHaveCount(14);expect((await team(page)).playerIds).toEqual(['p1']);
-  await page.reload();await expect(pitch.locator('.pitch-add')).toHaveCount(14);await expect(pitch.getByRole('button',{name:'Player details: Omar Khaled'})).toBeVisible();
+  await dialog.getByRole('button',{name:/Omar Khaled/}).click();await expect(dialog).toHaveCount(0);await expect(pitch.locator('.pitch-add')).toHaveCount(10);expect((await team(page)).playerIds).toEqual(['p1']);
+  await page.reload();await expect(pitch.locator('.pitch-add')).toHaveCount(10);await expect(pitch.getByRole('button',{name:'Player details: Omar Khaled'})).toBeVisible();
   await pitch.getByRole('button',{name:'Add player: DEF'}).first().click();await dialog.getByRole('button',{name:/Youssef Adel/}).click();expect((await team(page)).playerIds).toEqual(['p1','p3']);
 });
 
 test('every one of fifteen empty spots can be filled without losing selections',async({page})=>{
   await prepare(page,true);await page.goto('/squad-builder');const pitch=page.locator('.pitch');
-  const groups=[['GK',['Omar Khaled','Sherif Adel']],['DEF',['Youssef Adel','Ahmed Nabil','Ziad Tarek','Mahmoud Samir','Seif Mostafa']],['MID',['Hassan Magdy','Marwan Salah','Fares Ashraf','Tamer Hany','Samy Ibrahim']],['FWD',['Amr Hesham','Yassin Mohamed','Ramy Fathy']]] as const;
-  for(const [position,names] of groups){for(const name of names){await pitch.getByRole('button',{name:`Add player: ${position}`}).first().click();await page.getByRole('dialog').getByRole('button',{name:new RegExp(name)}).click();}}
+  // The builder starts with an empty starting XI (11 slots); four bench slots
+  // appear only after adding starting players, keeping the total squad capacity 15.
+  const lineupStart=[['GK','Omar Khaled'],['DEF','Youssef Adel'],['DEF','Ahmed Nabil'],['DEF','Ziad Tarek'],['DEF','Mahmoud Samir'],['MID','Hassan Magdy'],['MID','Marwan Salah'],['MID','Fares Ashraf'],['FWD','Amr Hesham'],['FWD','Yassin Mohamed'],['FWD','Ramy Fathy']] as const;
+  const lineupBench=[['GK','Sherif Adel'],['DEF','Seif Mostafa'],['MID','Tamer Hany'],['MID','Samy Ibrahim']] as const;
+  for(const [position,name] of lineupStart){await pitch.getByRole('button',{name:`Add player: ${position}`}).first().click();await page.getByRole('dialog').getByRole('button',{name:new RegExp(name)}).click();}
+  for(const [position,name] of lineupBench){await page.locator(`.bench-add[aria-label="Add player: ${position}"]`).first().click();await page.getByRole('dialog').getByRole('button',{name:new RegExp(name)}).click();}
   await expect(pitch.locator('.pitch-add')).toHaveCount(0);const q=await team(page);expect(q.playerIds).toHaveLength(15);expect(new Set(q.playerIds).size).toBe(15);await page.reload();await expect(pitch.locator('.pitch-player')).toHaveCount(11);await expect(page.locator('.bench-player')).toHaveCount(4);const starters=await page.locator('.pitch-player strong').allTextContents();const bench=await page.locator('.bench-player strong').allTextContents();expect(starters).toHaveLength(11);expect(bench).toHaveLength(4);expect(starters.some(name=>bench.includes(name))).toBe(false);await page.getByRole('link',{name:'View squad'}).click();await expect(page.locator('.pitch-player')).toHaveCount(11);await expect(page.locator('.bench-player')).toHaveCount(4);
 });
 
