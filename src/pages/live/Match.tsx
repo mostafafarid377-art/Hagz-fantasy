@@ -96,7 +96,7 @@ export function LiveMatchCenter() {
     </PageTitle>
     {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
     <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
-    {createOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} matchFormat={live.league?.match_format ?? '11-a-side'} gameweeks={live.gameweeks} members={live.members} onCancel={() => setCreateOpen(false)} onCreated={async () => { await live.refreshMatches(); setCreateOpen(false); }} />}
+    {createOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} matchFormat={live.league?.match_format ?? '11-a-side'} gameweeks={live.gameweeks} members={live.members} onCancel={() => setCreateOpen(false)} onCreated={async (matchId) => { const persisted = await live.refreshMatches(); if (!persisted.some((match) => match.id === matchId)) throw new Error('The match was created but could not be verified. Refresh the match list before scheduling another.'); setCreateOpen(false); }} />}
 
     {sorted.length === 0 ? <Empty title="No matches yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'A League Leader schedules matches and appoints an organizer.'} /> : <>
       {featured && <div className="match-center-hero panel">
@@ -311,8 +311,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     setForkRequestId(requestId); setBusy(true); setError(''); setNotice('');
     try {
       const opened = await api.forkResult(live.leagueId, approvalId, requestId);
-      await live.refreshMatches();
-      const persisted = await api.matches(live.leagueId);
+      const persisted = await live.refreshMatches();
       if (!persisted.some((row) => row.id === match.id && row.revision_id === opened.revision_id)) {
         throw new Error('The result draft was created but could not be verified. Retry to safely retrieve the same revision.');
       }
@@ -458,7 +457,7 @@ export function LiveFixtures() {
         {live.isLeader && <button className="button button-primary" onClick={() => setScheduleOpen(v => !v)}>{t('Schedule match')}</button>}
         <button className="button button-outline" onClick={() => void live.refreshMatches()}><RefreshCw size={15}/> {t('Refresh')}</button>
       </PageTitle>
-      {scheduleOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} matchFormat={live.league?.match_format ?? '11-a-side'} gameweeks={live.gameweeks} members={live.members} onCancel={() => setScheduleOpen(false)} onCreated={async () => { await live.refreshMatches(); setScheduleOpen(false); }} />}
+      {scheduleOpen && live.isLeader && live.leagueId && <ScheduleMatchForm leagueId={live.leagueId} matchFormat={live.league?.match_format ?? '11-a-side'} gameweeks={live.gameweeks} members={live.members} onCancel={() => setScheduleOpen(false)} onCreated={async (matchId) => { const persisted = await live.refreshMatches(); if (!persisted.some((match) => match.id === matchId)) throw new Error('The match was created but could not be verified. Refresh the match list before scheduling another.'); setScheduleOpen(false); }} />}
 
       {/* Same shape as the demo fixtures screen: filter tabs over a fixture list of
           rows that link to the match centre. Live showed a bare panel of rows with

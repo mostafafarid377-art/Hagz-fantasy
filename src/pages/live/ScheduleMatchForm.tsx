@@ -9,7 +9,7 @@ export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gamewee
   matchFormat?: MatchFormat;
   gameweeks: Array<{ id: string; number: number; season_name: string }>;
   members: ApiMember[];
-  onCreated: () => Promise<void> | void;
+  onCreated: (matchId: string) => Promise<void> | void;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
@@ -62,11 +62,9 @@ export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gamewee
         gameweekId: gameweekId || null, teamA, teamB, organizerId,
         startsAt: new Date(startsAt).toISOString(), venue, startersPerSide: Number(starters), maxSubstitutes: Number(substitutes),
       });
-      const persisted = await api.matches(leagueId);
-      if (!persisted.some(match => match.id === created.id)) {
-        throw new Error('The match was created but could not be verified. Refresh the match list before scheduling another.');
-      }
-      await onCreated();
+      // The parent performs one authoritative refresh, verifies the new id, and
+      // updates the shared match list from that same response.
+      await onCreated(created.id);
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not create match'); }
     finally { setBusy(false); }
   }
