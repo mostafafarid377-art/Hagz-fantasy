@@ -1,15 +1,9 @@
 /**
  * @vitest-environment jsdom
  *
- * Four changes:
- *
- * 1. "Edit squad" (builder mode) hides the bench strip - editing puts the whole
- *    squad on the pitch, so the bench row repeats what is already on screen.
- * 2. The dashboard hero button says "Build your squad" and goes to the squad tab,
- *    not the market.
- * 3. The number under each player on the pitch is the LAST GAMEWEEK's points, not
- *    the season total they carried before.
- * 4. The first stat card reports LAST GAME POINTS, not TOTAL POINTS.
+ * Squad editing keeps the selected substitutes visible in a separate Bench strip;
+ * the dashboard hero button opens the squad; player and summary scores remain
+ * scoped to the latest gameweek rather than season totals.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
@@ -45,10 +39,11 @@ async function mountDashboard() {
   });
 }
 
-describe('editing the squad hides the bench', () => {
-  it('shows no bench strip in builder (edit) mode', async () => {
+describe('the squad keeps the bench visible while editing', () => {
+  it('shows the separate bench strip in builder (edit) mode', async () => {
     await mountSquad({ builder: true });
-    expect(document.querySelector('.bench-strip')).toBeNull();
+    expect(document.querySelector('.bench-strip')).toBeTruthy();
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
   });
 
   it('still shows the bench strip on the normal squad screen', async () => {

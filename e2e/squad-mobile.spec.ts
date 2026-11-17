@@ -81,16 +81,22 @@ for (const width of [320, 360, 390]) {
     expect(row).not.toBeNull();
     expect(row!.y).toBeGreaterThan(pitch!.y);
 
-    // Both navigation actions are links with usable tap targets, not 0-width slivers.
     const editSquad = actions.getByRole('link', { name: /edit squad/i });
-    const addPlayers = actions.getByRole('link', { name: /add players/i });
     await expect(editSquad).toHaveAttribute('href', '/squad-builder');
+    await expect(editSquad).toBeVisible();
+    const editBox = await editSquad.boundingBox();
+    expect(editBox!.width).toBeGreaterThan(80);
+    await editSquad.click();
+    const addPlayers = page.locator('.squad-actions').getByRole('link', { name: /add players/i });
     await expect(addPlayers).toHaveAttribute('href', '/market');
-    for (const link of [editSquad, addPlayers]) {
-      await expect(link).toBeVisible();
-      const box = await link.boundingBox();
-      expect(box!.width).toBeGreaterThan(80);
-    }
+    const addBox = await addPlayers.boundingBox();
+    expect(addBox!.width).toBeGreaterThan(80);
+    await expect(page.getByLabel('Formation')).toBeVisible();
+    await expect(page.locator('.bench-player').first()).toBeVisible();
+    await page.locator('.bench-player').first().click();
+    const playerSheet = page.getByRole('dialog');
+    await expect(playerSheet.getByRole('button', { name: 'Select replacement' })).toBeVisible();
+    await playerSheet.getByRole('button', { name: 'Close' }).click();
     expect(await noHorizontalOverflow(page)).toBe(true);
   });
 }
@@ -104,23 +110,61 @@ test('money is compact and never shows raw units', async ({ page }) => {
   expect(text).not.toMatch(/\d\.0M/);
 });
 
-test('Edit squad reveals the whole squad and keeps the page inside the viewport', async ({ page }) => {
+test('Edit Squad, View Squad, formation selection, and saved 11/4 separation work on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepare(page);
   await page.goto('/squad');
 
-  // The My Squad tab shows the starting XI only; "Edit squad" shows all 15 and hides
-  // the bench, matching the demo tab. (The formation select was removed from this tab
-  // on request, so the shape is no longer switchable from here.)
+  const starters = await page.locator('.pitch .pitch-player strong').allTextContents();
+  const bench = await page.locator('.bench-player strong').allTextContents();
   await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  await expect(page.locator('.bench-player')).toHaveCount(4);
   await page.getByRole('link', { name: 'Edit squad' }).click();
   await expect(page).toHaveURL(/\/squad-builder$/);
-  await expect(page.locator('.pitch .pitch-player')).toHaveCount(15);
-  await expect(page.locator('.bench-strip')).toHaveCount(0);
-
+  await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  await expect(page.locator('.bench-player')).toHaveCount(4);
+  const formation = page.getByLabel('Formation');
+  for (const shape of ['4-3-3','4-4-2','3-5-2','3-4-3','4-5-1','5-3-2','5-4-1']) {
+    await formation.selectOption(shape);
+    await expect(formation).toHaveValue(shape);
+    await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+    await expect(page.locator('.bench-player')).toHaveCount(4);
+    expect(await page.locator('.pitch .pitch-player strong').allTextContents()).toEqual(starters);
+    expect(await page.locator('.bench-player strong').allTextContents()).toEqual(bench);
+  }
+  await formation.selectOption('4-3-3');
+  await page.reload();
+  await expect(page.getByLabel('Formation')).toHaveValue('4-3-3');
+  await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  await expect(page.locator('.bench-player')).toHaveCount(4);
   await page.getByRole('link', { name: 'View squad' }).click();
   await expect(page).toHaveURL(/\/squad$/);
   await expect(page.locator('.pitch .pitch-player')).toHaveCount(11);
+  await expect(page.locator('.bench-player')).toHaveCount(4);
+  await expect(page.locator('.squad-actions').getByRole('link', { name: /add players/i })).toHaveCount(0);
+  await page.locator('.bench-player').first().click();
+  const viewSheet = page.getByRole('dialog');
+  await expect(viewSheet.getByRole('link', { name: 'Full profile' })).toBeVisible();
+  await expect(viewSheet.getByRole('button', { name: 'Make substitution' })).toHaveCount(0);
+  await expect(viewSheet.getByRole('button', { name: 'Select replacement' })).toHaveCount(0);
+  await viewSheet.getByRole('button', { name: 'Close' }).click();
+  expect(await noHorizontalOverflow(page)).toBe(true);
+});
+
+test('squad editor remains operable in English LTR and Arabic RTL', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page);
+  await page.goto('/squad-builder');
+  await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
+  await expect(page.getByLabel('Formation')).toBeVisible();
+  await expect(page.locator('.bench-player')).toHaveCount(4);
+  await page.getByLabel('Switch language').click();
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  await expect(page.getByLabel('التشكيل')).toBeVisible();
+  await expect(page.locator('.bench-player')).toHaveCount(4);
+  await page.locator('.bench-player').first().click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByRole('button', { name: 'اختر بديلاً' })).toBeVisible();
   expect(await noHorizontalOverflow(page)).toBe(true);
 });
 

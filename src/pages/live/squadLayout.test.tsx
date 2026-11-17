@@ -16,7 +16,7 @@
  *  3. The summary strip clipped its 7th cell on a 360px phone.
  */
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -50,21 +50,28 @@ const squadPlayer = (n: number, position: string, price = 5_000_000) => ({
   image_path: null, image_url: null, active: true, slot: n, captain: false,
 });
 
-/** A legal 15: 2 GK / 5 DEF / 5 MID / 3 FWD. */
+/** A legal 15: 11 starters match 4-3-3, followed by the four saved substitutes. */
 const FULL_SQUAD = [
-  squadPlayer(1, 'GK'), squadPlayer(2, 'GK'),
-  ...Array.from({ length: 5 }, (_, i) => squadPlayer(3 + i, 'DEF')),
-  ...Array.from({ length: 5 }, (_, i) => squadPlayer(8 + i, 'MID')),
-  ...Array.from({ length: 3 }, (_, i) => squadPlayer(13 + i, 'FWD')),
-];
+  [1, 'GK'], [3, 'DEF'], [4, 'DEF'], [5, 'DEF'], [6, 'DEF'],
+  [8, 'MID'], [9, 'MID'], [10, 'MID'], [13, 'FWD'], [14, 'FWD'], [15, 'FWD'],
+  [2, 'GK'], [7, 'DEF'], [11, 'MID'], [12, 'MID'],
+].map(([n, position], index) => ({ ...squadPlayer(Number(n), String(position)), slot: index + 1 }));
 
-async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean; market?: unknown[] } = {}) {
+type SquadFixtureOptions = { players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean; market?: unknown[]; captainId?: string | null; viceId?: string | null; gameweek?: boolean; status?: string };
+async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
 
-  const players = opts.players ?? FULL_SQUAD;
+  const players = (opts.players ?? FULL_SQUAD) as any[];
   const formation = opts.formation === undefined ? '4-3-3' : opts.formation;
+  const serverSquad = {
+    team: { id: 't1', name: 'Real League FC' }, formation, status: opts.status ?? 'draft',
+    captain_id: opts.captainId ?? null, vice_captain_id: opts.viceId ?? null,
+    budget: league.budget, spent: opts.spent ?? players.length * 5_000_000,
+    gameweek_id: opts.gameweek ? 'gw1' : null, players: players.map(player => ({ ...player })),
+  };
+  const rpcCalls: Array<{ fn: string; args?: Record<string, unknown> }> = [];
 
   const client = {
     auth: {
@@ -80,21 +87,44 @@ async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | 
       chain.then = (resolve: (value: unknown) => void) => Promise.resolve({ data: [], error: null }).then(resolve);
       return chain;
     },
-    rpc: async (fn: string) => {
+    rpc: async (fn: string, args?: Record<string, unknown>) => {
+      rpcCalls.push({ fn, args });
       if (fn === 'ff_bootstrap') {
         return { data: { profile: { id: 'u1', display_name: 'Me' }, leagues: [league] }, error: null };
       }
-      if (fn === 'ff_squad') {
-        return {
-          data: {
-            team: { id: 't1', name: 'Real League FC' }, formation, status: 'draft',
-            captain_id: null, vice_captain_id: null,
-            budget: league.budget, spent: opts.spent ?? players.length * 5_000_000, players,
-          },
-          error: null,
-        };
-      }
+      if (fn === 'ff_squad') return { data: { ...serverSquad, players: serverSquad.players.map(player => ({ ...player })) }, error: null };
       if (fn === 'ff_market_players') return { data: opts.market ?? [], error: null };
+      if (fn === 'ff_gameweeks') return { data: opts.gameweek ? [{ id: 'gw1', number: 1, deadline: '2027-01-01T00:00:00Z', season_id: 'season-1', season_name: 'Season' }] : [], error: null };
+      if (fn === 'ff_lineup_save') {
+        const ids = args?.p_player_ids as string[];
+        serverSquad.formation = String(args?.p_formation);
+        serverSquad.status = 'draft'; serverSquad.gameweek_id = String(args?.p_gameweek);
+        serverSquad.players = serverSquad.players.map(player => {
+          const slot = ids.indexOf(player.league_player_id);
+          return { ...player, slot: slot < 0 ? null : slot + 1 };
+        });
+        return { data: { lineup_id: 'lineup-saved', version: 2, formation: serverSquad.formation, status: 'draft' }, error: null };
+      }
+      if (fn === 'ff_squad_set_captains') {
+        serverSquad.captain_id = args?.p_captain as string | null;
+        serverSquad.vice_captain_id = args?.p_vice as string | null;
+        return { data: { captain_id: serverSquad.captain_id, vice_captain_id: serverSquad.vice_captain_id }, error: null };
+      }
+      if (fn === 'ff_squad_transfer') {
+        const incoming = (opts.market as any[] | undefined)?.find(player => player.id === args?.p_in);
+        const outgoing = serverSquad.players.find(player => player.league_player_id === args?.p_out);
+        if (incoming && outgoing) serverSquad.players = serverSquad.players.map(player => player === outgoing ? { ...incoming, league_player_id: incoming.id, slot: outgoing.slot, image_path: null, image_url: null } : player);
+        return { data: { out: args?.p_out, in: args?.p_in, spent: serverSquad.spent }, error: null };
+      }
+      if (fn === 'ff_squad_sell') {
+        serverSquad.players = serverSquad.players.filter(player => player.league_player_id !== args?.p_league_player);
+        return { data: { league_player_id: args?.p_league_player, refund: 5_000_000 }, error: null };
+      }
+      if (fn === 'ff_squad_buy') {
+        const incoming = (opts.market as any[] | undefined)?.find(player => player.id === args?.p_league_player);
+        if (incoming) serverSquad.players.push({ ...incoming, league_player_id: incoming.id, slot: null, image_path: null, image_url: null });
+        return { data: { league_player_id: args?.p_league_player, price: incoming?.price ?? 0, squad_size: serverSquad.players.length, spent: serverSquad.spent }, error: null };
+      }
       return { data: [], error: null };
     },
   };
@@ -117,6 +147,7 @@ async function mountLiveSquad(opts: { players?: unknown[]; formation?: string | 
     );
   });
   for (let i = 0; i < 6; i += 1) await act(async () => { await Promise.resolve(); });
+  return { serverSquad, rpcCalls };
 }
 
 /** Slot count per band, reading the empty "+ POS" placeholders. */
@@ -131,14 +162,14 @@ function emptySlotsByPosition(): Record<string, number> {
 
 describe('the formation drives the actual pitch layout', () => {
   it('an empty squad offers all 15 capacity places so every position can be filled', async () => {
-    await mountLiveSquad({ players: [], formation: '4-3-3' });
+    await mountLiveSquad({ players: [], formation: '4-3-3', builder: true });
     expect(emptySlotsByPosition()).toEqual({ GK: 2, DEF: 5, MID: 5, FWD: 3 });
     expect(document.querySelectorAll('.pitch .pitch-add').length).toBe(15);
   });
 
-  it('draws a populated 4-3-3 as its shape, not the capacity', async () => {
-    // 11 starters with 3 DEF / 3 MID / 3 FWD / 1 GK present, so the empty slots are
-    // exactly the shortfall of the 4-3-3 shape: 1 GK, 1 DEF, 0 MID, 0 FWD.
+  it('draws a populated 4-4-2 as its shape, not the squad capacity', async () => {
+    // Ten selected players with 3 DEF / 3 MID / 3 FWD / 1 GK present expose the
+    // exact 4-4-2 shortfall without pulling anyone from the bench.
     const eleven = [
       squadPlayer(1, 'GK'),
       ...Array.from({ length: 3 }, (_, i) => squadPlayer(2 + i, 'DEF')),
@@ -147,7 +178,7 @@ describe('the formation drives the actual pitch layout', () => {
       // A fourth forward would be dropped by a capacity-based layout; here the extra
       // player is simply on the bench, which is what "starting XI" means.
     ];
-    await mountLiveSquad({ players: eleven, formation: '4-4-2' });
+    await mountLiveSquad({ players: eleven, formation: '4-4-2', builder: true });
     // 4-4-2 wants 4 DEF / 4 MID / 2 FWD / 1 GK. Present: 3/3/3/1.
     // Shortfall: 1 DEF, 1 MID, and FWD is over by 1 so no FWD slot.
     expect(emptySlotsByPosition()).toEqual({ DEF: 1, MID: 1 });
@@ -160,12 +191,12 @@ describe('the formation drives the actual pitch layout', () => {
       ...Array.from({ length: 4 }, (_, i) => squadPlayer(6 + i, 'MID')),
       ...Array.from({ length: 2 }, (_, i) => squadPlayer(10 + i, 'FWD')),
     ];
-    await mountLiveSquad({ players: eleven, formation: '4-4-2' });
+    await mountLiveSquad({ players: eleven, formation: '4-4-2', builder: true });
     // Exactly the 4-4-2 shape, so nothing is missing.
     expect(emptySlotsByPosition()).toEqual({});
 
     cleanup();
-    await mountLiveSquad({ players: eleven, formation: '3-5-2' });
+    await mountLiveSquad({ players: eleven, formation: '3-5-2', builder: true });
     // 3-5-2 wants 5 MID / 3 DEF: DEF is over, MID is short by one.
     expect(emptySlotsByPosition()).toEqual({ MID: 1 });
   });
@@ -180,7 +211,7 @@ describe('the formation drives the actual pitch layout', () => {
       ...Array.from({ length: 5 }, (_, i) => squadPlayer(6 + i, 'MID')),
       squadPlayer(11, 'FWD'),
     ];
-    await mountLiveSquad({ players: eleven, formation: '3-5-2' });
+    await mountLiveSquad({ players: eleven, formation: '3-5-2', builder: true });
     // Every one of the eleven is on the pitch: none was hidden to honour the shape.
     expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
     // The DEF band grew 3 -> 4, so the shape is over capacity by one and only one
@@ -265,10 +296,12 @@ describe('mobile actions stay reachable below the pitch', () => {
     expect(pitch).toBeTruthy();
     // Document order: the pitch comes first, the actions follow it.
     expect(pitch!.compareDocumentPosition(actions!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(actions!.textContent).toMatch(/add players/i);
-    // "Make a transfer" was replaced by "Edit squad", matching the demo tab.
     expect(actions!.textContent).toMatch(/edit squad/i);
-    expect(actions!.textContent).not.toMatch(/transfer/i);
+    expect(actions!.textContent).not.toMatch(/add players/i); // View mode stays read-only.
+    await act(async () => { screen.getByRole('button', { name: /edit squad/i }).click(); });
+    expect(document.querySelector('.squad-actions')?.textContent).toMatch(/add players/i);
+    expect(document.querySelector('.squad-actions')?.textContent).toMatch(/view squad/i);
+    expect(document.querySelector('.squad-actions')?.textContent).not.toMatch(/transfer/i);
   });
 
   it('does not put the market actions in the page title', async () => {
@@ -287,11 +320,22 @@ describe('the squad screen uses real server data only', () => {
     for (const name of shown) expect(name).toMatch(/^P\d+$/);
   });
 
-  it('puts exactly 11 on the pitch and the remaining 4 on the bench', async () => {
-    await mountLiveSquad();
-    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
-    expect(document.querySelectorAll('.bench-player').length).toBe(4);
-    expect(document.querySelector('.bench-strip')).toBeTruthy();
+  it('keeps the exact saved 11 starters on the pitch and all four saved substitutes in a separate bench after reload', async () => {
+    const { serverSquad } = await mountLiveSquad();
+    const pitchNames = [...document.querySelectorAll('.pitch .pitch-player strong')].map(node => node.textContent?.trim()).sort();
+    const benchNames = [...document.querySelectorAll('.bench-player strong')].map(node => node.textContent?.trim()).sort();
+    expect(pitchNames).toEqual(['P1', 'P10', 'P13', 'P14', 'P15', 'P3', 'P4', 'P5', 'P6', 'P8', 'P9']);
+    expect(benchNames).toEqual(['P11', 'P12', 'P2', 'P7']);
+    expect(pitchNames.some(name => benchNames.includes(name))).toBe(false);
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+
+    cleanup();
+    await mountLiveSquad({ players: serverSquad.players, formation: serverSquad.formation });
+    expect([...document.querySelectorAll('.pitch .pitch-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(pitchNames);
+    expect([...document.querySelectorAll('.bench-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(benchNames);
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
   });
 
   it('shows the empty-bench message when there are no substitutes', async () => {
@@ -310,7 +354,7 @@ describe('the squad screen uses real server data only', () => {
 
   it('no formation or captain selects remain on the My Squad tab', async () => {
     await mountLiveSquad();
-    // Removed on request: "Remove formation and captaincy from squad tab."
+    // The saved View mode is read-only; both controls are available from Edit Squad.
     expect(document.querySelector('select[aria-label="Captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Vice captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
@@ -334,7 +378,7 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
 
   it('lists only players in the position that was tapped', async () => {
     // An empty squad draws all 15 capacity slots, including a DEF slot to tap.
-    await mountLiveSquad({ players: [], market });
+    await mountLiveSquad({ players: [], market, builder: true });
 
     const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
     expect(slot).toBeTruthy();
@@ -350,7 +394,7 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
   });
 
   it('shows the price compactly in the list', async () => {
-    await mountLiveSquad({ players: [], market });
+    await mountLiveSquad({ players: [], market, builder: true });
     const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
     await act(async () => { slot!.click(); });
     const dialog = document.querySelector('dialog.add-player-sheet');
@@ -365,7 +409,7 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
       ...market,
       { id: 'lp3', name: 'Already Mine', position: 'DEF', price: 5_000_000, rating: 70, active: true, image_url: null },
     ];
-    await mountLiveSquad({ players: [squadPlayer(3, 'DEF')], market: withOwned });
+    await mountLiveSquad({ players: [squadPlayer(3, 'DEF')], market: withOwned, builder: true });
     const slot = document.querySelector('.pitch-add[aria-label="Add player: DEF"]') as HTMLElement | null;
     await act(async () => { slot!.click(); });
     const dialog = document.querySelector('dialog.add-player-sheet');
@@ -374,29 +418,92 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
   });
 
   it('says so when the position has nobody available', async () => {
-    await mountLiveSquad({ players: [], market: [market[0]] }); // GK only
+    await mountLiveSquad({ players: [], market: [market[0]], builder: true }); // GK only
     const slot = document.querySelector('.pitch-add[aria-label="Add player: FWD"]') as HTMLElement | null;
     await act(async () => { slot!.click(); });
     const dialog = document.querySelector('dialog.add-player-sheet');
     expect(dialog!.textContent).toMatch(/no available players in this position/i);
   });
 
-  it('Edit squad switches the pitch to the whole squad and hides the bench', async () => {
+  it('lets the manager replace a bench player, switch to View, and edit again without losing the saved 11/4 split', async () => {
+    const replacement = { id: 'market-def-new', name: 'New Defender', position: 'DEF', price: 5_000_000, rating: 80, active: true, image_url: null };
+    const { serverSquad, rpcCalls } = await mountLiveSquad({ market: [replacement] });
+    await act(async () => { screen.getByRole('button', { name: /edit squad/i }).click(); });
+    await act(async () => { screen.getByRole('button', { name: 'Player details: P7' }).click(); });
+    const sheet = screen.getByRole('dialog');
+    await act(async () => { screen.getByRole('button', { name: 'Select replacement' }).click(); });
+    await act(async () => { screen.getByRole('button', { name: /New Defender/ }).click(); });
+    await act(async () => { screen.getByRole('button', { name: 'Confirm replacement' }).click(); });
+    expect(rpcCalls.some(call => call.fn === 'ff_squad_transfer' && call.args?.p_out === 'lp7' && call.args?.p_in === 'market-def-new')).toBe(true);
+    expect(serverSquad.players).toHaveLength(15);
+    expect(serverSquad.players.some(player => player.league_player_id === 'market-def-new')).toBe(true);
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+
+    await act(async () => { screen.getByRole('button', { name: /view squad/i }).click(); });
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+    expect(screen.queryByRole('link', { name: /add players/i })).toBeNull();
+    await act(async () => { screen.getByRole('button', { name: /edit squad/i }).click(); });
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+    expect(sheet).toBeTruthy();
+  });
+
+  it('previews every supported formation without changing the selected 15 or promoting bench players, then saves the chosen lineup', async () => {
+    const { serverSquad, rpcCalls } = await mountLiveSquad({ builder: true, gameweek: true, captainId: 'lp1', viceId: 'lp3', status: 'draft' });
+    const initialPitch = [...document.querySelectorAll('.pitch .pitch-player strong')].map(node => node.textContent?.trim()).sort();
+    const initialBench = [...document.querySelectorAll('.bench-player strong')].map(node => node.textContent?.trim()).sort();
+    const select = document.querySelector('select[aria-label="Formation"]') as HTMLSelectElement;
+    for (const shape of ['4-3-3', '4-4-2', '3-5-2', '3-4-3', '4-5-1', '5-3-2', '5-4-1']) {
+      await act(async () => { fireEvent.change(select, { target: { value: shape } }); });
+      expect(select.value).toBe(shape);
+      expect([...document.querySelectorAll('.pitch .pitch-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(initialPitch);
+      expect([...document.querySelectorAll('.bench-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(initialBench);
+      expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+      expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+    }
+    expect(document.querySelector('.lineup-save-blockers')?.textContent).toContain('Formation requires:');
+    expect((screen.getByRole('button', { name: 'Save lineup' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => { fireEvent.change(select, { target: { value: '4-3-3' } }); });
+    await act(async () => { screen.getByRole('button', { name: 'Save lineup' }).click(); });
+    const saved = rpcCalls.find(call => call.fn === 'ff_lineup_save');
+    expect(saved?.args?.p_formation).toBe('4-3-3');
+    expect(saved?.args?.p_player_ids).toHaveLength(15);
+    expect(new Set(saved?.args?.p_player_ids as string[]).size).toBe(15);
+    expect(serverSquad.formation).toBe('4-3-3');
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+
+    cleanup();
+    await mountLiveSquad({ players: serverSquad.players, formation: serverSquad.formation, captainId: 'lp1', viceId: 'lp3', gameweek: true, status: 'draft' });
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /edit squad/i }));
+    expect((document.querySelector('select[aria-label="Formation"]') as HTMLSelectElement).value).toBe('4-3-3');
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
+  });
+
+  it('Edit Squad and View Squad preserve the 11-player pitch and separate editable bench', async () => {
     await mountLiveSquad();
-    // Normal view: 11 on the pitch, 4 on the bench.
     expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
-    expect(document.querySelector('.bench-strip')).toBeTruthy();
+    expect(document.querySelectorAll('.bench-player').length).toBe(4);
 
-    const edit = screen.getByRole('button', { name: /edit squad/i });
-    await act(async () => { edit.click(); });
-
-    // Edit view: all 15 on the pitch, no bench strip, and a way back.
-    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(15);
-    expect(document.querySelector('.bench-strip')).toBeNull();
+    await act(async () => { screen.getByRole('button', { name: /edit squad/i }).click(); });
+    expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
+    expect(document.querySelectorAll('.bench-player').length).toBe(4);
     expect(screen.getByRole('button', { name: /view squad/i })).toBeTruthy();
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
 
     await act(async () => { screen.getByRole('button', { name: /view squad/i }).click(); });
     expect(document.querySelectorAll('.pitch .pitch-player').length).toBe(11);
-    expect(document.querySelector('.bench-strip')).toBeTruthy();
+    expect(document.querySelectorAll('.bench-player').length).toBe(4);
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
+    await act(async () => { (document.querySelector('.bench-player') as HTMLButtonElement).click(); });
+    expect(document.querySelector('dialog.player-sheet')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 });

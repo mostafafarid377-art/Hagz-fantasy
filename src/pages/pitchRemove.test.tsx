@@ -50,10 +50,13 @@ describe('a squad player can still be removed without the roster list', () => {
 
   it('actually removes the player when clicked', async () => {
     await mountBuilder();
-    const before = document.querySelectorAll('.pitch-player').length;
-    expect(before).toBeGreaterThan(0);
+    const countBefore = document.querySelector('.squad-summary > div strong')?.textContent;
+    expect(countBefore).toContain('15');
     const remove = document.querySelector('.pitch-remove') as HTMLElement;
     await act(async () => { remove.click(); });
-    expect(document.querySelectorAll('.pitch-player').length).toBe(before - 1);
+    expect(document.querySelector('.squad-summary > div strong')?.textContent).toContain('14');
+    // The saved XI stays full: removing a starter promotes the next selected player,
+    // while the total squad count confirms the removal actually persisted locally.
+    expect(document.querySelectorAll('.pitch-player')).toHaveLength(11);
   });
 });
