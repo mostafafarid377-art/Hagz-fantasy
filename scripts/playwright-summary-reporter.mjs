@@ -1,6 +1,7 @@
 import { appendFile } from 'node:fs/promises';
 
-const esc = (value) => String(value ?? '').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+const clean = (value) => String(value ?? '').replace(/\u001b\[[0-9;]*m/g, '').replaceAll('\r', ' ').replaceAll('\n', ' ');
+const esc = (value) => clean(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
 const markdown = (value) => String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', ' ');
 
 export default class PlaywrightSummaryReporter {
@@ -10,6 +11,7 @@ export default class PlaywrightSummaryReporter {
 
   async onEnd() {
     const tests = this.suite?.allTests() ?? [];
+    if (!tests.some((test) => test.results.length > 0)) return;
     const outcomes = tests.map((test) => ({ test, outcome: test.outcome() }));
     const counts = {
       total: tests.length,
@@ -48,7 +50,12 @@ export default class PlaywrightSummaryReporter {
       }
     }
 
-    process.stdout.write(`::notice title=Playwright E2E summary::${counts.total} total; ${counts.passed} passed; ${counts.failed} failed; ${counts.flaky} flaky; ${counts.skipped} skipped\n`);
+    const failureDetails = failures.map(({ test }) => {
+      const firstError = test.results.at(-1)?.errors?.[0]?.message ?? 'no error recorded';
+      return `${test.titlePath().join(' › ')}: ${clean(firstError).slice(0, 180)}`;
+    }).join(' || ');
+    const detailSuffix = failureDetails ? `; failures: ${failureDetails}` : '';
+    process.stdout.write(`::notice title=Playwright E2E summary::${counts.total} total; ${counts.passed} passed; ${counts.failed} failed; ${counts.flaky} flaky; ${counts.skipped} skipped${detailSuffix}\n`);
 
     const summaryPath = process.env.GITHUB_STEP_SUMMARY;
     if (summaryPath) return appendFile(summaryPath, `${lines.join('\n')}\n`);

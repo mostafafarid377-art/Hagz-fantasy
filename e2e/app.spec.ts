@@ -91,5 +91,12 @@ test('mobile and tablet navigation work without horizontal overflow',async({page
 test('Arabic mobile layout has RTL navigation and no page overflow',async({page})=>{
   await page.setViewportSize({width:390,height:844});await page.getByLabel('Switch language').click();
   await expect(page.locator('html')).toHaveAttribute('dir','rtl');await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
-  await page.locator('.mobile-nav').getByRole('link',{name:'السوق'}).click();await expect(page.getByRole('heading',{name:'سوق اللاعبين'})).toBeVisible();
+  const mobileNav=page.locator('.mobile-nav');
+  await mobileNav.getByRole('link',{name:'الفريق'}).click();
+  await expect(page.getByRole('heading',{name:'فريقي'})).toBeVisible();
+  await page.getByRole('link',{name:'تعديل الفريق'}).click();
+  await expect(page.getByRole('heading',{name:'تشكيل الفريق'})).toBeVisible();
+  await page.getByRole('link',{name:'عرض الكل'}).click();
+  await expect(page.getByRole('heading',{name:'سوق اللاعبين'})).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
 });

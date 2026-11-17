@@ -1,7 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 async function prepare(page: Page, empty=false) {
   await page.goto('/dashboard'); await page.evaluate(()=>localStorage.clear()); await page.reload();
-  if(empty) await page.evaluate(()=>{const s=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);const q=s.squads.find((q:{managerId:string;leagueId:string})=>q.managerId==='manager'&&q.leagueId==='league-1');q.playerIds=[];q.captainId=undefined;q.viceCaptainId=undefined;q.confirmed=false;localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(s));});
+  if(empty) {
+    await page.evaluate(()=>{const s=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);const q=s.squads.find((q:{managerId:string;leagueId:string})=>q.managerId==='manager'&&q.leagueId==='league-1');q.playerIds=[];q.captainId=undefined;q.viceCaptainId=undefined;q.confirmed=false;localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(s));});
+    // Direct localStorage edits do not update DemoProvider's in-memory React state.
+    // Reload before interacting so the app and test fixture use the same squad.
+    await page.reload();
+  }
 }
 async function team(page: Page){return page.evaluate(()=>JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1'));}
 
@@ -32,7 +37,7 @@ test('add player respects budget, market status, and position limits',async({pag
 
 test('my squad supports empty positions, and adding a bench player does not change starters',async({page})=>{
   await prepare(page,true);await page.goto('/squad');await expect(page.locator('.squad-selection-pitch .pitch-add')).toHaveCount(15);await page.getByRole('button',{name:'Add player: MID'}).first().click();await page.getByRole('dialog').getByRole('button',{name:/Hassan Magdy/}).click();expect((await team(page)).playerIds).toEqual(['p9']);
-  await prepare(page);await page.goto('/squad');await page.getByRole('button',{name:'Remove: Seif Mostafa'}).click();const before=await team(page);await expect(page.locator('.bench-add[aria-label="Add player: DEF"]')).toHaveCount(1);
+  await prepare(page);await page.goto('/squad-builder');await page.getByRole('button',{name:'Remove: Seif Mostafa'}).click();await page.goto('/squad');const before=await team(page);await expect(page.locator('.bench-add[aria-label="Add player: DEF"]')).toHaveCount(1);
   await page.locator('.bench-add[aria-label="Add player: DEF"]').click();await page.getByRole('dialog').getByRole('button',{name:/Ali Hamdy/}).click();const after=await team(page);expect(after.playerIds.slice(0,11)).toEqual(before.playerIds.slice(0,11));expect(after.playerIds).toContain('p7');
 });
 
