@@ -53,12 +53,12 @@ export function LiveMatchCenter() {
 
     {sorted.length === 0 ? <Empty title="No matches yet" description={live.isLeader ? 'Schedule the first match for this league.' : 'A League Leader schedules matches and appoints an organizer.'} /> : <>
       {featured && <div className="match-center-hero panel">
-        <Badge kind={featured.is_official ? 'lime' : 'neutral'}>{t(featured.is_official ? 'Full time' : 'Scheduled')}</Badge>
+        <Badge kind={featured.is_official ? 'lime' : featured.is_cancelled ? 'orange' : 'neutral'}>{t(featured.is_official ? 'Full time' : featured.is_cancelled ? 'Cancelled' : 'Scheduled')}</Badge>
         <div className="center-teams"><div><div className="team-crest crest-lime"><Shield size={30} /></div><strong>{featured.team_a}</strong></div><div><small>{featured.is_official ? t('Final score') : t('Upcoming')}</small><b>{featured.is_official ? `${featured.team_a_score} : ${featured.team_b_score}` : 'VS'}</b></div><div><div className="team-crest crest-orange"><Zap size={30} /></div><strong>{featured.team_b}</strong></div></div>
         <div className="match-info"><span><CalendarDays size={16} /> {new Date(featured.starts_at).toLocaleString()}</span><span><MapPin size={16} /> {featured.venue}</span>{featured.gameweek_id && <span>{t('GAMEWEEK')} {live.gameweeks.find((g) => g.id === featured.gameweek_id)?.number ?? '—'}</span>}</div>
       </div>}
       <div className="panel table-wrap"><table><thead><tr><th>{t('MATCH')}</th><th>{t('Kick-off')}</th><th>{t('Venue')}</th><th>{t('Score')}</th><th>{t('Status')}</th><th /></tr></thead><tbody>
-        {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.is_official ? `${m.team_a_score} – ${m.team_b_score}` : '—'}</td><td><Badge kind={m.is_official ? 'lime' : 'neutral'}>{t(m.is_official ? 'Full time' : m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
+        {sorted.map((m) => <tr key={m.id}><td><strong>{m.team_a}</strong> <span className="muted">vs</span> <strong>{m.team_b}</strong></td><td>{new Date(m.starts_at).toLocaleString()}</td><td>{m.venue}</td><td>{m.is_official ? `${m.team_a_score} – ${m.team_b_score}` : '—'}</td><td><Badge kind={m.is_official ? 'lime' : m.is_cancelled ? 'orange' : 'neutral'}>{t(m.is_official ? 'Full time' : m.is_cancelled ? 'Cancelled' : m.revision_state ?? 'scheduled')}</Badge></td><td><button className="button button-small button-outline" onClick={() => setSelectedId(m.id)}>{t('Open')}</button></td></tr>)}
       </tbody></table></div>
     </>}
     {selected && <dialog ref={matchDialog} className="player-sheet match-detail-sheet" aria-labelledby="match-title"
@@ -82,6 +82,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [reason, setReason] = useState('');
+  const [cancelReason, setCancelReason] = useState('');
   const [playersBySide, setPlayersBySide] = useState<Record<string, Record<string, 'starter' | 'substitute'>>>({});
   const [scoreA, setScoreA] = useState('0'); const [scoreB, setScoreB] = useState('0');
   const [eventPlayer, setEventPlayer] = useState(''); const [eventType, setEventType] = useState('goal');
@@ -93,6 +94,9 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   const approvedLineup = approvedLineups[0];
   const currentLineups = current?.lineups ?? [];
   const selectedPlayers = playersBySide;
+  const otherSideId = (teamId: string) => teamId === match.team_a_id ? match.team_b_id : match.team_a_id;
+  const availablePlayers = (teamId: string) => live.players.filter((player) => player.active
+    && (!selectedPlayers[otherSideId(teamId)]?.[player.player_id] || !!selectedPlayers[teamId]?.[player.player_id]));
   const eventPlayers = currentLineups.flatMap((l) => l.players);
   const identityHint = (id: string) => {
     const player = live.players.find((candidate) => candidate.player_id === id);
@@ -159,18 +163,22 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     <div className="sheet-stats"><div><small>A</small><strong>{match.team_a_score ?? '—'}</strong></div><div><small>Workflow</small><strong>{current?.state ?? 'Scheduled'}</strong></div><div><small>B</small><strong>{match.team_b_score ?? '—'}</strong></div></div>
     {error && <p className="error-text" role="alert">{error}</p>}{notice && <p className="success-text" role="status">{notice}</p>}
     {canOrganize && <p className="notice">{t('League Leader and assigned active Organizer can manage this match. Organizer results publish immediately when complete; the Leader may also finalize them. Fantasy scoring remains pending until scoring rules are approved.')}</p>}
-    {canOrganize && !current && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'Match record opened.')}>Open match record</button>}
+    {canOrganize && !current && !match.is_cancelled && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'Match record opened.')}>{t('Open match record')}</button>}
+    {match.is_cancelled && <p className="notice" role="status">{t('Match cancelled')}{match.cancel_reason ? ` · ${match.cancel_reason}` : ''}</p>}
+    {canOrganize && !current && !match.is_cancelled && <section className="workflow-section match-cancel-panel"><h3>{t('Cancel scheduled match')}</h3><p className="muted">{t('A match can be cancelled before its record is opened. Cancellation keeps the match and audit history.')}</p><label>{t('Cancellation reason')}<input maxLength={500} value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} /></label><button className="button button-danger" disabled={busy || !cancelReason.trim()} onClick={() => void run(() => api.cancelMatch(live.leagueId!, match.id, cancelReason.trim()), t('Match cancelled successfully.'))}>{t('Cancel match')}</button></section>}
     {canOrganize && current?.state === 'rejected' && <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.openRevision(live.leagueId!, match.id), 'A new immutable revision is open for correction.')}>Open new revision</button>}
     {canEditDraft && <section className="workflow-section"><h3>{t('Lineups · published League Market')}</h3><p className="muted">{t('Choose players independently for both sides. Selection uses Market player identity, not fantasy ownership. The server checks active same-league Market membership, duplicate selection, and lineup limits.')}</p>
       {[{id:match.team_a_id,name:match.team_a},{id:match.team_b_id,name:match.team_b}].map((side) => <fieldset className="match-side-picker" key={side.id}><legend>{side.name} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'starter').length}/{match.starters_per_side} {t('starters')} · {Object.values(selectedPlayers[side.id] ?? {}).filter((x) => x === 'substitute').length}/{match.max_substitutes} {t('substitutes')}</legend>
-        {live.players.filter((p) => p.active).map((player) => <label className={`match-player-choice${selectedPlayers[side.id]?.[player.player_id] ? ' is-selected' : ''}`} key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={busy || !!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span dir="auto">{player.name}{identityHint(player.player_id)} <small>{t(player.position)}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} ${t('lineup role')}`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">{t('Starter')}</option><option value="substitute">{t('Substitute')}</option></select>}</label>)}
-        {live.players.filter((p) => p.active).length === 0 && <p className="muted">{t('No active published Market players are available.')}</p>}
+        {availablePlayers(side.id).map((player) => <label className={`match-player-choice${selectedPlayers[side.id]?.[player.player_id] ? ' is-selected' : ''}`} key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={busy || !!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span dir="auto">{player.name}{identityHint(player.player_id)} <small>{t(player.position)}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} ${t('lineup role')}`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">{t('Starter')}</option><option value="substitute">{t('Substitute')}</option></select>}</label>)}
+        {availablePlayers(side.id).length === 0 && <p className="muted">{t('No active published Market players are available.')}</p>}
       </fieldset>)}
-      <button className="button button-outline" disabled={busy || live.players.filter((p) => p.active).length === 0} onClick={() => void run(async () => {
-        for (const sideId of [match.team_a_id, match.team_b_id]) {
-          const rows = Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({ player_id, selection, actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position, eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' } }));
-          await api.setMatchLineup(live.leagueId!, current!.revision_id, sideId, rows);
-        }
+      <button className="button button-outline" disabled={busy || match.is_cancelled} onClick={() => void run(async () => {
+        const rowsFor = (sideId: string) => Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({
+          player_id, selection,
+          actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position,
+          eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' },
+        }));
+        await api.saveMatchLineups(live.leagueId!, current!.revision_id, rowsFor(match.team_a_id), rowsFor(match.team_b_id));
         const persisted = await api.matches(live.leagueId!);
         const savedRevision = persisted.find((row) => row.id === match.id)?.history?.find((revision) => revision.revision_id === current!.revision_id);
         const saved = savedRevision?.lineups ?? [];
@@ -180,8 +188,8 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
           return actual.length === expected.length && expected.every(([playerId, selection]) => actual.some((player) => player.player_id === playerId && player.selection === selection));
         });
         if (!matchesSelection) throw new Error('Lineups were sent but the saved server state did not match. Refresh and verify before submitting.');
-      }, 'Both lineups saved and verified on the server.')}>{t('Save both lineups')}</button>
-      <button className="button button-primary" disabled={busy} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
+      }, t('Both lineups saved and verified on the server.'))}>{t('Save both lineups')}</button>
+      <button className="button button-primary" disabled={busy || match.is_cancelled} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
     </section>}
     {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}
     {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>{t('Record match result')}</button>}
@@ -210,7 +218,7 @@ export function LiveFixtures() {
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
   const played = (m: ApiMatch) => new Date(m.starts_at).getTime() < Date.now();
-  const statusLabel = (m: ApiMatch) => m.is_official ? 'Full time'
+  const statusLabel = (m: ApiMatch) => m.is_cancelled ? 'Cancelled' : m.is_official ? 'Full time'
     : m.has_pending_result ? 'Result ready to finalize'
       : m.has_pending_lineup ? 'Lineup awaiting review'
         : m.revision_state === 'submitted' ? 'Lineup awaiting review'
@@ -254,11 +262,11 @@ export function LiveFixtures() {
                 <div className="fixture-score">
                   <strong>{m.team_a}</strong>
                   <span className="mini-crest c0"><Shield size={17} /></span>
-                  <b>{m.team_a_score == null ? 'vs' : `${m.team_a_score} – ${m.team_b_score}`}</b>
+                  <b>{m.is_cancelled ? t('Cancelled') : m.team_a_score == null ? 'vs' : `${m.team_a_score} – ${m.team_b_score}`}</b>
                   <span className="mini-crest c1"><Zap size={17} /></span>
                   <strong>{m.team_b}</strong>
                 </div>
-                <Badge kind={m.revision_state === 'approved' ? 'lime' : m.revision_state === 'submitted' ? 'orange' : 'neutral'}>
+                <Badge kind={m.is_cancelled || m.revision_state === 'submitted' ? 'orange' : m.revision_state === 'approved' ? 'lime' : 'neutral'}>
                   {t(statusLabel(m))}
                 </Badge>
                 <span className="fixture-show-link">{t('Show match')} <ArrowRight size={17} /></span>

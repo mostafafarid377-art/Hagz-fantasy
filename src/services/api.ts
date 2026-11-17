@@ -297,6 +297,19 @@ export const matches = (leagueId: string) => call<ApiMatch[]>('ff_matches', { p_
 export const openRevision = (leagueId: string, matchId: string) =>
   call<{ id: string; version: number; state: string }>('ff_match_open_revision', { p_league: leagueId, p_match: matchId });
 
+export const saveMatchLineups = (leagueId: string, revisionId: string, teamAPlayers: Array<{
+  player_id: string; selection: 'starter' | 'substitute'; actual_position: 'GK' | 'DEF' | 'MID' | 'FWD';
+  eligibility_kind?: 'registered' | 'temporary' | 'market'; eligibility_evidence?: Record<string, unknown>;
+}>, teamBPlayers: Array<{
+  player_id: string; selection: 'starter' | 'substitute'; actual_position: 'GK' | 'DEF' | 'MID' | 'FWD';
+  eligibility_kind?: 'registered' | 'temporary' | 'market'; eligibility_evidence?: Record<string, unknown>;
+}>) => call<{ revision_id: string; team_a: { lineup_id: string; players: number }; team_b: { lineup_id: string; players: number }; saved: true }>(
+  'ff_match_save_lineups', { p_league: leagueId, p_revision: revisionId, p_team_a_players: teamAPlayers, p_team_b_players: teamBPlayers });
+
+export const cancelMatch = (leagueId: string, matchId: string, reason: string) =>
+  call<{ id: string; cancelled: true; cancelled_at: string; reason: string }>(
+    'ff_match_cancel', { p_league: leagueId, p_match: matchId, p_reason: reason });
+
 export const setMatchLineup = (leagueId: string, revisionId: string, teamId: string, players: Array<{
   player_id: string; selection: 'starter' | 'substitute'; actual_position: 'GK' | 'DEF' | 'MID' | 'FWD';
   eligibility_kind?: 'registered' | 'temporary' | 'market'; eligibility_evidence?: Record<string, unknown>;

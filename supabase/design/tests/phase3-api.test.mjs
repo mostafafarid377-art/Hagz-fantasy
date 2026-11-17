@@ -35,6 +35,7 @@ const PKG = [
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
   '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
   '20261116210000_phase4_market_and_transfer_gaps', '20261116220000_restore_real_team_name_uniqueness',
+  '20261116230000_match_cancellation_and_atomic_lineup_save',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -694,11 +695,24 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
     JSON.stringify([{ player_id: unpublishedProfile, selection: 'starter', actual_position: 'MID', eligibility_kind: 'registered' }])), '23514', 'client cannot bypass Market eligibility using legacy registration');
 
   // Submission validates that BOTH sides have a lineup - one side is an error.
+  await expectDenied(() => rpc(BOB, 'ff_match_save_lineups', LEAGUE.id, revision.id,
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }]),
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }])), '23505', 'atomic two-side save rejects a player assigned to both teams');
+  assert.equal(await scalar('select count(*)::int from public.real_match_lineup_players where league_id=$1 and revision_id=$2 and player_id=$3', [LEAGUE.id, revision.id, prof]), 1, 'failed atomic save rolls back Team A replacement and keeps its prior saved row');
+  const incompleteSave = await rpc(BOB, 'ff_match_save_lineups', LEAGUE.id, revision.id,
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }]), JSON.stringify([]));
+  assert.equal(incompleteSave.saved, true, 'draft saving allows the other side to remain temporarily empty');
+  assert.equal(incompleteSave.team_b.players, 0);
+  // Submission validates that BOTH sides have a lineup - an incomplete draft is not accepted.
   await expectDenied(() => rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id), '23514', 'submitting with one side only');
   await expectDenied(() => rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
     JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market' }])), '23505', 'one Market player cannot be selected for both match sides');
-  await rpc(BOB, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamB.id,
+  const completedLineups = await rpc(BOB, 'ff_match_save_lineups', LEAGUE.id, revision.id,
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]),
     JSON.stringify([{ player_id: profB, selection: 'starter', actual_position: 'FWD', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]));
+  assert.equal(completedLineups.saved, true);
+  assert.equal(completedLineups.team_a.players, 1);
+  assert.equal(completedLineups.team_b.players, 1);
   await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, false, null, null, marketA.player_id);
   await expectDenied(() => rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id), '23514', 'inactive Market player cannot be submitted');
   await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, true, null, null, marketA.player_id);
@@ -835,8 +849,18 @@ test('matches: Gameweek is optional and old matches retain their Gameweek links'
     '2025-08-11T19:00:00Z', 'Community Ground', 1, 1);
   assert.ok(standalone.id);
   assert.equal(await scalar('select gameweek_id from public.real_matches where id=$1', [standalone.id]), null);
+  await expectDenied(() => rpc(BOB, 'ff_match_cancel', LEAGUE.id, standalone.id, 'Not assigned'), '42501', 'unassigned manager cancelling a match');
+  const cancelled = await rpc(CAROL, 'ff_match_cancel', LEAGUE.id, standalone.id, 'Venue unavailable');
+  assert.equal(cancelled.cancelled, true);
+  assert.equal(cancelled.reason, 'Venue unavailable');
+  const retriedCancel = await rpc(CAROL, 'ff_match_cancel', LEAGUE.id, standalone.id, 'A different retry reason');
+  assert.equal(retriedCancel.cancelled_at, cancelled.cancelled_at, 'cancellation replay preserves the original cancellation record');
+  assert.equal(await scalar("select count(*)::int from public.audit_logs where league_id=$1 and entity_id=$2 and action='match_cancelled'", [LEAGUE.id, standalone.id]), 1, 'cancellation is audited exactly once');
+  await expectDenied(() => rpc(ALICE, 'ff_match_open_revision', LEAGUE.id, standalone.id), '23514', 'cancelled match cannot be reopened');
   const read = await rpc(ALICE, 'ff_matches', LEAGUE.id);
   assert.equal(read.find(match => match.id === standalone.id).gameweek_id, null);
+  assert.equal(read.find(match => match.id === standalone.id).is_cancelled, true);
+  assert.equal(read.find(match => match.id === standalone.id).cancel_reason, 'Venue unavailable');
 });
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1041,11 @@ test('Phase 4 RPCs retain authenticated-only execute permissions and definer own
   assert.equal(create, true); assert.equal(anonCreate, false);
   assert.equal(read, true); assert.equal(anonRead, false);
   assert.equal(lineup, true); assert.equal(anonLineup, false);
+  for (const signature of ['public.ff_match_save_lineups(uuid,uuid,jsonb,jsonb)', 'public.ff_match_cancel(uuid,uuid,text)']) {
+    assert.equal(await scalar(`select has_function_privilege('authenticated', '${signature}'::regprocedure, 'execute')`), true);
+    assert.equal(await scalar(`select has_function_privilege('anon', '${signature}'::regprocedure, 'execute')`), false);
+    assert.equal(await scalar(`select pg_get_userbyid(proowner) from pg_proc where oid='${signature}'::regprocedure`), 'ff_migration_owner');
+  }
   for (const signature of ['public.ff_suggestion_submit_batch(uuid,jsonb)', 'public.ff_transfers(uuid,integer)']) {
     assert.equal(await scalar(`select has_function_privilege('authenticated', '${signature}'::regprocedure, 'execute')`), true);
     assert.equal(await scalar(`select has_function_privilege('anon', '${signature}'::regprocedure, 'execute')`), false);

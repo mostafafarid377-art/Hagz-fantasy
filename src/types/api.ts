@@ -145,6 +145,9 @@ export interface ApiMatch {
   team_b_id: string;
   team_b: string;
   organizer_id: string;
+  is_cancelled?: boolean;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
   starters_per_side: number;
   max_substitutes: number;
   revision_id: string | null;
