@@ -158,10 +158,11 @@ const PACKAGE = [
   ['20261116220000', '022_restore_real_team_name_uniqueness.sql', 'restore_real_team_name_uniqueness'],
   ['20261116230000', '023_match_cancellation_and_atomic_lineup_save.sql', 'match_cancellation_and_atomic_lineup_save'],
   ['20261116235900', '024_idempotent_match_lineup_submission.sql', 'idempotent_match_lineup_submission'],
+  ['20261117000000', '025_match_result_lineup_source_read_model.sql', 'match_result_lineup_source_read_model'],
 ];
 
 /** Drafts that live in supabase/design/migrations/. */
-const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024']);
+const FROM_DESIGN = new Set(['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025']);
 
 /** Authored sources that live in supabase/design/api/ rather than migrations/. */
 const FROM_API = new Set(['012', '013']);

@@ -126,6 +126,8 @@ export interface ApiMatchSubmission {
 export interface ApiMatchRevision {
   revision_id: string;
   version: number;
+  /** Non-null for a result fork whose player lineup is inherited from this source revision. */
+  based_on_lineup_revision_id: string | null;
   state: 'draft' | 'submitted' | 'approved' | 'rejected' | 'corrected';
   team_a_score: number | null;
   team_b_score: number | null;

@@ -17,3 +17,15 @@
 .match-cancel-panel label{display:flex;flex-direction:column;gap:6px;margin:10px 0;font-size:12px;color:var(--muted)}
 .match-cancel-panel input{width:100%;min-height:42px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2,#151c15);color:var(--text);font:inherit}
 .match-cancel-panel button{min-height:42px}
+
+/* Read-only match views render the persisted revision snapshot, never a fantasy squad. */
+.saved-lineup-sides{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.saved-lineup-side{min-width:0;padding:11px;border:1px solid var(--line);border-radius:11px;background:color-mix(in srgb,var(--surface-2,#151c15) 60%,transparent)}
+.saved-lineup-side h4,.saved-lineup-group h5{margin:0 0 7px;font-size:13px}
+.saved-lineup-group+ .saved-lineup-group{margin-top:11px;padding-top:9px;border-top:1px solid var(--line)}
+.saved-lineup-group ul{display:grid;gap:5px;margin:0;padding:0;list-style:none}
+.saved-lineup-group li{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px}
+.saved-lineup-group li span{min-width:0;overflow-wrap:anywhere}
+.saved-lineup-group li small{flex:none;color:var(--muted)}
+.saved-lineup-group .muted{margin:0;font-size:11px}
+@media(max-width:600px){.saved-lineup-sides{grid-template-columns:1fr}}

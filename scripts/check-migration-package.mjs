@@ -51,6 +51,8 @@ const DESIGN_MIGRATIONS = {
   '023_match_cancellation_and_atomic_lineup_save.sql': 'f2345df49b182424255ab577e483279c08f1b71c9217e0eecf156c24974957e9',
   // Retry-safe replay for the existing lineup submission RPC; validation and ACL stay intact.
   '024_idempotent_match_lineup_submission.sql': 'efffb36e1d5b0eadc5f186c06b77b7a983735841a54064e5315c1933029bd410',
+  // Exposes the existing result-fork lineup source in the member-scoped read model.
+  '025_match_result_lineup_source_read_model.sql': 'dbf699caabf7d66fd04583b4fc2e0741c89d98055792206d2837725481411cc7',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -106,6 +108,7 @@ const PACKAGE = [
   ['20261116220000_restore_real_team_name_uniqueness.sql', 'design/migrations/022_restore_real_team_name_uniqueness.sql'],
   ['20261116230000_match_cancellation_and_atomic_lineup_save.sql', 'design/migrations/023_match_cancellation_and_atomic_lineup_save.sql'],
   ['20261116235900_idempotent_match_lineup_submission.sql', 'design/migrations/024_idempotent_match_lineup_submission.sql'],
+  ['20261117000000_match_result_lineup_source_read_model.sql', 'design/migrations/025_match_result_lineup_source_read_model.sql'],
 ];
 
 /**
@@ -116,9 +119,10 @@ const PACKAGE = [
  * a function body, 016 adds one checked RPC, and 017 adds team-level captaincy
  * columns plus one separately checked RPC. Migration 024 only replaces the
  * existing lineup-submit body, keeps its signature/owner/ACL, and delegates the
- * first submission to the existing validation trigger. They are individually
- * reviewed and must remain explicitly allowlisted here rather than relying on a
- * "skip the last file" rule.
+ * first submission to the existing validation trigger. Migration 025 only
+ * replaces the member-scoped match read-model body and adds an existing lineage
+ * value to its JSON output. They are individually reviewed and must remain
+ * explicitly allowlisted here rather than relying on a "skip the last file" rule.
  */
 const POST_VERIFICATION_REPAIRS = [
   '20261115000015_actor_identity_claim_fallback.sql',
@@ -135,6 +139,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261116220000_restore_real_team_name_uniqueness.sql',
   '20261116230000_match_cancellation_and_atomic_lineup_save.sql',
   '20261116235900_idempotent_match_lineup_submission.sql',
+  '20261117000000_match_result_lineup_source_read_model.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -372,6 +377,14 @@ if (!(await exists(execDir))) {
         && /grant\s+execute\s+on\s+function\s+public\.ff_match_cancel\(uuid,\s*uuid,\s*text\)\s+to\s+authenticated/i.test(stripped);
       if (!atomicRpc || !cancelRpc || !boundedReason || !readModel || !scopedColumns || !authenticatedOnly) fail(`post-verification migration ${repair}`, 'must provide atomic two-team saves and authorized, audited cancellation with bounded reason and authenticated-only RPCs');
       else ok(`post-verification migration ${repair} is scoped`, 'adds cancellation metadata and two authenticated workflow RPCs; no destructive or broad privilege DDL');
+    } else if (repair === '20261117000000_match_result_lineup_source_read_model.sql') {
+      const replacesOnlyReadRpc = (stripped.match(/^\s*create\s+or\s+replace\s+function\s+/gim) ?? []).length === 1
+        && /create\s+or\s+replace\s+function\s+public\.ff_matches\(p_league\s+uuid\)\s+returns\s+jsonb[\s\S]*?security\s+definer\s+set\s+search_path\s*=\s*pg_catalog\s*,\s*ff_private/i.test(stripped);
+      const memberCheck = /perform\s+ff_private\.require_member\(p_league\)/i.test(stripped);
+      const exposesExistingLineage = /'based_on_lineup_revision_id'\s*,\s*v\.based_on_lineup_revision_id/i.test(stripped);
+      const noSurfaceChanges = !/^\s*(drop\s+|alter\s+table|create\s+policy|grant\s+|revoke\s+|insert\s+into|update\s+|delete\s+from)/im.test(stripped);
+      if (!replacesOnlyReadRpc || !memberCheck || !exposesExistingLineage || !noSurfaceChanges) fail(`post-verification migration ${repair}`, 'must replace only the existing member-scoped ff_matches read-model body and expose result-lineup source lineage without privilege/schema changes');
+      else ok(`post-verification migration ${repair} is scoped`, 'adds existing result-lineup source ID to the ff_matches JSON read model; owner and ACL preserved');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {

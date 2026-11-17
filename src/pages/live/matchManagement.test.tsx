@@ -44,8 +44,8 @@ function editableMatch(isLeader = true) {
   const live: any = mockLive(isLeader);
   live.matches[0].revision_id = 'lineup-draft';
   live.matches[0].revision_state = 'draft';
-  live.matches[0].history = [{ revision_id: 'lineup-draft', version: 1, state: 'draft', team_a_score: null, team_b_score: null,
-    submissions: [], events: [], correction: null, lineups: [] }];
+  live.matches[0].history = [{ revision_id: 'lineup-draft', version: 1, state: 'draft', based_on_lineup_revision_id: null,
+    team_a_score: null, team_b_score: null, submissions: [], events: [], correction: null, lineups: [] }];
   if (!isLeader) live.myUserId = 'organizer-1';
   return live;
 }
@@ -93,6 +93,125 @@ describe('Live fixtures and scheduling', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('renders only the selected revision lineup, separated into starters and bench, with zero-event players retained', async () => {
+    const live: any = mockLive();
+    live.matches[0].is_official = true;
+    live.matches[0].official_revision_id = 'official-old';
+    const playersFor = (side: 'a' | 'b') => [
+      ...Array.from({ length: 11 }, (_, index) => ({
+        player_id: `${side}-starter-${index + 1}`, name: `${side.toUpperCase()} Starter ${index + 1}`,
+        selection: 'starter', actual_position: index === 0 ? 'GK' : 'DEF',
+      })),
+      ...Array.from({ length: 4 }, (_, index) => ({
+        player_id: `${side}-bench-${index + 1}`, name: `${side.toUpperCase()} Bench ${index + 1}`,
+        selection: 'substitute', actual_position: 'MID',
+      })),
+    ];
+    const corrected = { revision_id: 'correction-approved', version: 3, state: 'approved', team_a_score: 2, team_b_score: 1,
+      submissions: [{ id: 'lineup-approved', kind: 'lineup', approval: { id: 'approval-correction', decision: 'approved' } }],
+      events: [{ id: 'one-event', type: 'goal', minute: 5, player_id: 'a-starter-1', player_name: 'A Starter 1' }], correction: { reason: 'Score correction' },
+      lineups: [{ team_id: 'a', players: playersFor('a') }, { team_id: 'b', players: playersFor('b') }] };
+    const oldOfficial = { ...corrected, revision_id: 'official-old', version: 1,
+      lineups: [{ team_id: 'a', players: [{ ...playersFor('a')[0], player_id: 'old-a', name: 'Old Official Player' }] },
+        { team_id: 'b', players: [{ ...playersFor('b')[0], player_id: 'old-b', name: 'Old Away Player' }] }] };
+    live.matches[0].revision_id = corrected.revision_id;
+    live.matches[0].revision_version = corrected.version;
+    live.matches[0].revision_state = corrected.state;
+    live.matches[0].history = [corrected, oldOfficial];
+    live.players = [{ player_id: 'not-selected', name: 'Unselected Squad Player', position: 'FWD', active: true }];
+    openWorkflow(live);
+
+    const saved = screen.getByRole('region', { name: 'Saved match lineups' });
+    expect(within(saved).getAllByRole('region')).toHaveLength(2);
+    expect(within(saved).getByText('A Starter 1')).toBeTruthy();
+    expect(within(saved).getByText('A Bench 4')).toBeTruthy();
+    expect(within(saved).getByText('B Starter 11')).toBeTruthy();
+    expect(within(saved).getByText('B Bench 4')).toBeTruthy();
+    expect(within(saved).getAllByText('Starters')).toHaveLength(2);
+    expect(within(saved).getAllByText('Bench')).toHaveLength(2);
+    expect(within(saved).queryByText('Unselected Squad Player')).toBeNull();
+    expect(within(saved).queryByText('Old Official Player')).toBeNull();
+    expect(within(saved).getAllByRole('listitem')).toHaveLength(30);
+  });
+
+  it('shows the finalized official lineup when the latest draft has no saved lineup', () => {
+    const live: any = mockLive();
+    live.matches[0].is_official = true;
+    live.matches[0].official_revision_id = 'official-revision';
+    live.matches[0].revision_id = 'new-empty-draft';
+    live.matches[0].revision_state = 'draft';
+    const savedPlayers = [{ player_id: 'saved-a', name: 'Saved Home Player', selection: 'starter', actual_position: 'GK' },
+      { player_id: 'saved-b', name: 'Saved Away Player', selection: 'substitute', actual_position: 'MID' }];
+    live.matches[0].history = [
+      { revision_id: 'new-empty-draft', version: 2, state: 'draft', based_on_lineup_revision_id: null, team_a_score: null, team_b_score: null,
+        submissions: [], events: [], correction: null, lineups: [] },
+      { revision_id: 'official-revision', version: 1, state: 'approved', team_a_score: 1, team_b_score: 0,
+        submissions: [], events: [], correction: null, lineups: [
+          { team_id: 'a', players: [savedPlayers[0]] }, { team_id: 'b', players: [savedPlayers[1]] },
+        ] },
+    ];
+    openWorkflow(live);
+    const saved = screen.getByRole('region', { name: 'Saved match lineups' });
+    expect(within(saved).getByText('Saved Home Player')).toBeTruthy();
+    expect(within(saved).getByText('Saved Away Player')).toBeTruthy();
+    expect(within(saved).queryByText('Unselected Squad Player')).toBeNull();
+  });
+
+  it('keeps lineup editing on the approved correction source and exposes only result-entry controls on its child revision', () => {
+    const live: any = mockLive();
+    live.players = [{ player_id: 'not-selected', name: 'Unselected market player', position: 'FWD', active: true }];
+    const source = { revision_id: 'correction-source', version: 2, state: 'approved', based_on_lineup_revision_id: null,
+      team_a_score: null, team_b_score: null, correction: { reason: 'Corrected match lineup' }, events: [],
+      submissions: [{ id: 'approved-lineup', kind: 'lineup', approval: { id: 'lineup-approval', decision: 'approved' } }],
+      lineups: [{ team_id: 'a', players: [{ player_id: 'selected-a', name: 'Selected Home', selection: 'starter', actual_position: 'GK' }] },
+        { team_id: 'b', players: [{ player_id: 'selected-b', name: 'Selected Away', selection: 'substitute', actual_position: 'MID' }] }] };
+    const result = { ...source, revision_id: 'correction-result-child', version: 3, state: 'draft',
+      based_on_lineup_revision_id: 'correction-source', submissions: [], events: [], team_a_score: null, team_b_score: null };
+    live.matches[0].revision_id = result.revision_id;
+    live.matches[0].revision_state = 'draft';
+    live.matches[0].history = [result, source];
+    openWorkflow(live);
+
+    expect(screen.getByText('This result revision uses the approved match lineup. To change selected players, open a new correction.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Score and match events' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Save both lineups' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save and approve lineups' })).toBeNull();
+    const eventPlayer = screen.getByLabelText('Player');
+    expect(within(eventPlayer).getByRole('option', { name: 'Selected Home' })).toBeTruthy();
+    expect(within(eventPlayer).getByRole('option', { name: 'Selected Away' })).toBeTruthy();
+    expect(within(eventPlayer).queryByRole('option', { name: 'Unselected market player' })).toBeNull();
+  });
+
+  it('remounts the lineup editor when a correction revision becomes active', async () => {
+    const live: any = editableMatch();
+    live.players = [
+      { player_id: 'player-old', name: 'Old selected', position: 'DEF', active: true },
+      { player_id: 'player-unsaved', name: 'Unsaved stale choice', position: 'MID', active: true },
+      { player_id: 'player-corrected', name: 'Correction selection', position: 'FWD', active: true },
+    ];
+    live.matches[0].history[0].lineups = [{ team_id: 'a', players: [
+      { player_id: 'player-old', name: 'Old selected', selection: 'starter', actual_position: 'DEF' },
+    ] }, { team_id: 'b', players: [] }];
+    vi.mocked(useLive).mockReturnValue(live as never);
+    const view = render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    const homePicker = within(screen.getByRole('group', { name: /North/ }));
+    const staleChoice = homePicker.getByRole('checkbox', { name: /Unsaved stale choice/ });
+    fireEvent.click(staleChoice);
+    expect((staleChoice as HTMLInputElement).checked).toBe(true);
+
+    const corrected: any = { ...live, matches: [{ ...live.matches[0], revision_id: 'correction-attempt-2', revision_version: 2,
+      history: [{ ...live.matches[0].history[0], revision_id: 'correction-attempt-2', version: 2,
+        lineups: [{ team_id: 'a', players: [{ player_id: 'player-corrected', name: 'Correction selection', selection: 'starter', actual_position: 'FWD' }] },
+          { team_id: 'b', players: [] }] }] }] };
+    vi.mocked(useLive).mockReturnValue(corrected as never);
+    view.rerender(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
+    const newHomePicker = within(screen.getByRole('group', { name: /North/ }));
+    await waitFor(() => expect((newHomePicker.getByRole('checkbox', { name: /Correction selection/ }) as HTMLInputElement).checked).toBe(true));
+    expect((newHomePicker.getByRole('checkbox', { name: /Unsaved stale choice/ }) as HTMLInputElement).checked).toBe(false);
+    expect((newHomePicker.getByRole('checkbox', { name: /Old selected/ }) as HTMLInputElement).checked).toBe(false);
+  });
+
   it('creates and verifies a standalone match through the shared Fixtures workflow', async () => {
     const live = mockLive();
     vi.mocked(api.realTeams).mockResolvedValue([
@@ -128,8 +247,8 @@ describe('Live fixtures and scheduling', () => {
     ];
     live.matches[0].revision_id = 'lineup-draft';
     live.matches[0].revision_state = 'draft';
-    live.matches[0].history = [{ revision_id: 'lineup-draft', version: 1, state: 'draft', team_a_score: null, team_b_score: null,
-      submissions: [], events: [], correction: null, lineups: [] }];
+    live.matches[0].history = [{ revision_id: 'lineup-draft', version: 1, state: 'draft', based_on_lineup_revision_id: null,
+      team_a_score: null, team_b_score: null, submissions: [], events: [], correction: null, lineups: [] }];
     const savedLineups = [
       { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
       { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
@@ -418,7 +537,7 @@ describe('Live fixtures and scheduling', () => {
   it('keeps score input empty while cleared and only saves a valid edited value', async () => {
     const live: any = mockLive();
     live.matches[0].history = [
-      { revision_id: 'result-draft', version: 2, state: 'draft', team_a_score: null, team_b_score: null,
+      { revision_id: 'result-draft', version: 2, state: 'draft', based_on_lineup_revision_id: 'lineup-approved', team_a_score: null, team_b_score: null,
         submissions: [], events: [], correction: null,
         lineups: [{ team_id: 'a', players: [] }, { team_id: 'b', players: [] }] },
       { revision_id: 'lineup-approved', version: 1, state: 'approved', team_a_score: null, team_b_score: null,
