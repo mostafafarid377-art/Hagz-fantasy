@@ -16,7 +16,7 @@ import { render, cleanup, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../translations';
 
-afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 const league = (id: string, name: string) => ({
   league_id: id, name, role: 'leader' as const, status: 'active', budget: 100,
@@ -168,6 +168,25 @@ describe('transient bootstrap failures do not erase a verified league', () => {
     expect(app.get().leagueId).toBe(originalLeagueId);
     expect(app.get().leagues.map((row: any) => row.league_id)).toEqual(originalLeagues);
     expect(app.get().loading).toBe(false);
+  });
+});
+
+describe('stalled reads cannot hold the live dashboard on a spinner', () => {
+  it('releases loading with a visible partial failure when one RPC never responds', async () => {
+    vi.useFakeTimers();
+    const app = await mountLive({
+      createdId: 'unused',
+      bootstrapAfterCreate: [],
+      initialLeagues: [league('L-stalled', 'Stalled League')],
+      readHandler: async (fn) => fn === 'ff_market_players' ? new Promise(() => {}) : [],
+    });
+    expect(app.get().loading).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+    expect(app.get().loading).toBe(false);
+    expect(app.get().partialFailures).toContain('players: ff_market_players did not respond within 15000 ms');
+    expect(app.get().leagueId).toBe('L-stalled');
   });
 });
 

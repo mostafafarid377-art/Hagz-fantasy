@@ -56,13 +56,45 @@ function normalise(error: { code?: string; message?: string } | null): ApiError 
  * binding the wrong value.
  */
 type RpcOptions = { signal?: AbortSignal };
+type ReadOptions = RpcOptions & { timeoutMs?: number };
+
+/** Bound reads so a stalled mobile/network request cannot leave the app on a spinner forever. */
+const DEFAULT_READ_TIMEOUT_MS = 15_000;
+
+async function read<T>(fn: string, args: Record<string, unknown> = {}, options: ReadOptions = {}): Promise<T> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
+  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ApiError('network', `${fn} did not respond within ${timeoutMs} ms`, 'timeout'));
+    }, timeoutMs);
+  });
+  try {
+    // The race is intentional as a final guard even if an underlying fetch
+    // implementation ignores AbortSignal. Supabase receives the signal too, so
+    // supported clients also cancel the stalled network request itself.
+    return await Promise.race([call<T>(fn, args, { signal: controller.signal }), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abortFromCaller);
+  }
+}
 
 async function call<T>(fn: string, args: Record<string, unknown> = {}, options: RpcOptions = {}): Promise<T> {
   const supabase = getSupabase();
   if (!supabase) throw new ApiError('notConfigured', 'Supabase is not configured');
 
   const request = supabase.rpc(fn, args);
-  const { data, error } = await (options.signal ? request.abortSignal(options.signal) : request);
+  const query = options.signal && typeof request.abortSignal === 'function'
+    ? request.abortSignal(options.signal)
+    : request;
+  const { data, error } = await query;
   if (error) {
     const normalised = normalise(error);
     if (normalised.code === 'unknown') {
@@ -89,8 +121,8 @@ export interface Bootstrap {
   }>;
 }
 
-export const bootstrap = (displayName?: string) =>
-  call<Bootstrap>('ff_bootstrap', { p_display_name: displayName ?? null });
+export const bootstrap = (displayName?: string, options: ReadOptions = {}) =>
+  read<Bootstrap>('ff_bootstrap', { p_display_name: displayName ?? null }, options);
 
 export const updateProfile = (displayName: string) =>
   call<{ id: string; display_name: string }>('ff_update_profile', { p_display_name: displayName });
@@ -109,8 +141,8 @@ export const leagueCode = (leagueId: string) =>
 export const joinLeague = (code: string) =>
   call<ApiLeague>('ff_league_join', { p_code: code });
 
-export const leagueMembers = (leagueId: string) =>
-  call<ApiMember[]>('ff_league_members', { p_league: leagueId });
+export const leagueMembers = (leagueId: string, options: ReadOptions = {}) =>
+  read<ApiMember[]>('ff_league_members', { p_league: leagueId }, options);
 
 export const setMember = (leagueId: string, userId: string, role?: 'leader' | 'manager', status?: 'active' | 'inactive') =>
   call<{ user_id: string; role: string; status: string; team_id: string | null }>(
@@ -168,13 +200,13 @@ export const upsertMarketPlayer = (leagueId: string, input: UpsertPlayerInput) =
     p_player_id: input.playerId ?? null,
   });
 
-export const marketPlayers = (leagueId: string, opts: { search?: string; position?: string; includeInactive?: boolean } = {}) =>
-  call<ApiPlayer[]>('ff_market_players', {
+export const marketPlayers = (leagueId: string, opts: { search?: string; position?: string; includeInactive?: boolean } = {}, options: ReadOptions = {}) =>
+  read<ApiPlayer[]>('ff_market_players', {
     p_league: leagueId,
     p_search: opts.search ?? null,
     p_position: opts.position ?? null,
     p_include_inactive: opts.includeInactive ?? false,
-  });
+  }, options);
 
 // ---------------------------------------------------------------------------
 // Suggestions
@@ -203,11 +235,11 @@ export const submitSuggestionBatch = (leagueId: string, items: SuggestionInput[]
     })),
   });
 
-export const transfers = (leagueId: string, limit = 100) =>
-  call<ApiTransfer[]>('ff_transfers', { p_league: leagueId, p_limit: limit });
+export const transfers = (leagueId: string, limit = 100, options: ReadOptions = {}) =>
+  read<ApiTransfer[]>('ff_transfers', { p_league: leagueId, p_limit: limit }, options);
 
-export const suggestions = (leagueId: string, status?: 'pending' | 'approved' | 'rejected') =>
-  call<ApiSuggestion[]>('ff_suggestions', { p_league: leagueId, p_status: status ?? null });
+export const suggestions = (leagueId: string, status?: 'pending' | 'approved' | 'rejected', options: ReadOptions = {}) =>
+  read<ApiSuggestion[]>('ff_suggestions', { p_league: leagueId, p_status: status ?? null }, options);
 
 export const reviewSuggestion = (leagueId: string, suggestionId: string, decision: 'approved' | 'rejected', opts: {
   reason?: string; price?: number; rating?: number; imagePath?: string | null;
@@ -221,7 +253,7 @@ export const reviewSuggestion = (leagueId: string, suggestionId: string, decisio
 // Squad
 // ---------------------------------------------------------------------------
 
-export const squad = (leagueId: string) => call<ApiSquad>('ff_squad', { p_league: leagueId });
+export const squad = (leagueId: string, options: ReadOptions = {}) => read<ApiSquad>('ff_squad', { p_league: leagueId }, options);
 
 export interface SquadAssignmentsInput {
   starters: string[];
@@ -279,9 +311,9 @@ export const confirmLineup = (leagueId: string, lineupId: string) =>
 // Competition
 // ---------------------------------------------------------------------------
 
-export const gameweeks = (leagueId: string) =>
-  call<Array<{ id: string; number: number; deadline: string; season_id: string; season_name: string; rules_pinned: boolean }>>(
-    'ff_gameweeks', { p_league: leagueId });
+export const gameweeks = (leagueId: string, options: ReadOptions = {}) =>
+  read<Array<{ id: string; number: number; deadline: string; season_id: string; season_name: string; rules_pinned: boolean }>>(
+    'ff_gameweeks', { p_league: leagueId }, options);
 
 export const createSeason = (leagueId: string, name: string, startsAt: string, endsAt: string, gameweekCount: number) =>
   call<{ id: string; name: string; gameweeks: Array<{ id: string; number: number; deadline: string }> }>(
@@ -292,15 +324,15 @@ export const createFixture = (leagueId: string, gameweekId: string, home: string
   call<{ id: string; home_team_id: string; away_team_id: string }>(
     'ff_fixture_create', { p_league: leagueId, p_gameweek: gameweekId, p_home: home, p_away: away });
 
-export const standings = (leagueId: string, seasonId?: string) =>
-  call<ApiStanding[]>('ff_standings', { p_league: leagueId, p_season: seasonId ?? null });
+export const standings = (leagueId: string, seasonId?: string, options: ReadOptions = {}) =>
+  read<ApiStanding[]>('ff_standings', { p_league: leagueId, p_season: seasonId ?? null }, options);
 
 // ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
 
-export const notifications = (leagueId?: string, limit = 50) =>
-  call<ApiNotification[]>('ff_notifications', { p_league: leagueId ?? null, p_limit: limit });
+export const notifications = (leagueId?: string, limit = 50, options: ReadOptions = {}) =>
+  read<ApiNotification[]>('ff_notifications', { p_league: leagueId ?? null, p_limit: limit }, options);
 
 export const markNotificationRead = (id: string) =>
   call<{ id: string; read_at: string }>('ff_notification_read', { p_notification: id });
@@ -324,8 +356,8 @@ export const createMatch = (leagueId: string, input: {
   p_starters_per_side: input.startersPerSide ?? 11, p_max_substitutes: input.maxSubstitutes ?? 4,
 });
 
-export const matches = (leagueId: string, options: RpcOptions = {}) =>
-  call<ApiMatch[]>('ff_matches', { p_league: leagueId }, options);
+export const matches = (leagueId: string, options: ReadOptions = {}) =>
+  read<ApiMatch[]>('ff_matches', { p_league: leagueId }, options);
 
 export const openRevision = (leagueId: string, matchId: string) =>
   call<{ id: string; version: number; state: string }>('ff_match_open_revision', { p_league: leagueId, p_match: matchId });
