@@ -179,8 +179,17 @@ test('all formations preserve the squad, and captain and vice-captain remain dis
     expect((await page.locator('.pitch-player strong').allTextContents()).sort()).toEqual([...originals].sort());
   }
   await page.getByLabel('Formation').selectOption('4-3-3');
-  await page.getByLabel('Set captain: Hassan Magdy').click(); await expect(page.getByText('Select a vice captain from your squad.')).toBeVisible();
-  await page.getByLabel('Set vice captain: Amr Hesham').click(); await expect(page.getByText('Squad is valid')).toBeVisible();
+  await page.goto('/squad');
+  await page.locator('.pitch-player[aria-label="Player details: Hassan Magdy"]').click();
+  const captainSheet=page.getByRole('dialog');
+  await captainSheet.getByRole('button',{name:'Captain',exact:true}).click();
+  await captainSheet.getByRole('button',{name:'Close'}).click();
+  await expect(page.getByText('Select a vice captain from your squad.')).toBeVisible();
+  await page.locator('.pitch-player[aria-label="Player details: Amr Hesham"]').click();
+  const viceCaptainSheet=page.getByRole('dialog');
+  await viceCaptainSheet.getByRole('button',{name:'Vice captain',exact:true}).click();
+  await viceCaptainSheet.getByRole('button',{name:'Close'}).click();
+  await expect(page.getByText('Squad is valid')).toBeVisible();
   await page.getByRole('button',{name:'Confirm lineup'}).click(); await page.reload();
   await expect(page.getByText('Squad confirmed')).toBeVisible();
   const stored=await page.evaluate(()=>JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!));

@@ -6,13 +6,28 @@ import { AddPlayerSheet } from '../components/AddPlayerSheet';
 import { PlayerSheet } from '../components/PlayerSheet';
 import { Avatar, PageTitle, PlayerCard, SectionHead } from '../components/UI';
 import { useDemo } from '../hooks/useDemo';
-import { defaultFormation, formations, limits, squadSummary, substitutionTargets, transferPlayer } from '../services/rules';
+import { defaultFormation, formations, limits, squadSummary, substitutionTargets, transferPlayer, validateSquad } from '../services/rules';
 import { Pitch } from './Dashboard';
 import { lastGameweekPoints } from '../data/demo';
 import type { Formation, Player, Position } from '../types';
+import type { SquadIssue } from '../services/rules';
 import { formatMoney } from '../utils/format';
 
 const errorLabels: Record<string, string> = { marketClosed: 'The market is closed.', wrongLeague: 'Select players from the current league.', inactive: 'Inactive players cannot be selected.', alreadySelected: 'Player already selected.', transferPosition: 'The replacement must play in the same position.', overBudget: 'Not enough budget.' };
+const squadIssueLabels: Record<SquadIssue, string> = {
+  squadSize: 'Select exactly 15 players.',
+  duplicatePlayer: 'A player cannot be selected twice.',
+  unknownPlayer: 'A selected player is not in this league.',
+  overBudget: 'Not enough budget.',
+  positionDistribution: 'Squad must contain 2 GK, 5 DEF, 5 MID and 3 FWD.',
+  startingSize: 'Select exactly 11 starters.',
+  startingGoalkeeper: 'The starting lineup needs exactly one goalkeeper.',
+  formationMismatch: 'Starting positions do not match the selected formation. Swap starters and substitutes to fix it.',
+  benchSize: 'The bench must contain exactly 4 players.',
+  captainMissing: 'Select a captain from your squad.',
+  viceMissing: 'Select a vice captain from your squad.',
+  captainsSame: 'Captain and vice captain must be different players.',
+};
 
 function TransfersPage() {
   const { t } = useTranslation();
@@ -36,12 +51,14 @@ export function SquadPage({builder=false,transfers=false}:{builder?:boolean;tran
   return <SquadEditor builder={builder}/>;
 }
 function SquadEditor({builder}:{builder:boolean}) {
-  const { t } = useTranslation(); const { players, squad, league, state, updateSquad, transfer, addPlayer, removePlayer } = useDemo();
+  const { t } = useTranslation(); const { players, squad, league, state, updateSquad, transfer, addPlayer, removePlayer, confirmSquad } = useDemo();
   const [starter, setStarter] = useState(''); const [substitute, setSubstitute] = useState('');
   const [addPosition,setAddPosition]=useState<Position>();
   const [selectedId,setSelectedId]=useState(''); const [swapSource,setSwapSource]=useState(''); const [feedback,setFeedback]=useState('');
   useEffect(()=>{setSelectedId('');setAddPosition(undefined);setSwapSource('');setFeedback('');},[league.id,state.role,builder]);
   const summary = squadSummary(squad.playerIds, players, league.budget);
+  const validationIssues = validateSquad(squad, players, league.budget);
+  const lineupIsValid = validationIssues.length === 0;
   const formation = squad.formation || defaultFormation;
   const selectedPlayer=summary.selected.find(p=>p.id===selectedId);
   const sourceIndex=squad.playerIds.indexOf(swapSource);
@@ -67,6 +84,12 @@ function SquadEditor({builder}:{builder:boolean}) {
         express); the builder is the screen for arranging a shape, and existing
         builder affordances depend on it. */}{builder&&<label className="formation-select">{t('Formation')}<select aria-label={t('Formation')} value={formation} onChange={e=>updateSquad({formation:e.target.value as Formation})}>{(Object.keys(formations) as Formation[]).map(f=><option key={f} value={f}>{f}</option>)}</select></label>}<Pitch players={builder||!summary.size?summary.selected:summary.selected.slice(0,11)} formation={formation} captainId={squad.captainId} viceCaptainId={squad.viceCaptainId} onPlayerClick={selectPlayer} swapSource={swapSource} swapTargets={swapTargets} onAddPosition={setAddPosition} squadSlots={builder||!summary.size} canAddStarting={builder||squad.playerIds.length<11} onRemovePlayer={p=>{removePlayer(p.id);setFeedback('Player removed from your squad.');}} pointsFor={p=>lastGameweekPoints(p.name)}/>{!builder&&summary.size>=11&&summary.size<15&&<p className="sheet-note">{t("To fill bench places, select an available position below. To change the starting XI, use substitution.")}</p>}{!builder&&<div className="bench-strip"><div className="bench-head"><h3>{t('Bench')}</h3>{swapSource&&<button type="button" className="text-link swap-cancel" onClick={()=>setSwapSource('')}>{t('Cancel swap')}</button>}</div><div className="bench-players">{summary.selected.slice(11).map(p=><button type="button" key={p.id} className={`bench-player ${swapSource===p.id?'swap-source':''} ${swapTargets.includes(p.id)?'swap-target':''} ${swapSource&&swapSource!==p.id&&!swapTargets.includes(p.id)?'swap-dim':''}`} aria-label={`${t(swapSource?'Select swap player':'Player details')}: ${p.name}`} disabled={!!swapSource&&!swapTargets.includes(p.id)} onClick={()=>selectPlayer(p)}><Avatar name={p.name} image={p.image} color={p.color} size="sm"/><strong>{p.name}</strong><small>{p.position} · {lastGameweekPoints(p.name) != null ? `${lastGameweekPoints(p.name)} ${t('pts')}` : '—'}</small></button>)}{!builder&&summary.size>=11&&summary.size<15&&(Object.keys(limits) as Position[]).flatMap(pos=>Array.from({length:Math.max(0,limits[pos]-summary.counts[pos])},(_,i)=><button type="button" className="bench-player bench-add" key={`${pos}-${i}`} aria-label={`${t('Add player')}: ${pos}`} disabled={!!swapSource} onClick={()=>setAddPosition(pos)}><span>+</span><strong>{pos}</strong></button>))}{summary.selected.length<=11&&(builder||summary.size<11)&&<small>{t('No substitutes yet.')}</small>}</div></div>}</div>
     </div>
+    {summary.size >= 11 && <section className={`validation-panel ${lineupIsValid ? 'valid' : ''}`} role={lineupIsValid ? 'status' : 'alert'} aria-live="polite">
+      {lineupIsValid
+        ? <strong>{t(squad.confirmed ? 'Squad confirmed' : 'Squad is valid')}</strong>
+        : <><strong>{t('Squad needs attention')}</strong><ul>{validationIssues.map(issue => <li key={issue}>{t(squadIssueLabels[issue])}</li>)}</ul></>}
+      <button type="button" className="button button-outline" disabled={!lineupIsValid || squad.confirmed} onClick={() => confirmSquad()}>{t('Confirm lineup')}</button>
+    </section>}
     {/* Actions sit BELOW the pitch: opening this screen shows the squad first, and
         editing controls come after it. Previously they were in the page header,
         above the pitch, which pushed the team itself down the screen. */}
