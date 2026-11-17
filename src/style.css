@@ -34,6 +34,10 @@ button.pitch-player{border:0;background:transparent;color:inherit;cursor:pointer
 .error-panel{display:flex;align-items:flex-start;gap:11px;border-color:#5d3a34;background:#241a18;color:#f3c9c0;font-size:12px;margin-bottom:16px}
 .error-panel strong{display:block;margin-bottom:4px;color:#ffd9d0}.error-panel p{margin:0;line-height:1.55;overflow-wrap:anywhere}
 .error-panel .button{margin-inline-start:auto;flex-shrink:0}
+.bootstrap-diagnostics{display:block;margin:10px 0 16px;font-size:12px}
+.bootstrap-diagnostics summary{cursor:pointer;font-weight:700;color:#c4f536}
+.bootstrap-diagnostics p{margin:10px 0;color:#aab8a6;line-height:1.5}
+.bootstrap-diagnostics pre{max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b100b;border:1px solid #2d3a2c;border-radius:7px;padding:10px;color:#dce8d8;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .error .lucide,.validation-panel .lucide{vertical-align:-2px}
 .two-column.section-spacer,.section-spacer{margin-top:18px}
 .page-actions{display:flex;gap:10px;flex-wrap:wrap}

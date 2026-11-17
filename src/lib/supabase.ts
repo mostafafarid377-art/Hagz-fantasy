@@ -11,6 +11,7 @@
 // existing demo fully usable without any backend, which is a hard requirement.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createBootstrapDiagnosticFetch } from '../services/bootstrapDiagnostics';
 
 const url = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
 const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
@@ -67,7 +68,10 @@ export function getSupabase(): SupabaseClient | null {
         detectSessionInUrl: true, // required for email confirmation / recovery links
         flowType: 'pkce',
       },
-      global: { headers: { 'x-application-name': 'fantasy-friends' } },
+      global: {
+        headers: { 'x-application-name': 'fantasy-friends' },
+        fetch: createBootstrapDiagnosticFetch(url!),
+      },
     });
   }
   return client;

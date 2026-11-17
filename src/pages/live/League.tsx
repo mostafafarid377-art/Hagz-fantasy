@@ -11,6 +11,7 @@ import {
   AlertCircle, ArrowUpRight, CalendarDays, Check, Copy, Loader2, Share2, Shield, Trash2, Trophy, UsersRound, X, Zap,
 } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
+import { BootstrapDiagnosticsPanel } from '../../components/BootstrapDiagnostics';
 import { Pitch } from '../Dashboard';
 import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
@@ -78,7 +79,10 @@ export function LiveDashboard() {
   const auth = useAuth();
 
   if (live.loading) return <Loading />;
-  if (live.error && !live.league) return <ErrorNote message={live.error} onRetry={() => void live.reload()} />;
+  if (live.error && !live.league) return <>
+    <ErrorNote message={live.error} onRetry={() => void live.reload()} />
+    <BootstrapDiagnosticsPanel />
+  </>;
   // A league is known to exist, but none of its slices could be read: every panel
   // below would render zeros ("0 members", "0 players", "no fixtures"), which the
   // user reads as an empty league rather than as a failure. Say what happened and
@@ -193,7 +197,10 @@ export function LiveDashboard() {
    */
   return (
     <>
-      {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
+      {live.error && <>
+        <ErrorNote message={live.error} onRetry={() => void live.reload()} />
+        <BootstrapDiagnosticsPanel />
+      </>}
       <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
 
       <div className="welcome-row">

@@ -12,6 +12,7 @@
 //      take a request id that the caller generates once and reuses on retry.
 
 import { getSupabase } from '../lib/supabase';
+import { withBootstrapDiagnostics } from './bootstrapDiagnostics';
 import type {
   ApiLeague, ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer, MatchFormat,
 } from '../types/api';
@@ -122,7 +123,7 @@ export interface Bootstrap {
 }
 
 export const bootstrap = (displayName?: string, options: ReadOptions = {}) =>
-  read<Bootstrap>('ff_bootstrap', { p_display_name: displayName ?? null }, options);
+  withBootstrapDiagnostics(() => read<Bootstrap>('ff_bootstrap', { p_display_name: displayName ?? null }, options));
 
 export const updateProfile = (displayName: string) =>
   call<{ id: string; display_name: string }>('ff_update_profile', { p_display_name: displayName });
