@@ -23,6 +23,19 @@ test('role switching restricts leader actions to the leader',async({page})=>{
   await page.goto('/settings');await page.getByLabel('Demo role').selectOption('leader');await page.goto('/management');
   await expect(page.getByRole('button',{name:'Create player'})).toBeVisible();
 });
+
+test('login reports unavailable backend clearly and offers explicit Demo fallback',async({page})=>{
+  await page.goto('/login');
+  await expect(page.getByRole('heading',{name:'Log in'})).toBeVisible();
+  await page.getByLabel('Email').fill('e2e@example.test');
+  await page.getByLabel('Password').fill('not-a-real-password');
+  await page.getByRole('button',{name:'Log in',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('The backend is not configured. Demo mode is still available.');
+  await page.getByRole('link',{name:/Explore demo/}).click();
+  await expect(page.getByRole('heading',{name:/Welcome back/})).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading',{name:/Welcome back/})).toBeVisible();
+});
 test('market search and position filters',async({page})=>{
   await page.goto('/market');await page.getByLabel('Search players').fill('Fares');
   await expect(page.getByText('Fares Ashraf')).toBeVisible();await page.getByLabel('Position').selectOption('GK');
