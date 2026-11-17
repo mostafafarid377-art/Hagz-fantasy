@@ -53,7 +53,7 @@ test('corrective swaps fix formation mismatches and can be cancelled',async({pag
   await page.getByRole('dialog').getByRole('button',{name:'Make substitution'}).click();
   await page.getByRole('button',{name:'Cancel swap'}).first().click();
   expect((await team()).playerIds).toEqual(original);
-  await expect(page.getByText(/Starting positions do not match the selected formation/i)).toBeVisible();
+  await expect(page.getByText(/Formation requires: .*Starting XI currently has:/i)).toBeVisible();
 
   // The selected 4-4-2 needs one fewer forward and one more midfielder. The guided
   // swap offers Tamer as a corrective substitute and confirms a valid saved lineup.

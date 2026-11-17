@@ -1,13 +1,9 @@
 /**
  * @vitest-environment jsdom
  *
- * Three requirements for the squad tab:
- *
- * 1. It looks like the demo squad screen - the pitch is the page.
- * 2. No squad LIST under the pitch. The roster panel repeated every player the
- *    pitch already showed.
- * 3. "Edit squad" opens the PLayer Market. It used to point at /squad-builder,
- *    which in live mode re-rendered the same squad screen, so it looked dead.
+ * The saved View Squad remains a pitch-first, read-only view with a distinct Bench;
+ * Edit Squad exposes formation, roster changes and player actions without replacing
+ * the server-authoritative lineup or routing the manager into a dead-end screen.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';

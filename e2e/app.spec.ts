@@ -58,12 +58,12 @@ test('leader rejection feedback is visible to the manager',async({page})=>{
 });
 test('formation mismatch can be fixed by swapping a starter and substitute',async({page})=>{
   await page.goto('/squad-builder');await page.getByLabel('Formation').selectOption('4-4-2');
-  await expect(page.getByText('Starting positions do not match the selected formation. Swap starters and substitutes to fix it.')).toBeVisible();
+  await expect(page.getByText(/Formation requires: .*Starting XI currently has:/)).toBeVisible();
   await page.getByLabel('Starter',{exact:true}).selectOption('p22');await page.getByLabel('Substitute',{exact:true}).selectOption('p14');await page.getByRole('button',{name:'Swap players'}).click();
   await expect(page.getByText('Squad is valid')).toBeVisible();await page.getByRole('button',{name:'Confirm lineup'}).click();await expect(page.getByText('Squad confirmed')).toBeVisible();
 });
 test('squad add and remove preserves position and budget constraints',async({page})=>{
-  await page.goto('/squad-builder');await page.getByLabel('Remove: Tamer Hany').click();await page.goto('/market');
+  await page.goto('/squad-builder');await page.locator('.bench-player[aria-label="Player details: Tamer Hany"]').click();await page.getByRole('dialog').getByRole('button',{name:'Remove'}).click();await page.goto('/market');
   await page.getByLabel('Search players').fill('Adam Sherif');await page.getByRole('button',{name:'Add to squad'}).click();
   await expect(page.getByRole('button',{name:'Remove'})).toBeVisible();await page.goto('/squad-builder');
   // The roster list under the pitch was removed, so the squad is now read from the

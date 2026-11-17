@@ -112,10 +112,10 @@ test('player photos appear in profile, lineup, bench and transfers with fallback
   await role(page,'manager');await page.goto('/market');await page.getByLabel('Search players').fill('Omar Khaled');await expect(page.locator('.player-card img')).toBeVisible();
   await page.goto('/players/p1');await expect(page.locator('.profile-hero .avatar img')).toBeVisible();
   await page.goto('/squad-builder');await expect(page.locator('.pitch-player[aria-label="Player details: Omar Khaled"] img')).toBeVisible();
-  // The roster list was removed from the builder, so the images are checked on the
-  // PITCH, which is where those players are rendered now.
+  // The starting XI is on the pitch; the substitute's image stays in the separate
+  // Bench strip rather than being promoted onto the pitch.
   await expect(page.locator('.pitch-player[aria-label="Player details: Omar Khaled"] img')).toBeVisible();
-  await expect(page.locator('.pitch-player[aria-label="Player details: Samy Ibrahim"] img')).toBeVisible();
+  await expect(page.locator('.bench-player[aria-label="Player details: Samy Ibrahim"] img')).toBeVisible();
   await expect(page.locator('.pitch-player[aria-label="Player details: Youssef Adel"] .avatar span')).toHaveText('YA');
   await page.goto('/transfers');await expect(page.locator('.suggestion-row').filter({hasText:'Omar Khaled'}).locator('img')).toBeVisible();
   await page.getByLabel('Player to transfer out').selectOption('p1');await expect(page.locator('.transfer-person').filter({hasText:'Omar Khaled'}).locator('img')).toBeVisible();
