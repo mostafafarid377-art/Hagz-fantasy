@@ -48,7 +48,18 @@ function LanguageDirection(){
 function LiveData({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
   if (!isSupabaseConfigured || !auth.session) return <>{children}</>;
-  return <LiveProvider userId={auth.session.user.id}>{children}</LiveProvider>;
+  return (
+    <LiveProvider
+      key={auth.session.user.id}
+      userId={auth.session.user.id}
+      initialLeagues={auth.leagues}
+      directoryReady={Boolean(auth.profile || auth.error)}
+      initialDirectoryLoaded={Boolean(auth.profile)}
+      directoryError={auth.profile ? null : auth.error}
+    >
+      {children}
+    </LiveProvider>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

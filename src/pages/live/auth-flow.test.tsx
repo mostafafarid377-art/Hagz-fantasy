@@ -30,7 +30,9 @@ afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubA
  * module scope because the gate is rendered inside the tree, after the dynamic
  * import of the provider module.
  */
-const useAuthRef: { current: (() => { session: { user: { id: string } } | null }) | null } = { current: null };
+const useAuthRef: { current: (() => {
+  session: { user: { id: string } } | null; profile?: { id?: string } | null; leagues?: any[]; error?: string | null;
+}) | null } = { current: null };
 
 type Listener = (event: string, session: unknown) => void;
 
@@ -159,12 +161,15 @@ async function mountApp(opts: {
 /** Render just the `/dashboard` decision, inside the same provider stack. */
 async function mountDashboardDecision(opts: {
   initialSession?: unknown; bootstrapDelayMs?: number; bootstrapError?: { code: string; message: string } | null;
+  emitInitialSession?: boolean;
+  bootstrapHandler?: (call: number) => Promise<{ data: unknown; error: unknown }>;
   path?: string;
 } = {}) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
 
+  let bootstrapCalls = 0;
   let nextGetSession: unknown = opts.initialSession ?? null;
   let nextSignIn: { session?: unknown; error?: unknown } = { session: session('live-user') };
   const subs: Listener[] = [];
@@ -174,6 +179,7 @@ async function mountDashboardDecision(opts: {
       getSession: async () => ({ data: { session: nextGetSession }, error: null }),
       onAuthStateChange: (cb: Listener) => {
         subs.push(cb);
+        if (opts.emitInitialSession) cb('INITIAL_SESSION', nextGetSession);
         return { data: { subscription: { unsubscribe: () => {
           const i = subs.indexOf(cb); if (i >= 0) subs.splice(i, 1);
         } } } };
@@ -190,9 +196,13 @@ async function mountDashboardDecision(opts: {
         return { error: null };
       },
     },
-    rpc: async () => {
+    rpc: async (fn: string) => {
+      if (fn === 'ff_bootstrap') {
+        bootstrapCalls += 1;
+        if (opts.bootstrapHandler) return opts.bootstrapHandler(bootstrapCalls);
+      }
       if (opts.bootstrapDelayMs) await new Promise((r) => setTimeout(r, opts.bootstrapDelayMs));
-      if (opts.bootstrapError) return { data: null, error: opts.bootstrapError };
+      if (opts.bootstrapError && fn === 'ff_bootstrap') return { data: null, error: opts.bootstrapError };
       return { data: demoLeagues, error: null };
     },
   };
@@ -218,11 +228,17 @@ async function mountDashboardDecision(opts: {
   const { LiveProvider } = await import('../../hooks/useLive');
   const { DashboardRoute } = await import('./Routes');
 
+  let currentAuthState: ReturnType<NonNullable<typeof useAuthRef.current>> | null = null;
   /** Mirrors main.tsx's <LiveData>: the live screens require a LiveProvider. */
   function LiveProviderGate({ children }: { children: React.ReactNode }) {
     const auth = useAuthRef.current!();
+    currentAuthState = auth;
     if (!auth.session) return <>{children}</>;
-    return <LiveProvider userId={auth.session.user.id}>{children}</LiveProvider>;
+    return <LiveProvider userId={auth.session.user.id} initialLeagues={auth.leagues ?? []}
+      directoryReady={Boolean(auth.profile || auth.error)} initialDirectoryLoaded={Boolean(auth.profile)}
+      directoryError={auth.profile ? null : auth.error ?? null}>
+      {children}
+    </LiveProvider>;
   }
   useAuthRef.current = useAuth;
 
@@ -258,6 +274,8 @@ async function mountDashboardDecision(opts: {
       await act(async () => { for (const cb of [...subs]) await cb(event, s); });
     },
     listenerCount: () => subs.length,
+    bootstrapCalls: () => bootstrapCalls,
+    authState: () => currentAuthState!,
   };
 }
 
@@ -274,6 +292,7 @@ describe('successful login enters Live mode', () => {
     await app.signIn();
 
     await waitFor(() => expect(screen.getByTestId('live-dashboard')).toBeTruthy());
+    await waitFor(() => expect(app.bootstrapCalls()).toBe(1));
     expect(screen.queryByTestId('demo-dashboard')).toBeNull();
   });
 
@@ -288,6 +307,66 @@ describe('successful login enters Live mode', () => {
     expect(screen.queryByTestId('demo-dashboard')).toBeNull();
 
     await waitFor(() => expect(screen.getByTestId('live-dashboard')).toBeTruthy(), { timeout: 2000 });
+  });
+});
+
+describe('bootstrap failures and duplicate session events', () => {
+  it('shares the in-flight bootstrap for INITIAL_SESSION and the session restore', async () => {
+    const app = await mountDashboardDecision({
+      initialSession: session('live-user'),
+      emitInitialSession: true,
+      bootstrapHandler: async (call) => {
+        if (call > 1) throw new TypeError('Load failed');
+        return { data: demoLeagues, error: null };
+      },
+    });
+
+    await waitFor(() => expect(app.authState().profile?.id).toBe('live-user'));
+    expect(app.bootstrapCalls()).toBe(1);
+    expect(app.authState().error).toBeNull();
+    expect(screen.getByTestId('live-dashboard')).toBeTruthy();
+    expect(screen.queryByTestId('demo-dashboard')).toBeNull();
+  });
+
+  it('retries an initial transport failure on the next auth refresh', async () => {
+    const app = await mountDashboardDecision({
+      initialSession: session('live-user'),
+      bootstrapHandler: async (call) => {
+        if (call === 1) throw new TypeError('Load failed');
+        return { data: demoLeagues, error: null };
+      },
+    });
+
+    await waitFor(() => expect(app.authState().error).toBe('Load failed'));
+    expect(app.authState().session?.user.id).toBe('live-user');
+    expect(screen.queryByTestId('demo-dashboard')).toBeNull();
+
+    await app.emit('TOKEN_REFRESHED', session('live-user'));
+    await waitFor(() => expect(app.authState().profile?.id).toBe('live-user'));
+    expect(app.bootstrapCalls()).toBe(2);
+    expect(app.authState().error).toBeNull();
+  });
+
+  it('does not reuse a stale in-flight bootstrap after sign-out and sign-in', async () => {
+    let finishStale!: (result: { data: unknown; error: unknown }) => void;
+    const staleRequest = new Promise<{ data: unknown; error: unknown }>((resolve) => { finishStale = resolve; });
+    const app = await mountDashboardDecision({
+      initialSession: session('live-user'),
+      bootstrapHandler: async (call) => call === 1 ? staleRequest : { data: demoLeagues, error: null },
+    });
+
+    await waitFor(() => expect(app.bootstrapCalls()).toBe(1));
+    await app.emit('SIGNED_OUT', null);
+    await app.emit('SIGNED_IN', session('live-user'));
+    await waitFor(() => expect(app.bootstrapCalls()).toBe(2));
+    await waitFor(() => expect(app.authState().profile?.id).toBe('live-user'));
+
+    await act(async () => {
+      finishStale({ data: null, error: { code: '42501', message: 'stale request failed' } });
+      await staleRequest;
+    });
+    expect(app.authState().profile?.id).toBe('live-user');
+    expect(app.authState().error).toBeNull();
   });
 });
 

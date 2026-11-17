@@ -250,8 +250,15 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   function selectPlayer(p: Player) {
     if (!swapSource) { setError(''); setSelectedId(p.id); return; }
     if (!targets.includes(p.id)) return;
+    // The RPC contract is role-based, not click-order-based: p_out must always be
+    // the current starter and p_in the current bench player. The editor allows a
+    // manager to begin from either side, so normalize the selected IDs before the
+    // request. Sending bench->starter looked like an already-applied retry to the
+    // server's idempotency guard and therefore returned without swapping anything.
+    const starterId = starterIds.includes(swapSource) ? swapSource : p.id;
+    const benchId = benchIds.includes(swapSource) ? swapSource : p.id;
     void run('substitute', async () => {
-      await live.substituteSquadPlayer(swapSource, p.id, squad?.assignment_revision);
+      await live.substituteSquadPlayer(starterId, benchId, squad?.assignment_revision);
       setSwapSource('');
     }, 'Players swapped.');
   }
@@ -514,7 +521,8 @@ export function LiveStandings() {
     <>
       <PageTitle eyebrow="THE TABLE" title="League Standings"
         description="The race is on" />
-      {live.error && <ErrorNote message={live.error} />}
+      {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
+      <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
 
       {ranked.length === 0 ? (
         <Empty title="No standings yet"

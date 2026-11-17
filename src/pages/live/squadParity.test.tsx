@@ -39,6 +39,8 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
   let captaincyArgs: Record<string, unknown> | undefined;
   let captainId: string | null = null;
   let viceId: string | null = null;
+  let substitutionArgs: Record<string, unknown> | undefined;
+  const serverPlayers = players.map((player) => ({ ...player }));
   const client = {
     auth: {
       getSession: async () => ({ data: { session: null }, error: null }),
@@ -53,10 +55,19 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
       }
       if (fn === 'ff_squad') {
         return { data: { team: { id: 't1', name: 'Real League FC' }, formation, status: 'draft',
-          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, players }, error: null };
+          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, assignment_revision: 1, players: serverPlayers }, error: null };
       }
       if (fn === 'ff_lineup_save') return { data: { lineup_id: 'lineup1', version: 1, formation: '4-3-3', status: 'draft' }, error: null };
       if (fn === 'ff_squad_set_captains') return { data: { captain_id: captainId, vice_captain_id: viceId }, error: null };
+      if (fn === 'ff_squad_substitute') {
+        substitutionArgs = args;
+        const outgoing = serverPlayers.find((player) => player.league_player_id === args?.p_out);
+        const incoming = serverPlayers.find((player) => player.league_player_id === args?.p_in);
+        if (outgoing && incoming) [outgoing.slot, incoming.slot] = [incoming.slot, outgoing.slot];
+        return { data: { squad: { team: { id: 't1', name: 'Real League FC' }, formation: '4-3-3', status: 'draft',
+          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, assignment_revision: 2, players: serverPlayers },
+          assignment_revision: 2, replayed: false }, error: null };
+      }
       return { data: [], error: null };
     },
   };
@@ -79,7 +90,8 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
     );
   });
   for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
-  return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs };
+  return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs,
+    getSubstitutionArgs: () => substitutionArgs, getServerPlayers: () => serverPlayers };
 }
 
 describe('the live squad tab is laid out like the demo one', () => {
@@ -163,8 +175,8 @@ describe('View Squad is read-only; Edit Squad owns all mutations', () => {
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
-  it('can set captain and vice and substitute from Edit Squad', async () => {
-    const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '4-3-3');
+  it('swaps bench-to-starter with starter-first RPC arguments and persists both slots', async () => {
+    const { calls, getCaptaincyArgs, getSubstitutionArgs, getServerPlayers } = await mountLiveSquad(FULL_SQUAD, '4-3-3');
     fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
@@ -175,10 +187,13 @@ describe('View Squad is read-only; Edit Squad owns all mutations', () => {
     expect(getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp3' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Player details: P3' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P7' }));
     fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P7' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P3' })); });
     expect(calls).toContain('ff_squad_substitute');
+    expect(getSubstitutionArgs()).toMatchObject({ p_out: 'lp3', p_in: 'lp7' });
+    expect(getServerPlayers().find((player) => player.league_player_id === 'lp3')?.slot).toBe(13);
+    expect(getServerPlayers().find((player) => player.league_player_id === 'lp7')?.slot).toBe(2);
   });
 
   it('exposes captaincy, replacement, and substitution controls but no manual formation selector in Edit Squad', async () => {

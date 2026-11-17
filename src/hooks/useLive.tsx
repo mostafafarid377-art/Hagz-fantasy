@@ -20,6 +20,7 @@ import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStan
 import type { Bootstrap } from '../services/api';
 
 const LEAGUE_KEY = 'ff-live-league';
+const EMPTY_LEAGUES: Bootstrap['leagues'] = [];
 
 export interface LiveState {
   loading: boolean;
@@ -91,7 +92,13 @@ const LiveContext = createContext<LiveContextValue | null>(null);
 const message = (error: unknown): string =>
   error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'Something went wrong';
 
-export function LiveProvider({ userId, children }: { userId: string | null; children: ReactNode }) {
+export function LiveProvider({
+  userId, children, initialLeagues = EMPTY_LEAGUES, directoryReady = true,
+  initialDirectoryLoaded = false, directoryError = null,
+}: {
+  userId: string | null; children: ReactNode;
+  initialLeagues?: Bootstrap['leagues']; directoryReady?: boolean; initialDirectoryLoaded?: boolean; directoryError?: string | null;
+}) {
   const [state, setState] = useState<LiveState>({
     loading: true, leagueId: null, leagues: [], members: [], players: [], squad: null,
     suggestions: [], gameweeks: [], matches: [], transfers: [], standings: [], notifications: [],
@@ -100,14 +107,33 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
   });
   const generation = useRef(0);
   const matchesRefreshGeneration = useRef(0);
+  const directoryLoaded = useRef(false);
+  const stateRef = useRef(state);
+  const commit = useCallback((next: LiveState | ((previous: LiveState) => LiveState)) => {
+    stateRef.current = typeof next === 'function' ? next(stateRef.current) : next;
+    setState(stateRef.current);
+  }, []);
 
-  const load = useCallback(async (leagueId: string | null) => {
+  const load = useCallback(async (leagueId: string | null, refreshLeagues = false) => {
     const mine = ++generation.current;
     matchesRefreshGeneration.current += 1;
-    commit((s) => ({ ...s, loading: true, error: null }));
+    const before = stateRef.current;
+    const loading = !before.leagueId || before.leagueId !== leagueId;
+    commit((s) => ({ ...s, loading, error: null }));
     try {
-      const boot = await api.bootstrap();
-      const usable = boot.leagues.filter((l) => !l.archived);
+      // The league directory is already authoritative in memory after the first
+      // bootstrap. Do not serialize every league switch behind another global
+      // ff_bootstrap call; refresh that directory only when requested or when the
+      // target is not present in the current user's cached memberships.
+      const cachedLeagues = before.leagues.filter((l) => !l.archived);
+      const targetKnown = !!leagueId && cachedLeagues.some((l) => l.league_id === leagueId);
+      const needsBootstrap = refreshLeagues || !directoryLoaded.current || (!!leagueId && !targetKnown);
+      let usable = cachedLeagues;
+      if (needsBootstrap) {
+        const boot = await api.bootstrap();
+        directoryLoaded.current = true;
+        usable = boot.leagues.filter((l) => !l.archived);
+      }
       const chosen = leagueId && usable.some((l) => l.league_id === leagueId)
         ? leagueId
         : usable[0]?.league_id ?? null;
@@ -130,32 +156,36 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       // silent fallback renders "0 players / 0 members / no fixtures" - the UI then
       // states as fact that the user has an empty league. Live mode must never
       // present fake emptiness as real data.
+      const sameLeague = before.leagueId === chosen;
       const failures: string[] = [];
-      const safe = async <T,>(label: string, promise: Promise<T>, fallback: T): Promise<T> => {
+      const safe = async <T,>(label: string, promise: Promise<T>, fallback: T, previous: T): Promise<T> => {
         try {
           return await promise;
         } catch (error) {
           failures.push(`${label}: ${error instanceof Error ? error.message : 'failed'}`);
-          return fallback;
+          // A failed refresh is not an empty result. Keep the last server-confirmed
+          // value for this same league; never reuse a different league's data.
+          return sameLeague ? previous : fallback;
         }
       };
       const [members, players, squad, suggestions, gameweeks, matches, transfers, standings, notifications] =
         await Promise.all([
-          safe('members', api.leagueMembers(chosen), []),
-          safe('players', api.marketPlayers(chosen, { includeInactive: true }), []),
-          safe('squad', api.squad(chosen), null),
-          safe('suggestions', api.suggestions(chosen), []),
-          safe('gameweeks', api.gameweeks(chosen), []),
-          safe('matches', api.matches(chosen), []),
-          safe('transfers', api.transfers(chosen), []),
-          safe('standings', api.standings(chosen), []),
-          safe('notifications', api.notifications(chosen), []),
+          safe('members', api.leagueMembers(chosen), [], sameLeague ? before.members : []),
+          safe('players', api.marketPlayers(chosen, { includeInactive: true }), [], sameLeague ? before.players : []),
+          safe('squad', api.squad(chosen), null, sameLeague ? before.squad : null),
+          safe('suggestions', api.suggestions(chosen), [], sameLeague ? before.suggestions : []),
+          safe('gameweeks', api.gameweeks(chosen), [], sameLeague ? before.gameweeks : []),
+          safe('matches', api.matches(chosen), [], sameLeague ? before.matches : []),
+          safe('transfers', api.transfers(chosen), [], sameLeague ? before.transfers : []),
+          safe('standings', api.standings(chosen), [], sameLeague ? before.standings : []),
+          safe('notifications', api.notifications(chosen), [], sameLeague ? before.notifications : []),
         ]);
 
       if (mine !== generation.current) return;
       commit({
         loading: false, leagueId: chosen, leagues: usable, members, players, squad,
-        suggestions, gameweeks, matches, transfers, standings, notifications, points: EMPTY_POINTS,
+        suggestions, gameweeks, matches, transfers, standings, notifications,
+        points: sameLeague ? before.points : EMPTY_POINTS,
         error: null,
         partialFailures: failures,
       });
@@ -183,27 +213,25 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
   }, []);
 
   useEffect(() => {
+    if (!directoryReady) return;
+    const usable = initialLeagues.filter((league) => !league.archived);
+    directoryLoaded.current = initialDirectoryLoaded && !directoryError;
+    if (usable.length) {
+      commit((current) => ({ ...current, leagues: usable }));
+    }
+    if (directoryError) {
+      commit((current) => ({ ...current, loading: false, error: directoryError }));
+      return;
+    }
     let initial: string | null = null;
     try { initial = localStorage.getItem(LEAGUE_KEY); } catch { /* ignore */ }
     void load(initial);
-  }, [load, userId]);
+  }, [commit, directoryError, directoryReady, initialDirectoryLoaded, initialLeagues, load, userId]);
 
   const leagueId = state.leagueId;
 
-  // The latest state, readable from callbacks created in an earlier render (the
-  // context memo closes over `state` and would otherwise compare the newly created
-  // league against a stale list).
-  //
-  // The ref is written by `commit` at the moment state is set, NOT mirrored in a
-  // useEffect: an effect runs after the render, so `createLeague`'s post-reload
-  // check would read the list from before the reload - precisely the stale read
-  // the check exists to avoid.
-  const stateRef = useRef(state);
-  const commit = useCallback((next: LiveState | ((previous: LiveState) => LiveState)) => {
-    stateRef.current = typeof next === 'function' ? next(stateRef.current) : next;
-    setState(stateRef.current);
-  }, []);
-
+  // `stateRef` and `commit` live above `load` so selection callbacks and request
+  // completions always consult the latest directory and league slice.
   // Refresh just the match slice after match actions. Calling `load()` here sets
   // the provider-wide loading flag, unmounting MatchWorkflow and discarding its
   // inline success/error state. Keep the open workflow mounted while replacing
@@ -229,10 +257,10 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
    * callers can render inline errors; the refresh still happens because a partial
    * server-side change is possible for some actions (e.g. a correction).
    */
-  const mutate = useCallback(async (action: () => Promise<unknown>): Promise<void> => {
+  const mutate = useCallback(async (action: () => Promise<unknown>, refreshLeagues = false): Promise<void> => {
     try {
       await action();
-      await load(leagueId);
+      await load(leagueId, refreshLeagues);
     } catch (error) {
       commit((s) => ({ ...s, error: message(error) }));
       throw error;
@@ -249,7 +277,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     ...state,
     league, isLeader, isOrganizer, myUserId: userId,
     selectLeague,
-    reload: () => load(leagueId),
+    reload: () => load(leagueId, true),
     createLeague: async (name, format = '11-a-side') => {
       const created = await api.createLeague(name, undefined, format);
       // Reload, then VERIFY. The RPC can succeed while the league never becomes
@@ -257,7 +285,7 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       // that does not list it - and the old code reported success regardless, so
       // the form just sat there with no error and no new league. Silence that looks
       // like success is the worst outcome for a create action, so confirm it.
-      await load(created.id);
+      await load(created.id, true);
       const visible = stateRef.current.leagues.some((l) => l.league_id === created.id);
       if (!visible) {
         // `invalidState` is the closest existing code: the request succeeded but
@@ -270,20 +298,20 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     },
     joinLeague: async (code) => {
       const joined = await api.joinLeague(code);
-      await load(joined.id);
+      await load(joined.id, true);
     },
-    setMarketOpen: (open) => mutate(() => api.setMarket(require(leagueId), open)),
+    setMarketOpen: (open) => mutate(() => api.setMarket(require(leagueId), open), true),
     archiveLeague: async () => {
       const target = require(leagueId);
       await api.archiveLeague(target);
       // Reload without the archived league and let `load` pick another one; the
       // archived row still appears in bootstrap with archived=true, and `usable`
       // filters it out, so reselecting it is impossible.
-      await load(null);
+      await load(null, true);
     },
-    setMember: (userId2, role, status) => mutate(() => api.setMember(require(leagueId), userId2, role, status)),
-    setOrganizer: (userId2, enabled) => mutate(() => api.setOrganizer(require(leagueId), userId2, enabled)),
-    transferLeadership: (userId2) => mutate(() => api.transferLeadership(require(leagueId), userId2)),
+    setMember: (userId2, role, status) => mutate(() => api.setMember(require(leagueId), userId2, role, status), true),
+    setOrganizer: (userId2, enabled) => mutate(() => api.setOrganizer(require(leagueId), userId2, enabled), true),
+    transferLeadership: (userId2) => mutate(() => api.transferLeadership(require(leagueId), userId2), true),
     savePlayer: (input) => mutate(() => api.upsertMarketPlayer(require(leagueId), input)),
     setSquadCaptains: (captainId, viceCaptainId) => mutate(() => api.setSquadCaptains(require(leagueId), captainId, viceCaptainId)),
     suggestPlayer: (input) => mutate(() => api.submitSuggestion(require(leagueId), input)),
@@ -300,9 +328,22 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       ...input,
       expectedRevision: input.expectedRevision ?? state.squad?.assignment_revision ?? null,
     })),
-    substituteSquadPlayer: (outId, inId, expectedRevision) =>
-      mutate(() => api.substituteSquadPlayer(require(leagueId), outId, inId,
-        expectedRevision ?? state.squad?.assignment_revision ?? null)),
+    substituteSquadPlayer: async (outId, inId, expectedRevision) => {
+      const selectedLeague = require(leagueId);
+      try {
+        const result = await api.substituteSquadPlayer(selectedLeague, outId, inId,
+          expectedRevision ?? stateRef.current.squad?.assignment_revision ?? null);
+        // The atomic RPC returns its authoritative squad snapshot. Apply only if
+        // this league is still selected; do not block a swap on unrelated market,
+        // notification, standings, or points reads after the server has committed.
+        if (stateRef.current.leagueId === selectedLeague) {
+          commit((current) => ({ ...current, squad: result.squad, error: null }));
+        }
+      } catch (error) {
+        commit((current) => ({ ...current, error: message(error) }));
+        throw error;
+      }
+    },
     confirmLineup: (id) => mutate(() => api.confirmLineup(require(leagueId), id)),
     createSeason: (name, startsAt, endsAt, count) =>
       mutate(() => api.createSeason(require(leagueId), name, startsAt, endsAt, count)),
