@@ -14,6 +14,7 @@ import type { Session, User } from '@supabase/supabase-js';
 import { getSession, onAuthChange } from '../services/auth';
 import { bootstrap, type Bootstrap } from '../services/api';
 import { isSupabaseConfigured } from '../lib/supabase';
+import { recordBootstrapAuthEvent } from '../services/bootstrapDiagnostics';
 
 export interface AuthState {
   status: 'loading' | 'anon' | 'ready';
@@ -139,6 +140,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unsubscribe = onAuthChange((session, _user, event) => {
       if (!active) return;
+      recordBootstrapAuthEvent(event);
       // An explicit sign-out clears the established identity FIRST, so the `null`
       // that follows is honoured instead of being suppressed as a stale read.
       if (event === 'SIGNED_OUT') {

@@ -4,7 +4,10 @@ const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock('../lib/supabase', () => ({ getSupabase: () => ({ rpc }) }));
 
 import { bootstrap, matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
-import { getBootstrapDiagnostics, makeSanitizedBootstrapReport } from './bootstrapDiagnostics';
+import {
+  createBootstrapDiagnosticFetch, getBootstrapDiagnostics, getBootstrapFetchDiagnostics,
+  makeSanitizedBootstrapReport,
+} from './bootstrapDiagnostics';
 
 describe('Phase 4 Live RPC adapters', () => {
   beforeEach(() => { rpc.mockReset(); });
@@ -78,6 +81,33 @@ describe('Phase 4 Live RPC adapters', () => {
     await vi.advanceTimersByTimeAsync(25);
     await pending;
     expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('shows a matching fetch still pending when the real bootstrap read timeout fires', async () => {
+    vi.useFakeTimers();
+    const pendingFetch = new Promise<Response>(() => {});
+    const diagnosticFetch = createBootstrapDiagnosticFetch(
+      'https://project.example',
+      (() => pendingFetch) as typeof fetch,
+    );
+    rpc.mockReturnValue({
+      abortSignal: (signal: AbortSignal) => diagnosticFetch(new Request(
+        'https://project.example/rest/v1/rpc/ff_bootstrap',
+        { method: 'POST', signal },
+      )),
+    });
+
+    const pendingBootstrap = bootstrap();
+    const bootstrapFailure = expect(pendingBootstrap).rejects.toMatchObject({ code: 'network', detail: 'timeout' });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await bootstrapFailure;
+
+    const observations = getBootstrapFetchDiagnostics();
+    expect(observations[observations.length - 1]).toMatchObject({
+      outcome: 'pending', completedAtUtc: null, elapsedMs: null, httpStatus: null, errorClass: null,
+    });
+    const attempts = getBootstrapDiagnostics();
+    expect(attempts[attempts.length - 1]).toMatchObject({ outcome: 'error', timedOut: true });
   });
 
   it('records a successful bootstrap attempt with UTC timestamps and elapsed time', async () => {

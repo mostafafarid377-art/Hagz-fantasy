@@ -28,9 +28,10 @@ export function BootstrapDiagnosticsPanel() {
     <details className="panel bootstrap-diagnostics">
       <summary>Temporary bootstrap diagnostics</summary>
       <p>
-        This report contains diagnostic IDs and request timing only. The ID is local to this browser;
-        use UTC timestamps to correlate logs. Fetch invocation does not prove delivery or Supabase receipt,
-        and browser-generated OPTIONS preflights are not visible here.
+        This report contains local diagnostic IDs, timestamps, concurrent-attempt counts, numeric HTTP
+        statuses, and allow-listed error/auth event names only. IDs are local to this browser; use UTC
+        timestamps to correlate logs. A visible fetch outcome does not prove Supabase receipt, and
+        browser-generated OPTIONS preflights are not visible here. Ambiguous fetch attribution is marked.
       </p>
       <button type="button" className="button button-small button-outline" onClick={() => void copyReport()}>
         {copyState === 'copied' ? 'Report copied' : 'Copy sanitized report'}
