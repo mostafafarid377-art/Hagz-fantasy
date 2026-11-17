@@ -60,7 +60,11 @@ Object.assign(ar, {
   'lineup role':'مركز التشكيلة',
   'Both lineups saved and verified on the server.':'تم حفظ تشكيلتي الفريقين والتحقق منهما على الخادم.',
   'Lineups were sent but the saved server state did not match. Refresh and verify before submitting.':'أُرسلت التشكيلات لكن البيانات المحفوظة على الخادم لا تطابق الاختيار. حدّث البيانات وتحقق منها قبل الإرسال.',
-  'Score and match events':'النتيجة وأحداث المباراة', 'Save score':'حفظ النتيجة', 'Save both lineups':'حفظ تشكيلتي الفريقين'
+  'Score and match events':'النتيجة وأحداث المباراة', 'Save score':'حفظ النتيجة', 'Save both lineups':'حفظ تشكيلتي الفريقين',
+  'Open match record':'فتح سجل المباراة', 'Match cancelled':'تم إلغاء المباراة',
+  'Cancel scheduled match':'إلغاء المباراة المجدولة',
+  'A match can be cancelled before its record is opened. Cancellation keeps the match and audit history.':'يمكن إلغاء المباراة قبل فتح سجلها. يُبقي الإلغاء المباراة وسجل التدقيق محفوظين.',
+  'Cancellation reason':'سبب الإلغاء', 'Cancel match':'إلغاء المباراة', 'Match cancelled successfully.':'تم إلغاء المباراة بنجاح.', 'Cancelled':'ملغاة'
 });
 const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});

@@ -48,6 +48,7 @@ const DESIGN_MIGRATIONS = {
   // Forward-only correction: restore real-team name uniqueness accidentally
   // removed by 021; player-profile names remain non-unique.
   '022_restore_real_team_name_uniqueness.sql': 'eba5ffdd2c7362658912b94f6f4d97f1387f42cab4cf54e5db4620b1e49fc73a',
+  '023_match_cancellation_and_atomic_lineup_save.sql': 'f2345df49b182424255ab577e483279c08f1b71c9217e0eecf156c24974957e9',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -101,6 +102,7 @@ const PACKAGE = [
   ['20261115000020_leader_match_result_finalization.sql', 'design/migrations/020_leader_match_result_finalization.sql'],
   ['20261116210000_phase4_market_and_transfer_gaps.sql', 'design/migrations/021_phase4_market_and_transfer_gaps.sql'],
   ['20261116220000_restore_real_team_name_uniqueness.sql', 'design/migrations/022_restore_real_team_name_uniqueness.sql'],
+  ['20261116230000_match_cancellation_and_atomic_lineup_save.sql', 'design/migrations/023_match_cancellation_and_atomic_lineup_save.sql'],
 ];
 
 /**
@@ -126,6 +128,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261115000020_leader_match_result_finalization.sql',
   '20261116210000_phase4_market_and_transfer_gaps.sql',
   '20261116220000_restore_real_team_name_uniqueness.sql',
+  '20261116230000_match_cancellation_and_atomic_lineup_save.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -349,6 +352,20 @@ if (!(await exists(execDir))) {
       if (!restoresOriginalKey || !refusesAmbiguousDuplicates || !validatesExistingDefinition) fail(`post-verification migration ${repair}`, 'must safely and idempotently restore the exact original real-team name key, refusing ambiguous duplicates');
       else if (!noPrivilegeOrDestructiveDdl) fail(`post-verification migration ${repair}`, 'must not alter privileges or perform destructive DDL');
       else ok(`post-verification migration ${repair} is scoped`, 'restores only real-team name uniqueness; leaves same-name player identities unchanged');
+    } else if (repair === '20261116230000_match_cancellation_and_atomic_lineup_save.sql') {
+      const atomicRpc = /create\s+or\s+replace\s+function\s+public\.ff_match_save_lineups\s*\([^)]*\)\s*returns\s+jsonb/i.test(stripped)
+        && /public\.ff_match_set_lineup\(p_league,p_revision,m\.team_a_id,p_team_a_players\)[\s\S]*public\.ff_match_set_lineup\(p_league,p_revision,m\.team_b_id,p_team_b_players\)/i.test(stripped);
+      const cancelRpc = /create\s+or\s+replace\s+function\s+public\.ff_match_cancel\s*\([^)]*\)\s*returns\s+jsonb/i.test(stripped)
+        && /ff_private\.is_match_organizer\(p_league,p_match\)/i.test(stripped)
+        && /match_cancelled/i.test(stripped);
+      const boundedReason = /length\(btrim\(p_reason\)\)\s+not\s+between\s+1\s+and\s+500/i.test(stripped);
+      const readModel = /'is_cancelled',\s*\(m\.cancelled_at\s+is\s+not\s+null\)/i.test(stripped);
+      const scopedColumns = /alter\s+table\s+public\.real_matches[\s\S]*?add\s+column\s+cancelled_at[\s\S]*?add\s+column\s+cancelled_by[\s\S]*?add\s+column\s+cancel_reason/i.test(stripped);
+      const authenticatedOnly = /revoke\s+all\s+on\s+function\s+public\.ff_match_save_lineups\(uuid,\s*uuid,\s*jsonb,\s*jsonb\)\s+from\s+public,\s*anon,\s*authenticated/i.test(stripped)
+        && /grant\s+execute\s+on\s+function\s+public\.ff_match_save_lineups\(uuid,\s*uuid,\s*jsonb,\s*jsonb\)\s+to\s+authenticated/i.test(stripped)
+        && /grant\s+execute\s+on\s+function\s+public\.ff_match_cancel\(uuid,\s*uuid,\s*text\)\s+to\s+authenticated/i.test(stripped);
+      if (!atomicRpc || !cancelRpc || !boundedReason || !readModel || !scopedColumns || !authenticatedOnly) fail(`post-verification migration ${repair}`, 'must provide atomic two-team saves and authorized, audited cancellation with bounded reason and authenticated-only RPCs');
+      else ok(`post-verification migration ${repair} is scoped`, 'adds cancellation metadata and two authenticated workflow RPCs; no destructive or broad privilege DDL');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {

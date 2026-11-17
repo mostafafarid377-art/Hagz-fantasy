@@ -15,7 +15,7 @@ import { useLive } from '../../hooks/useLive';
 vi.mock('react-i18next', async importOriginal => ({ ...(await importOriginal<typeof import('react-i18next')>()), useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../../hooks/useLive', () => ({ useLive: vi.fn() }));
 vi.mock('../../services/api', () => ({
-  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), setMatchLineup: vi.fn(), setMatchScore: vi.fn(),
+  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), setMatchLineup: vi.fn(), saveMatchLineups: vi.fn(), cancelMatch: vi.fn(), setMatchScore: vi.fn(),
 }));
 vi.mock('./League', () => ({
   ErrorNote: () => null, Loading: () => <div>loading</div>, PartialDataNote: () => null,
@@ -118,19 +118,38 @@ describe('Live fixtures and scheduling', () => {
       { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
     ];
     vi.mocked(useLive).mockReturnValue(live as never);
-    vi.mocked(api.setMatchLineup).mockResolvedValue({} as never);
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
     vi.mocked(api.matches).mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedLineups }] }] as never);
     render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
-    const choices = await screen.findAllByRole('checkbox');
-    fireEvent.click(choices[0]);
-    fireEvent.click(choices[3]);
+    fireEvent.click((await screen.findAllByRole('checkbox'))[0]);
+    const teamB = screen.getByRole('group', { name: /South/ });
+    expect(teamB.textContent).not.toContain('A Player');
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    expect(teamB.textContent).toContain('A Player');
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    const available = screen.getAllByRole('checkbox');
+    fireEvent.click(available[2]);
     fireEvent.click(screen.getByRole('button', { name: 'Save both lineups' }));
-    await waitFor(() => expect(api.setMatchLineup).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.saveMatchLineups).toHaveBeenCalledTimes(1));
     expect(api.matches).toHaveBeenCalledWith('league-1');
     expect((await screen.findByRole('status')).textContent).toContain('Both lineups saved and verified on the server.');
-    expect(api.setMatchLineup).toHaveBeenNthCalledWith(1, 'league-1', 'lineup-draft', 'a', [expect.objectContaining({ player_id: 'player-a', selection: 'starter' })]);
-    expect(api.setMatchLineup).toHaveBeenNthCalledWith(2, 'league-1', 'lineup-draft', 'b', [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })]);
+    expect(api.saveMatchLineups).toHaveBeenCalledWith('league-1', 'lineup-draft',
+      [expect.objectContaining({ player_id: 'player-a', selection: 'starter' })],
+      [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })]);
+  });
+
+  it('lets the assigned Organizer cancel an unopened match with a reason', async () => {
+    const live: any = mockLive(false);
+    live.myUserId = 'organizer-1';
+    vi.mocked(useLive).mockReturnValue(live as never);
+    vi.mocked(api.cancelMatch).mockResolvedValue({ id: 'match-1', cancelled: true, cancelled_at: '2026-11-17T18:00:00Z', reason: 'Venue unavailable' } as never);
+    render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.change(await screen.findByLabelText('Cancellation reason'), { target: { value: 'Venue unavailable' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel match' }));
+    await waitFor(() => expect(api.cancelMatch).toHaveBeenCalledWith('league-1', 'match-1', 'Venue unavailable'));
+    expect((await screen.findByRole('status')).textContent).toContain('Match cancelled successfully.');
   });
 
   it('keeps score input empty while cleared and only saves a valid edited value', async () => {
