@@ -29,7 +29,7 @@ const FULL_SQUAD = [
   ...Array.from({ length: 3 }, (_, i) => squadPlayer(13 + i, 'FWD')),
 ];
 
-async function mountLiveSquad(players = FULL_SQUAD) {
+async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
@@ -52,7 +52,7 @@ async function mountLiveSquad(players = FULL_SQUAD) {
         return { data: { profile: { id: 'u1', display_name: 'Me' }, leagues: [league] }, error: null };
       }
       if (fn === 'ff_squad') {
-        return { data: { team: { id: 't1', name: 'Real League FC' }, formation: '4-3-3', status: 'draft',
+        return { data: { team: { id: 't1', name: 'Real League FC' }, formation, status: 'draft',
           captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, players }, error: null };
       }
       if (fn === 'ff_lineup_save') return { data: { lineup_id: 'lineup1', version: 1, formation: '4-3-3', status: 'draft' }, error: null };
@@ -150,15 +150,34 @@ describe('there is no squad list under the pitch', () => {
   });
 });
 
-describe('View Squad is read-only and Edit Squad exposes lineup controls', () => {
-  it('keeps formation and roster mutation controls out of View Squad', async () => {
+describe('View Squad keeps captaincy and substitution while hiding roster changes', () => {
+  it('shows player actions in View Squad but keeps replacement and removal in Edit Squad', async () => {
     await mountLiveSquad();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     expect(screen.getByRole('link', { name: 'Full profile' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Vice captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Make substitution' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+  });
+
+  it('can set captain and vice and complete a substitution from View Squad', async () => {
+    const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '5-4-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P3' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Vice captain' })); });
+    expect(calls.filter(call => call === 'ff_squad_set_captains')).toHaveLength(2);
+    expect(getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp3' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P13' })); });
+    expect(calls).toContain('ff_lineup_save');
   });
 
   it('exposes formation, captaincy, replacement, and substitution controls in Edit Squad', async () => {

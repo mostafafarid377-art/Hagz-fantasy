@@ -379,7 +379,7 @@ describe('the squad screen uses real server data only', () => {
 
   it('no formation or captain selects remain on the My Squad tab', async () => {
     await mountLiveSquad();
-    // The saved View mode is read-only; both controls are available from Edit Squad.
+    // View mode has no formation or captain dropdowns; player-sheet captaincy remains available.
     expect(document.querySelector('select[aria-label="Captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Vice captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();

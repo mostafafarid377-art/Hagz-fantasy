@@ -253,7 +253,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     ...(!squad?.gameweek_id && (live.gameweeks?.length ?? 0) === 0 ? [t('A season with a gameweek is required to save a lineup.')] : []),
   ];
   function selectPlayer(p: Player) {
-    if (!editing || !swapSource) { setError(''); setSelectedId(p.id); return; }
+    if (!swapSource) { setError(''); setSelectedId(p.id); return; }
     if (!targets.includes(p.id)) return;
     const next = [...ids]; const a = next.indexOf(swapSource), b = next.indexOf(p.id);
     if (a < 0 || b < 0) return;
@@ -300,7 +300,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
       {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
-      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} viewOnly={!editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
         const nextCaptain = type === 'captain'
           ? (captain === selected.id ? null : selected.id)
           : (captain === selected.id ? null : captain);
