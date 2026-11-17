@@ -12,14 +12,14 @@
  * It now verifies the league is visible and throws a clear message if it is not.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../translations';
 
 afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 const league = (id: string, name: string) => ({
-  league_id: id, name, role: 'leader', status: 'active', budget: 100,
+  league_id: id, name, role: 'leader' as const, status: 'active', budget: 100,
   market_open: true, archived: false, is_leader: true, is_organizer: false,
 });
 
@@ -32,27 +32,34 @@ async function mountLive(opts: {
   createdId: string;
   /** Leagues bootstrap reports on the SECOND (post-create) load. */
   bootstrapAfterCreate: ReturnType<typeof league>[];
+  initialLeagues?: ReturnType<typeof league>[];
   matchReadHandler?: (readNumber: number) => Promise<unknown>;
+  readHandler?: (fn: string, args?: Record<string, unknown>) => Promise<unknown>;
 }) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
+  try { localStorage.removeItem('ff-live-league'); } catch { /* no storage in test env */ }
 
   let created = false;
+  let bootstrapCalls = 0;
+  let failNextBootstrap = false;
   let matchRead = 0;
   const loadingSnapshots: boolean[] = [];
   const client = {
     auth: { getSession: async () => ({ data: { session: null }, error: null }) },
-    rpc: async (fn: string) => {
+    rpc: async (fn: string, args?: Record<string, unknown>) => {
       if (fn === 'ff_league_create') {
         created = true;
         return { data: { id: opts.createdId, name: 'New League', budget: 100, market_open: true, code: 'ABC123' }, error: null };
       }
       if (fn === 'ff_bootstrap') {
+        bootstrapCalls += 1;
+        if (failNextBootstrap) { failNextBootstrap = false; throw new TypeError('Load failed'); }
         return {
           data: {
             profile: { id: 'u1', display_name: 'Me' },
-            leagues: created ? opts.bootstrapAfterCreate : [],
+            leagues: created ? opts.bootstrapAfterCreate : (opts.initialLeagues ?? []),
           },
           error: null,
         };
@@ -62,6 +69,7 @@ async function mountLive(opts: {
         if (opts.matchReadHandler) return { data: await opts.matchReadHandler(matchRead), error: null };
         return { data: [{ id: matchRead === 1 ? 'match-before' : 'match-after' }], error: null };
       }
+      if (opts.readHandler) return { data: await opts.readHandler(fn, args), error: null };
       // Every other read returns an empty payload.
       return { data: [], error: null };
     },
@@ -86,7 +94,8 @@ async function mountLive(opts: {
   await act(async () => {
     render(
       <MemoryRouter>
-        <LiveProvider userId="u1"><Probe /></LiveProvider>
+        <LiveProvider userId="u1" initialLeagues={opts.initialLeagues}
+          initialDirectoryLoaded={opts.initialLeagues !== undefined}><Probe /></LiveProvider>
       </MemoryRouter>,
     );
   });
@@ -95,6 +104,13 @@ async function mountLive(opts: {
   return {
     get: () => ctx,
     loadingSnapshots: () => [...loadingSnapshots],
+    getBootstrapCalls: () => bootstrapCalls,
+    failNextBootstrap: () => { failNextBootstrap = true; },
+    reload: async () => { await act(async () => { await ctx.reload(); }); },
+    switchLeague: async (id: string) => {
+      await act(async () => { ctx.selectLeague(id); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    },
+    selectLeagueNow: async (id: string) => { await act(async () => { ctx.selectLeague(id); }); },
     refreshMatches: async () => {
       await act(async () => { await ctx.refreshMatches(); });
     },
@@ -109,6 +125,127 @@ async function mountLive(opts: {
     },
   };
 }
+
+describe('league switching reuses the authenticated league directory', () => {
+  it('does not issue another ff_bootstrap for a known league switch', async () => {
+    const app = await mountLive({
+      createdId: 'L-new',
+      bootstrapAfterCreate: [],
+      initialLeagues: [league('L-one', 'First League'), league('L-two', 'Second League')],
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(app.get().leagueId).toBe('L-one');
+    const callsBeforeSwitch = app.getBootstrapCalls();
+
+    await app.switchLeague('L-two');
+
+    expect(app.get().leagueId).toBe('L-two');
+    expect(app.getBootstrapCalls()).toBe(callsBeforeSwitch);
+    expect(app.get().loading).toBe(false);
+  });
+});
+
+describe('transient bootstrap failures do not erase a verified league', () => {
+  it('retains the league directory and loaded slice while exposing a retryable error', async () => {
+    const app = await mountLive({
+      createdId: 'L-known',
+      bootstrapAfterCreate: [league('L-known', 'Known League')],
+    });
+    expect((await app.create()).rejected).toBe(false);
+    const originalLeagues = app.get().leagues.map((row: any) => row.league_id);
+    const originalLeagueId = app.get().leagueId;
+    app.failNextBootstrap();
+
+    await app.reload();
+
+    expect(app.get().error).toBe('Load failed');
+    expect(app.get().leagues.map((row: any) => row.league_id)).toEqual(originalLeagues);
+    expect(app.get().leagueId).toBe(originalLeagueId);
+    expect(app.get().loading).toBe(false);
+
+    await app.reload();
+    expect(app.get().error).toBeNull();
+    expect(app.get().leagueId).toBe(originalLeagueId);
+    expect(app.get().leagues.map((row: any) => row.league_id)).toEqual(originalLeagues);
+    expect(app.get().loading).toBe(false);
+  });
+});
+
+describe('refresh failures preserve the last successful league slice', () => {
+  it('retains the same league players when one refresh request fails, then retries cleanly', async () => {
+    let failMarketRead = false;
+    const app = await mountLive({
+      createdId: 'L-slice',
+      bootstrapAfterCreate: [league('L-slice', 'Slice League')],
+      readHandler: async (fn, args) => {
+        if (fn === 'ff_market_players') {
+          if (failMarketRead) throw new TypeError('Load failed');
+          return [{ id: `player-${String(args?.p_league)}`, name: 'Confirmed player' }];
+        }
+        return [];
+      },
+    });
+    expect((await app.create()).rejected).toBe(false);
+    const confirmedPlayer = app.get().players[0];
+    const selectedLeague = app.get().leagueId;
+
+    failMarketRead = true;
+    await app.reload();
+    expect(app.get().leagueId).toBe(selectedLeague);
+    expect(app.get().players).toEqual([confirmedPlayer]);
+    expect(app.get().partialFailures).toContain('players: Load failed');
+    expect(app.get().loading).toBe(false);
+
+    failMarketRead = false;
+    await app.reload();
+    expect(app.get().leagueId).toBe(selectedLeague);
+    expect(app.get().players).toEqual([confirmedPlayer]);
+    expect(app.get().partialFailures).toEqual([]);
+    expect(app.get().error).toBeNull();
+  });
+});
+
+describe('rapid league switching isolates stale responses', () => {
+  it('keeps the newest league selected when an older league request later fails', async () => {
+    let rejectOldMarket!: (error: unknown) => void;
+    let oldMarketStarted!: () => void;
+    const oldMarketPending = new Promise<unknown>((_resolve, reject) => { rejectOldMarket = reject; });
+    const oldStarted = new Promise<void>((resolve) => { oldMarketStarted = resolve; });
+    const app = await mountLive({
+      createdId: 'unused',
+      bootstrapAfterCreate: [],
+      initialLeagues: [league('L-one', 'First'), league('L-two', 'Second'), league('L-three', 'Third')],
+      readHandler: async (fn, args) => {
+        const requestedLeague = String(args?.p_league);
+        if (fn === 'ff_market_players' && requestedLeague === 'L-two') {
+          oldMarketStarted();
+          return oldMarketPending;
+        }
+        if (fn === 'ff_market_players') return [{ id: `player-${requestedLeague}`, name: requestedLeague }];
+        return [];
+      },
+    });
+    await waitFor(() => expect(app.get().leagueId).toBe('L-one'));
+
+    await app.selectLeagueNow('L-two');
+    await oldStarted;
+    await app.selectLeagueNow('L-three');
+    await waitFor(() => expect(app.get().leagueId).toBe('L-three'));
+    await waitFor(() => expect(app.get().players[0]?.name).toBe('L-three'));
+
+    await act(async () => {
+      rejectOldMarket(new TypeError('Load failed'));
+      await oldMarketPending.catch(() => undefined);
+      await Promise.resolve();
+    });
+
+    expect(app.get().leagueId).toBe('L-three');
+    expect(app.get().players[0]?.name).toBe('L-three');
+    expect(app.get().error).toBeNull();
+    expect(app.get().partialFailures).toEqual([]);
+    expect(app.get().loading).toBe(false);
+  });
+});
 
 describe('match refresh keeps the open workflow mounted', () => {
   it('updates only matches without toggling the provider loading screen', async () => {

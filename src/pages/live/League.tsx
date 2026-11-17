@@ -78,7 +78,7 @@ export function LiveDashboard() {
   const auth = useAuth();
 
   if (live.loading) return <Loading />;
-  if (live.error) return <ErrorNote message={live.error} onRetry={() => void live.reload()} />;
+  if (live.error && !live.league) return <ErrorNote message={live.error} onRetry={() => void live.reload()} />;
   // A league is known to exist, but none of its slices could be read: every panel
   // below would render zeros ("0 members", "0 players", "no fixtures"), which the
   // user reads as an empty league rather than as a failure. Say what happened and
@@ -193,6 +193,7 @@ export function LiveDashboard() {
    */
   return (
     <>
+      {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
       <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
 
       <div className="welcome-row">

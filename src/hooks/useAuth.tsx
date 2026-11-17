@@ -46,6 +46,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const currentUserId = useRef<string | null>(null);
   // The user whose profile is already loaded, so a token refresh does not re-bootstrap.
   const bootstrappedUserId = useRef<string | null>(null);
+  // `getSession()` and Supabase's INITIAL_SESSION event can resolve together on
+  // mount. Share one RPC for that user so a late duplicate failure cannot win the
+  // generation race after an earlier bootstrap already succeeded.
+  const bootstrapInFlight = useRef(new Map<string, Promise<Bootstrap>>());
 
   const load = useCallback(async (session: Session | null) => {
     const mine = ++generation.current;
@@ -86,12 +90,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the profile so this check does not need `state` in the dependency list.
     if (sameUser && bootstrappedUserId.current === session.user.id) return;
 
-    try {
-      const data = await bootstrap(
+    const userId = session.user.id;
+    let request = bootstrapInFlight.current.get(userId);
+    if (!request) {
+      request = bootstrap(
         (session.user.user_metadata?.display_name as string | undefined) ?? undefined,
       );
+      bootstrapInFlight.current.set(userId, request);
+    }
+    try {
+      const data = await request;
       if (mine !== generation.current) return;
-      bootstrappedUserId.current = session.user.id;
+      bootstrappedUserId.current = userId;
       setState({
         status: 'ready', session, user: session.user,
         profile: data.profile, leagues: data.leagues, error: null,
@@ -101,10 +111,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // The session is valid but the backend refused bootstrap: surface it rather
       // than leaving the user on a spinner forever. This is NOT a reason to fall
       // back to Demo - the user is authenticated either way.
-      setState({
-        status: 'ready', session, user: session.user, profile: null, leagues: [],
+      setState((previous) => ({
+        status: 'ready', session, user: session.user,
+        // A transient refresh failure is not evidence that the account has no
+        // leagues. Keep the last verified directory for this same identity; only
+        // a genuinely new user starts without cached memberships.
+        profile: sameUser ? previous.profile : null,
+        leagues: sameUser ? previous.leagues : [],
         error: error instanceof Error ? error.message : 'Could not load your profile',
-      });
+      }));
+    } finally {
+      if (bootstrapInFlight.current.get(userId) === request) {
+        bootstrapInFlight.current.delete(userId);
+      }
     }
   }, []);
 
@@ -125,6 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (event === 'SIGNED_OUT') {
         currentUserId.current = null;
         bootstrappedUserId.current = null;
+        bootstrapInFlight.current.clear();
       }
       void load(session);
     });
