@@ -60,6 +60,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const [editing, setEditing] = useState(builder);
   const initializedLeague = useRef<string | null>(null);
   const previousBuilder = useRef(builder);
+  // Buying a bench player invalidates an unsaved server draft. Until the next
+  // lineup save, keep the current client-side order so a newly purchased player
+  // cannot sort ahead of a starter and push that starter onto the bench.
+  const [orderHint, setOrderHint] = useState<{ leagueId: string; ids: string[] } | null>(null);
   useEffect(() => {
     if (live.loading || !live.leagueId) return;
     const leagueChanged = initializedLeague.current !== live.leagueId;
@@ -67,6 +71,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     if (!leagueChanged && !builderChanged) return;
     initializedLeague.current = live.leagueId;
     previousBuilder.current = builder;
+    if (leagueChanged) setOrderHint(null);
     setEditing(builder || (live.squad?.players.length ?? 0) === 0);
     setSelectedId(''); setSwapSource(''); setAddPosition(undefined); setBusy('');
   }, [builder, live.leagueId, live.loading, live.squad?.players.length]);
@@ -87,12 +92,15 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
-  /** Ordered by slot when a lineup exists, otherwise grouped by position. */
+  /** Ordered by saved slot, then the user's preserved order, then position/name. */
+  const orderIndex = new Map((orderHint?.leagueId === live.leagueId ? orderHint.ids : []).map((id, index) => [id, index]));
   const ordered = [...players].sort((a, b) => {
-    // Persisted lineup slots are authoritative. Newly bought/replacement players
-    // have no slot until the next lineup save and must follow, not interleave with,
-    // the saved XI/bench order.
+    // Persisted lineup slots are authoritative. If buying a player invalidates an
+    // unsaved draft, use orderHint until the next save rather than letting a new
+    // name sort ahead of a starter and push that starter onto the bench.
     if (a.slot != null || b.slot != null) return (a.slot ?? 100) - (b.slot ?? 100);
+    const aIndex = orderIndex.get(a.league_player_id), bIndex = orderIndex.get(b.league_player_id);
+    if (aIndex != null || bIndex != null) return (aIndex ?? 100) - (bIndex ?? 100);
     const positionOrder: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
     return positionOrder.indexOf(a.position) - positionOrder.indexOf(b.position) || a.name.localeCompare(b.name);
   });
@@ -218,7 +226,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const targets = swapSource ? substitutionTargets(ruleSquad, allPlayers, swapSource) : [];
   const selected = allPlayers.find(p => p.id === selectedId);
   const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
-  const save = (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
+  const save = async (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => {
+    await live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
+    setOrderHint({ leagueId: live.leagueId ?? '', ids: playerIds });
+  };
   const formationCounts = (selected: typeof ordered) => ({
     GK: selected.filter(p => p.position === 'GK').length,
     DEF: selected.filter(p => p.position === 'DEF').length,
@@ -242,7 +253,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     ...(!squad?.gameweek_id && (live.gameweeks?.length ?? 0) === 0 ? [t('A season with a gameweek is required to save a lineup.')] : []),
   ];
   function selectPlayer(p: Player) {
-    if (!editing || !swapSource) { setError(''); setSelectedId(p.id); return; }
+    if (!swapSource) { setError(''); setSelectedId(p.id); return; }
     if (!targets.includes(p.id)) return;
     const next = [...ids]; const a = next.indexOf(swapSource), b = next.indexOf(p.id);
     if (a < 0 || b < 0) return;
@@ -250,6 +261,11 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     // Captaincy belongs to the squad; the server validates that both selected IDs
     // remain in the submitted 15-player lineup.
     void run('lineup', async () => { await save(next, captain, vice); setSwapSource(''); }, 'Players swapped.');
+  }
+  function buyIntoSquad(playerId: string) {
+    const ids = ordered.map((player) => player.league_player_id);
+    setOrderHint({ leagueId: live.leagueId ?? '', ids: [...ids.filter((id) => id !== playerId), playerId] });
+    return run('add', () => live.buy(playerId), 'Player added to your squad.');
   }
 
   return (
@@ -284,7 +300,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
       {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
-      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} viewOnly={!editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
         const nextCaptain = type === 'captain'
           ? (captain === selected.id ? null : selected.id)
           : (captain === selected.id ? null : captain);
@@ -431,7 +447,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           remaining={remaining}
           marketOpen={live.league.market_open}
           busy={busy === 'add'}
-          onPick={(player) => run('add', () => live.buy(player.id), 'Player added to your squad.')}
+          onPick={(player) => buyIntoSquad(player.id)}
           close={() => setAddPosition(undefined)}
         />
       )}

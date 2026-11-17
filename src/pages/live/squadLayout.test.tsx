@@ -122,6 +122,11 @@ async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
       }
       if (fn === 'ff_squad_buy') {
         const incoming = (opts.market as any[] | undefined)?.find(player => player.id === args?.p_league_player);
+        // Buying supersedes an unsaved draft in the API, so the refreshed squad has
+        // no persisted slots. This is the regression case: the new name must not
+        // alphabetically jump ahead of an existing starter and push a forward out.
+        serverSquad.players = serverSquad.players.map(player => ({ ...player, slot: null }));
+        serverSquad.formation = null; serverSquad.status = 'empty';
         if (incoming) serverSquad.players.push({ ...incoming, league_player_id: incoming.id, slot: null, image_path: null, image_url: null });
         return { data: { league_player_id: args?.p_league_player, price: incoming?.price ?? 0, squad_size: serverSquad.players.length, spent: serverSquad.spent }, error: null };
       }
@@ -165,6 +170,26 @@ describe('the formation drives the actual pitch layout', () => {
     await mountLiveSquad({ players: [], formation: '4-3-3', builder: true });
     expect(emptySlotsByPosition()).toEqual({ GK: 2, DEF: 5, MID: 5, FWD: 3 });
     expect(document.querySelectorAll('.pitch .pitch-add').length).toBe(15);
+  });
+
+  it('adding a bench player never reshuffles the starting XI or leaves a position empty', async () => {
+    const starters = [
+      [1, 'GK'], [3, 'DEF'], [4, 'DEF'], [5, 'DEF'], [6, 'DEF'],
+      [8, 'MID'], [9, 'MID'], [10, 'MID'], [13, 'FWD'], [14, 'FWD'], [15, 'FWD'],
+    ].map(([n, position]) => ({ ...squadPlayer(Number(n), String(position)), slot: null }));
+    const newKeeper = { id: 'lp16', name: 'Aardvark Keeper', position: 'GK', price: 5_000_000, rating: 80, active: true };
+    await mountLiveSquad({ players: starters, formation: '4-3-3', builder: true, market: [newKeeper] });
+    const starterButtons = () => [...document.querySelectorAll('.pitch .pitch-player')]
+      .map((button) => button.getAttribute('aria-label'));
+    const originalStarters = starterButtons();
+    expect(originalStarters).toHaveLength(11);
+
+    await act(async () => { screen.getByRole('button', { name: 'Add bench player: GK' }).click(); });
+    await act(async () => { screen.getByRole('button', { name: /Aardvark Keeper/ }).click(); });
+
+    expect(starterButtons()).toEqual(originalStarters);
+    expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(1);
+    expect(document.querySelector('.bench-player:not(.bench-add)')?.getAttribute('aria-label')).toBe('Player details: Aardvark Keeper');
   });
 
   it('draws a populated 4-4-2 as its shape, not the squad capacity', async () => {
@@ -354,7 +379,7 @@ describe('the squad screen uses real server data only', () => {
 
   it('no formation or captain selects remain on the My Squad tab', async () => {
     await mountLiveSquad();
-    // The saved View mode is read-only; both controls are available from Edit Squad.
+    // View mode has no formation or captain dropdowns; player-sheet captaincy remains available.
     expect(document.querySelector('select[aria-label="Captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Vice captain"]')).toBeNull();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();

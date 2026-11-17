@@ -99,3 +99,5 @@ button.pitch-player{border:0;background:transparent;color:inherit;cursor:pointer
 @media(max-width:600px){.suggestion-draft{padding:11px}.suggestion-batch>.button-row{display:grid;grid-template-columns:1fr}.suggestion-batch>.button-row .button{width:100%;justify-content:center}.transfer-history .table-wrap{margin-inline:-8px}}
 
 .formation-validation{display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;padding:10px 12px;border:1px solid #725632;border-radius:8px;background:#282418;color:#f1d891;line-height:1.5}.formation-validation svg{flex:none;margin-top:1px}
+@media(max-width:600px){.player-sheet .sheet-actions{grid-template-columns:1fr}}
+@media(max-width:600px){.player-sheet .sheet-actions{grid-template-columns:1fr}}
