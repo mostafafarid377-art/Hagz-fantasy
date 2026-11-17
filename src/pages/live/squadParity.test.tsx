@@ -154,24 +154,26 @@ describe('there is no squad list under the pitch', () => {
   });
 });
 
-describe('formation and captaincy are not on the squad tab', () => {
-  /**
-   * Changed on request: "Remove formation and captaincy from squad tab."
-   *
-   * The demo squad tab has neither, and the pitch already communicates the shape and
-   * the C / VC badges. What must NOT happen is losing the information itself, so the
-   * badges still render from whatever the server stored - only the two selects are
-   * gone. Selling stays: it cannot be expressed on a pitch.
-   */
-  it('offers no captain or vice captain selects', async () => {
+describe('View Squad is read-only and Edit Squad exposes lineup controls', () => {
+  it('keeps formation and roster mutation controls out of View Squad', async () => {
     await mountLiveSquad();
-    expect(screen.queryByLabelText('Captain')).toBeNull();
-    expect(screen.queryByLabelText('Vice captain')).toBeNull();
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    expect(screen.getByRole('link', { name: 'Full profile' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Make substitution' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
-  it('still offers a way to sell a player', async () => {
+  it('exposes formation, captaincy, replacement, and substitution controls in Edit Squad', async () => {
     await mountLiveSquad();
-    expect(screen.getByLabelText('Sell a player')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Select replacement' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();
   });
 });
 
@@ -186,10 +188,11 @@ describe('Edit squad opens the player market', () => {
     expect(src).not.toContain('action="Edit squad" to="/squad-builder"');
   });
 
-  it('the squad screen links to the market', async () => {
+  it('the squad screen links to the market only while editing', async () => {
     await mountLiveSquad();
-    const links = [...document.querySelectorAll('a')].map((a) => a.getAttribute('href'));
-    expect(links).toContain('/market');
+    expect([...document.querySelectorAll('a')].map((a) => a.getAttribute('href'))).not.toContain('/market');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
+    expect([...document.querySelectorAll('a')].map((a) => a.getAttribute('href'))).toContain('/market');
   });
 });
 
@@ -199,6 +202,7 @@ describe('captaincy can be set before the squad is complete', () => {
     const app = await mountLiveSquad([
       squadPlayer(1, 'GK'), squadPlayer(2, 'MID'), squadPlayer(3, 'MID'),
     ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
 
     const captainButton = screen.getByRole('button', { name: 'Captain' });
@@ -214,6 +218,7 @@ describe('captaincy can be set before the squad is complete', () => {
     const app = await mountLiveSquad([
       squadPlayer(1, 'GK'), squadPlayer(2, 'MID'), squadPlayer(3, 'MID'),
     ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
 

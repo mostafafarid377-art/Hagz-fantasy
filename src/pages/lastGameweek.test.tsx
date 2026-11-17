@@ -45,10 +45,11 @@ async function mountDashboard() {
   });
 }
 
-describe('editing the squad hides the bench', () => {
-  it('shows no bench strip in builder (edit) mode', async () => {
+describe('the squad keeps the bench visible while editing', () => {
+  it('shows the separate bench strip in builder (edit) mode', async () => {
     await mountSquad({ builder: true });
-    expect(document.querySelector('.bench-strip')).toBeNull();
+    expect(document.querySelector('.bench-strip')).toBeTruthy();
+    expect(document.querySelectorAll('.bench-player')).toHaveLength(4);
   });
 
   it('still shows the bench strip on the normal squad screen', async () => {

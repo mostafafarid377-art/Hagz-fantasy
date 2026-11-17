@@ -170,16 +170,20 @@ test('browser storage failure is surfaced instead of reporting a saved suggestio
 
 test('all formations preserve the squad, and captain and vice-captain remain distinct', async ({page})=>{
   await fresh(page); await page.goto('/squad-builder');
-  // The roster list was removed from the builder, so "the squad is preserved" is read
-  // off the pitch instead: changing the formation redraws the shape but must never add
-  // or drop a squad member.
+  // Formation previews retain the exact Starting XI and the separate Bench. They
+  // never promote a substitute or drop a roster member while the shape changes.
   const originals=await page.locator('.pitch-player strong').allTextContents();
+  const benchOriginals=await page.locator('.bench-player strong').allTextContents();
+  const playerIdsBefore=await page.evaluate(()=>JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!).squads.find((s:{leagueId:string;managerId:string})=>s.leagueId==='league-1'&&s.managerId==='manager').playerIds);
+  await expect(page.locator('.pitch-player')).toHaveCount(11); await expect(page.locator('.bench-player')).toHaveCount(4);
   for(const f of ['4-3-3','4-4-2','3-5-2','3-4-3','4-5-1','5-3-2','5-4-1']){
     await page.getByLabel('Formation').selectOption(f); await expect(page.getByLabel('Formation')).toHaveValue(f);
-    expect((await page.locator('.pitch-player strong').allTextContents()).sort()).toEqual([...originals].sort());
+    expect(await page.locator('.pitch-player strong').allTextContents()).toEqual(originals);
+    expect(await page.locator('.bench-player strong').allTextContents()).toEqual(benchOriginals);
+    expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!).squads.find((s:{leagueId:string;managerId:string})=>s.leagueId==='league-1'&&s.managerId==='manager').playerIds)).toEqual(playerIdsBefore);
   }
   await page.getByLabel('Formation').selectOption('4-3-3');
-  await page.goto('/squad');
+  await page.goto('/squad-builder');
   await page.locator('.pitch-player[aria-label="Player details: Hassan Magdy"]').click();
   const captainSheet=page.getByRole('dialog');
   await captainSheet.getByRole('button',{name:'Captain',exact:true}).click();

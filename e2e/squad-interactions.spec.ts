@@ -30,7 +30,7 @@ test('replacement respects budget and closed market without changing the squad',
 });
 
 test('swap starter and bench players in either direction and persist lineup',async({page})=>{
-  await fresh(page,'/squad');await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();
+  await fresh(page,'/squad-builder');await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();
   const dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'Make substitution'}).click();
   await expect(page.getByText('Choose a player to swap')).toBeVisible();await expect(page.locator('.bench-player.swap-target')).toHaveCount(1);
   await page.locator('.bench-player[aria-label="Select swap player: Seif Mostafa"]').click();
@@ -44,7 +44,7 @@ test('swap starter and bench players in either direction and persist lineup',asy
 test('corrective swaps fix formation mismatches and can be cancelled',async({page})=>{
   await fresh(page,'/squad-builder');
   await page.getByLabel('Formation').selectOption('4-4-2');
-  await page.goto('/squad');
+  await page.goto('/squad-builder');
   const team=async()=> (await state(page)).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1');
   const original=(await team()).playerIds;
 
@@ -73,7 +73,7 @@ test('corrective swaps fix formation mismatches and can be cancelled',async({pag
 });
 
 test('player sheet captain controls, escape and Arabic mobile layout work',async({page})=>{
-  await page.setViewportSize({width:390,height:844});await fresh(page,'/squad');await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();
+  await page.setViewportSize({width:390,height:844});await fresh(page,'/squad-builder');await page.locator('.pitch-player[aria-label="Player details: Youssef Adel"]').click();
   const dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'Captain',exact:true}).click();await expect(dialog.getByRole('button',{name:'Captain',exact:true})).toHaveAttribute('aria-pressed','true');
   await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);expect((await state(page)).squads.find((s:{managerId:string;leagueId:string})=>s.managerId==='manager'&&s.leagueId==='league-1').captainId).toBe('p3');
   await page.getByLabel('Switch language').click();await page.locator('.pitch-player[aria-label="تفاصيل اللاعب: Youssef Adel"]').click();await expect(page.getByRole('button',{name:'إجراء تبديل'})).toBeVisible();

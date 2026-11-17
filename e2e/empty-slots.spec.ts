@@ -25,7 +25,7 @@ test('every one of fifteen empty spots can be filled without losing selections',
   await prepare(page,true);await page.goto('/squad-builder');const pitch=page.locator('.squad-selection-pitch');
   const groups=[['GK',['Omar Khaled','Sherif Adel']],['DEF',['Youssef Adel','Ahmed Nabil','Ziad Tarek','Mahmoud Samir','Seif Mostafa']],['MID',['Hassan Magdy','Marwan Salah','Fares Ashraf','Tamer Hany','Samy Ibrahim']],['FWD',['Amr Hesham','Yassin Mohamed','Ramy Fathy']]] as const;
   for(const [position,names] of groups){for(const name of names){await pitch.getByRole('button',{name:`Add player: ${position}`}).first().click();await page.getByRole('dialog').getByRole('button',{name:new RegExp(name)}).click();}}
-  await expect(pitch.locator('.pitch-add')).toHaveCount(0);const q=await team(page);expect(q.playerIds).toHaveLength(15);expect(new Set(q.playerIds).size).toBe(15);await page.reload();await expect(pitch.locator('.pitch-player')).toHaveCount(15);
+  await expect(pitch.locator('.pitch-add')).toHaveCount(0);const q=await team(page);expect(q.playerIds).toHaveLength(15);expect(new Set(q.playerIds).size).toBe(15);await page.reload();await expect(pitch.locator('.pitch-player')).toHaveCount(11);await expect(page.locator('.bench-player')).toHaveCount(4);const starters=await page.locator('.pitch-player strong').allTextContents();const bench=await page.locator('.bench-player strong').allTextContents();expect(starters).toHaveLength(11);expect(bench).toHaveLength(4);expect(starters.some(name=>bench.includes(name))).toBe(false);await page.getByRole('link',{name:'View squad'}).click();await expect(page.locator('.pitch-player')).toHaveCount(11);await expect(page.locator('.bench-player')).toHaveCount(4);
 });
 
 test('add player respects budget, market status, and position limits',async({page})=>{
@@ -36,8 +36,8 @@ test('add player respects budget, market status, and position limits',async({pag
 });
 
 test('my squad supports empty positions, and adding a bench player does not change starters',async({page})=>{
-  await prepare(page,true);await page.goto('/squad');await expect(page.locator('.squad-selection-pitch .pitch-add')).toHaveCount(15);await page.getByRole('button',{name:'Add player: MID'}).first().click();await page.getByRole('dialog').getByRole('button',{name:/Hassan Magdy/}).click();expect((await team(page)).playerIds).toEqual(['p9']);
-  await prepare(page);await page.goto('/squad-builder');await page.getByRole('button',{name:'Remove: Seif Mostafa'}).click();await page.goto('/squad');const before=await team(page);await expect(page.locator('.bench-add[aria-label="Add player: DEF"]')).toHaveCount(1);
+  await prepare(page,true);await page.goto('/squad-builder');await expect(page.locator('.squad-selection-pitch .pitch-add')).toHaveCount(15);await page.getByRole('button',{name:'Add player: MID'}).first().click();await page.getByRole('dialog').getByRole('button',{name:/Hassan Magdy/}).click();expect((await team(page)).playerIds).toEqual(['p9']);
+  await prepare(page);await page.goto('/squad-builder');await page.getByRole('button',{name:'Remove: Seif Mostafa'}).click();await page.goto('/squad-builder');const before=await team(page);await expect(page.locator('.bench-add[aria-label="Add player: DEF"]')).toHaveCount(1);
   await page.locator('.bench-add[aria-label="Add player: DEF"]').click();await page.getByRole('dialog').getByRole('button',{name:/Ali Hamdy/}).click();const after=await team(page);expect(after.playerIds.slice(0,11)).toEqual(before.playerIds.slice(0,11));expect(after.playerIds).toContain('p7');
 });
 

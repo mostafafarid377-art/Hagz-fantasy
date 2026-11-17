@@ -82,5 +82,15 @@ const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});
 Object.assign(ar, {'Captaincy updated.':'تم تحديث تعيين القائد ونائبه.','Captain and vice captain must be different players.':'يجب أن يكون القائد ونائبه لاعبين مختلفين.'});
 Object.assign(ar, {'Some data could not be loaded':'تعذر تحميل بعض البيانات','The numbers below may be incomplete. This is not an empty league.':'الأرقام أدناه قد تكون غير مكتملة. هذا ليس دورياً فارغاً.','That did not work':'لم ينجح ذلك','Try again':'حاول مجدداً'});
+Object.assign(ar, {
+  'Add bench player':'إضافة لاعب إلى دكة البدلاء', 'Save lineup changes':'حفظ تغييرات التشكيلة',
+  'Save lineup':'حفظ التشكيلة', 'Lineup saved.':'تم حفظ التشكيلة.', 'Saving…':'جارٍ الحفظ…',
+  'Select exactly 15 players to save a lineup.':'اختر ١٥ لاعباً بالضبط لحفظ التشكيلة.',
+  'A season with a gameweek is required to save a lineup.':'يلزم وجود موسم وجولة لحفظ التشكيلة.',
+  'Formation requires: {{required}}. Starting XI currently has: {{current}}.':'يتطلب التشكيل: {{required}}. التشكيلة الأساسية الحالية: {{current}}.',
+  'Select a captain from your squad.':'اختر قائداً من فريقك.',
+  'Select a vice captain from your squad.':'اختر نائب قائد من فريقك.',
+});
+
 i18n.use(initReactI18next).init({resources:{en:{translation:{}},ar:{translation:ar}},lng:language,fallbackLng:'en',interpolation:{escapeValue:false},returnNull:false});
 export default i18n;
