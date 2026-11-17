@@ -20,7 +20,7 @@ import { render, screen, cleanup, act, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
-afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(() => { cleanup(); localStorage.removeItem('ff_live_squad_order:L1'); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 /**
  * jsdom implements <dialog> as an inert element and does not ship showModal()/close().
@@ -172,13 +172,24 @@ describe('the formation drives the actual pitch layout', () => {
     expect(document.querySelectorAll('.pitch .pitch-add').length).toBe(15);
   });
 
+  it('uses the selected formation to keep surplus positions on the bench when slots are missing', async () => {
+    const unslottedSquad = FULL_SQUAD.map((player) => ({ ...player, slot: null }));
+    await mountLiveSquad({ players: unslottedSquad, formation: '4-3-3' });
+
+    // The raw roster is 2 GK / 5 DEF / 5 MID / 3 FWD. A 4-3-3 XI must instead
+    // contain 1 GK / 4 DEF / 3 MID / 3 FWD, with the four surplus players benched.
+    expect(document.querySelector('.formation-validation')).toBeNull();
+    expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
+    expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(4);
+  });
+
   it('adding a bench player never reshuffles the starting XI or leaves a position empty', async () => {
     const starters = [
       [1, 'GK'], [3, 'DEF'], [4, 'DEF'], [5, 'DEF'], [6, 'DEF'],
       [8, 'MID'], [9, 'MID'], [10, 'MID'], [13, 'FWD'], [14, 'FWD'], [15, 'FWD'],
     ].map(([n, position]) => ({ ...squadPlayer(Number(n), String(position)), slot: null }));
     const newKeeper = { id: 'lp16', name: 'Aardvark Keeper', position: 'GK', price: 5_000_000, rating: 80, active: true };
-    await mountLiveSquad({ players: starters, formation: '4-3-3', builder: true, market: [newKeeper] });
+    const app = await mountLiveSquad({ players: starters, formation: '4-3-3', builder: true, market: [newKeeper] });
     const starterButtons = () => [...document.querySelectorAll('.pitch .pitch-player')]
       .map((button) => button.getAttribute('aria-label'));
     const originalStarters = starterButtons();
@@ -189,6 +200,15 @@ describe('the formation drives the actual pitch layout', () => {
 
     expect(starterButtons()).toEqual(originalStarters);
     expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(1);
+    expect(document.querySelector('.bench-player:not(.bench-add)')?.getAttribute('aria-label')).toBe('Player details: Aardvark Keeper');
+
+    // Simulate a page refresh: the server returns the same roster with no slots,
+    // because purchasing superseded its unsaved draft. The remembered order keeps
+    // the newly bought keeper on the bench instead of promoting it into the XI.
+    const refreshedPlayers = app.serverSquad.players.map((player) => ({ ...player }));
+    cleanup();
+    await mountLiveSquad({ players: refreshedPlayers, formation: null, market: [newKeeper] });
+    expect(starterButtons()).toEqual(originalStarters);
     expect(document.querySelector('.bench-player:not(.bench-add)')?.getAttribute('aria-label')).toBe('Player details: Aardvark Keeper');
   });
 

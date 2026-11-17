@@ -23,6 +23,28 @@ import { LivePlayerSheet } from './LivePlayerSheet';
 import { AddLivePlayerSheet } from './AddLivePlayerSheet';
 import type { Formation, Player, Position } from '../../types';
 
+const SQUAD_ORDER_STORAGE_PREFIX = 'ff_live_squad_order:';
+
+function readSavedSquadOrder(leagueId: string): string[] | null {
+  try {
+    const stored = window.localStorage.getItem(`${SQUAD_ORDER_STORAGE_PREFIX}${leagueId}`);
+    if (!stored) return null;
+    const parsed: unknown = JSON.parse(stored);
+    return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string')
+      ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSquadOrder(leagueId: string, ids: string[]) {
+  try {
+    window.localStorage.setItem(`${SQUAD_ORDER_STORAGE_PREFIX}${leagueId}`, JSON.stringify(ids));
+  } catch {
+    // Keep the in-memory order working when browser storage is unavailable.
+  }
+}
+
 export function LiveSquad({ builder = false, transfers = false }: { builder?: boolean; transfers?: boolean }) {
   const { t } = useTranslation();
   const live = useLive();
@@ -64,6 +86,12 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   // lineup save, keep the current client-side order so a newly purchased player
   // cannot sort ahead of a starter and push that starter onto the bench.
   const [orderHint, setOrderHint] = useState<{ leagueId: string; ids: string[] } | null>(null);
+  const rememberOrder = (ids: string[]) => {
+    if (!live.leagueId) return;
+    const hint = { leagueId: live.leagueId, ids };
+    setOrderHint(hint);
+    saveSquadOrder(hint.leagueId, ids);
+  };
   useEffect(() => {
     if (live.loading || !live.leagueId) return;
     const leagueChanged = initializedLeague.current !== live.leagueId;
@@ -92,17 +120,33 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
-  /** Ordered by saved slot, then the user's preserved order, then position/name. */
-  const orderIndex = new Map((orderHint?.leagueId === live.leagueId ? orderHint.ids : []).map((id, index) => [id, index]));
+  /** Saved slots, remembered order, then a formation-balanced fallback. */
+  const preferredOrder = orderHint?.leagueId === live.leagueId
+    ? orderHint.ids
+    : live.leagueId ? readSavedSquadOrder(live.leagueId) ?? [] : [];
+  const orderIndex = new Map(preferredOrder.map((id, index) => [id, index]));
+  const fallbackFormation = formations[formation] ?? formations['4-3-3'];
+  const fallbackPositions: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
+  const byPosition = fallbackPositions.map((position) =>
+    players.filter((player) => player.position === position)
+      .sort((a, b) => a.name.localeCompare(b.name)));
+  // With no saved slots or locally remembered order, allocate the required number
+  // at each position to the XI first; only surplus players go to the bench. This
+  // also repairs existing rosters whose old draft was invalidated before ordering
+  // could be persisted, instead of sorting two keepers/five defenders onto the XI.
+  const fallbackIds = [
+    ...byPosition.flatMap((group, index) => group.slice(0, fallbackFormation[fallbackPositions[index]])),
+    ...byPosition.flatMap((group, index) => group.slice(fallbackFormation[fallbackPositions[index]])),
+  ].map((player) => player.league_player_id);
+  const fallbackIndex = new Map(fallbackIds.map((id, index) => [id, index]));
   const ordered = [...players].sort((a, b) => {
     // Persisted lineup slots are authoritative. If buying a player invalidates an
-    // unsaved draft, use orderHint until the next save rather than letting a new
-    // name sort ahead of a starter and push that starter onto the bench.
+    // unsaved draft, use remembered order until the next save rather than letting
+    // a new name sort ahead of a starter and push that starter onto the bench.
     if (a.slot != null || b.slot != null) return (a.slot ?? 100) - (b.slot ?? 100);
     const aIndex = orderIndex.get(a.league_player_id), bIndex = orderIndex.get(b.league_player_id);
     if (aIndex != null || bIndex != null) return (aIndex ?? 100) - (bIndex ?? 100);
-    const positionOrder: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
-    return positionOrder.indexOf(a.position) - positionOrder.indexOf(b.position) || a.name.localeCompare(b.name);
+    return (fallbackIndex.get(a.league_player_id) ?? 100) - (fallbackIndex.get(b.league_player_id) ?? 100);
   });
 
   async function run(key: string, action: () => Promise<void>, success?: string) {
@@ -228,7 +272,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
   const save = async (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => {
     await live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
-    setOrderHint({ leagueId: live.leagueId ?? '', ids: playerIds });
+    rememberOrder(playerIds);
   };
   const formationCounts = (selected: typeof ordered) => ({
     GK: selected.filter(p => p.position === 'GK').length,
@@ -264,7 +308,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   }
   function buyIntoSquad(playerId: string) {
     const ids = ordered.map((player) => player.league_player_id);
-    setOrderHint({ leagueId: live.leagueId ?? '', ids: [...ids.filter((id) => id !== playerId), playerId] });
+    rememberOrder([...ids.filter((id) => id !== playerId), playerId]);
     return run('add', () => live.buy(playerId), 'Player added to your squad.');
   }
 
