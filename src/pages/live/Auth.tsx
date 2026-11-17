@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Mail, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
+import { BootstrapDiagnosticsPanel } from '../../components/BootstrapDiagnostics';
 import { AuthError, sendPasswordReset, signIn, signUp } from '../../services/auth';
 
 type Mode = 'login' | 'signup' | 'reset';
@@ -148,6 +149,8 @@ export function LiveAuthPage({ mode }: { mode: Mode }) {
                 <AlertCircle size={14} /> {error}
               </p>
             )}
+            {auth.error && <p className="error" role="alert">{auth.error}</p>}
+            {(error || auth.error) && <BootstrapDiagnosticsPanel />}
 
             <button className="button" disabled={busy || !email || (mode !== 'reset' && !password)}>
               {busy ? t('Please wait…') : t(titles[mode])}

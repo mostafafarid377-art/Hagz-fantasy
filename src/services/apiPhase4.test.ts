@@ -4,6 +4,7 @@ const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock('../lib/supabase', () => ({ getSupabase: () => ({ rpc }) }));
 
 import { bootstrap, matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
+import { getBootstrapDiagnostics, makeSanitizedBootstrapReport } from './bootstrapDiagnostics';
 
 describe('Phase 4 Live RPC adapters', () => {
   beforeEach(() => { rpc.mockReset(); });
@@ -77,6 +78,55 @@ describe('Phase 4 Live RPC adapters', () => {
     await vi.advanceTimersByTimeAsync(25);
     await pending;
     expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('records a successful bootstrap attempt with UTC timestamps and elapsed time', async () => {
+    rpc.mockResolvedValue({ data: { profile: { id: 'u1', display_name: 'Player' }, leagues: [] }, error: null });
+
+    await bootstrap();
+
+    const attempt = getBootstrapDiagnostics()[getBootstrapDiagnostics().length - 1]!;
+    expect(attempt.diagnosticId).toMatch(/^[0-9a-f-]{32,36}$/i);
+    expect(attempt.startedAtUtc).toMatch(/Z$/);
+    expect(attempt.endedAtUtc).toMatch(/Z$/);
+    expect(attempt.elapsedMs).toEqual(expect.any(Number));
+    expect(attempt.outcome).toBe('success');
+    expect(attempt.timedOut).toBe(false);
+    expect(attempt.errorCategory).toBe('none');
+  });
+
+  it('records timeout and successful retry as distinct attempts', async () => {
+    vi.useFakeTimers();
+    rpc.mockReturnValueOnce({ abortSignal: () => new Promise(() => {}) });
+    rpc.mockResolvedValueOnce({ data: { profile: { id: 'u1', display_name: 'Player' }, leagues: [] }, error: null });
+
+    const first = bootstrap(undefined, { timeoutMs: 25 });
+    const firstFailure = expect(first).rejects.toMatchObject({ code: 'network', detail: 'timeout' });
+    await vi.advanceTimersByTimeAsync(25);
+    await firstFailure;
+    await bootstrap();
+
+    const [timedOut, retried] = getBootstrapDiagnostics().slice(-2);
+    expect(timedOut.diagnosticId).not.toBe(retried.diagnosticId);
+    expect(timedOut.outcome).toBe('error');
+    expect(timedOut.timedOut).toBe(true);
+    expect(timedOut.errorCategory).toBe('timeout');
+    expect(retried.outcome).toBe('success');
+    expect(retried.errorCategory).toBe('none');
+  });
+
+  it('distinguishes authentication failures and keeps raw error text out of reports', async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: { code: 'PGRST301', message: 'JWT expired for private@example.test' } });
+    await expect(bootstrap()).rejects.toMatchObject({ code: 'notAuthenticated' });
+    expect(getBootstrapDiagnostics()[getBootstrapDiagnostics().length - 1]?.errorCategory).toBe('authentication');
+
+    rpc.mockRejectedValueOnce(new TypeError('Bearer private-token-value user@example.test'));
+    await expect(bootstrap()).rejects.toThrow();
+    const report = makeSanitizedBootstrapReport();
+    expect(report).not.toContain('private-token-value');
+    expect(report).not.toContain('user@example.test');
+    expect(report).not.toContain('JWT expired');
+    expect(report).toContain('networkReceipt');
   });
 
   it('requests transfer history only for the selected league and bounded page size', async () => {
