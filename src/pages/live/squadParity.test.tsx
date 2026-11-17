@@ -17,16 +17,16 @@ const league = {
   budget: 100, market_open: true, archived: false, is_leader: false, is_organizer: false,
 };
 
-const squadPlayer = (n: number, position: string) => ({
+const squadPlayer = (n: number, position: string, slot = n) => ({
   league_player_id: `lp${n}`, name: `P${n}`, position, price: 5, rating: 70,
-  image_path: null, image_url: null, active: true, slot: n, captain: false,
+  image_path: null, image_url: null, active: true, slot, captain: false,
 });
 
 const FULL_SQUAD = [
-  squadPlayer(1, 'GK'), squadPlayer(2, 'GK'),
-  ...Array.from({ length: 5 }, (_, i) => squadPlayer(3 + i, 'DEF')),
-  ...Array.from({ length: 5 }, (_, i) => squadPlayer(8 + i, 'MID')),
-  ...Array.from({ length: 3 }, (_, i) => squadPlayer(13 + i, 'FWD')),
+  squadPlayer(1, 'GK', 1), squadPlayer(2, 'GK', 12),
+  squadPlayer(3, 'DEF', 2), squadPlayer(4, 'DEF', 3), squadPlayer(5, 'DEF', 4), squadPlayer(6, 'DEF', 5), squadPlayer(7, 'DEF', 13),
+  squadPlayer(8, 'MID', 6), squadPlayer(9, 'MID', 7), squadPlayer(10, 'MID', 8), squadPlayer(11, 'MID', 14), squadPlayer(12, 'MID', 15),
+  squadPlayer(13, 'FWD', 9), squadPlayer(14, 'FWD', 10), squadPlayer(15, 'FWD', 11),
 ];
 
 async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
@@ -150,21 +150,22 @@ describe('there is no squad list under the pitch', () => {
   });
 });
 
-describe('View Squad keeps captaincy and substitution while hiding roster changes', () => {
-  it('shows player actions in View Squad but keeps replacement and removal in Edit Squad', async () => {
+describe('View Squad is read-only; Edit Squad owns all mutations', () => {
+  it('shows saved players and profile links without captaincy, transfer, removal, or substitution actions', async () => {
     await mountLiveSquad();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     expect(screen.getByRole('link', { name: 'Full profile' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Vice captain' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Vice captain' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Make substitution' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
-  it('can set captain and vice and complete a substitution from View Squad', async () => {
-    const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '5-4-1');
+  it('can set captain and vice and substitute from Edit Squad', async () => {
+    const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '4-3-3');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -174,18 +175,19 @@ describe('View Squad keeps captaincy and substitution while hiding roster change
     expect(getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp3' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P3' }));
     fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P13' })); });
-    expect(calls).toContain('ff_lineup_save');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P7' })); });
+    expect(calls).toContain('ff_squad_substitute');
   });
 
-  it('exposes formation, captaincy, replacement, and substitution controls in Edit Squad', async () => {
+  it('exposes captaincy, replacement, and substitution controls but no manual formation selector in Edit Squad', async () => {
     await mountLiveSquad();
     fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
-    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
+    expect(screen.getByText('Derived formation')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
-    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(false);
     expect(screen.getByRole('button', { name: 'Select replacement' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();

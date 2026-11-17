@@ -16,7 +16,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import * as api from '../services/api';
 import { leaguePoints, EMPTY_POINTS, type PointsSnapshot } from '../services/points';
 import { ApiError } from '../services/api';
-import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer } from '../types/api';
+import type { ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer, MatchFormat } from '../types/api';
 import type { Bootstrap } from '../services/api';
 
 const LEAGUE_KEY = 'ff-live-league';
@@ -58,7 +58,7 @@ interface LiveContextValue extends LiveState {
   selectLeague: (id: string) => void;
   reload: () => Promise<void>;
   /** League actions */
-  createLeague: (name: string) => Promise<void>;
+  createLeague: (name: string, format?: MatchFormat) => Promise<void>;
   joinLeague: (code: string) => Promise<void>;
   setMarketOpen: (open: boolean) => Promise<void>;
   /** Archive the current league; it disappears from every screen. Leader-only. */
@@ -77,6 +77,8 @@ interface LiveContextValue extends LiveState {
   sell: (marketPlayerId: string) => Promise<void>;
   transfer: (outId: string, inId: string) => Promise<void>;
   saveLineup: (input: Omit<Parameters<typeof api.saveLineup>[1], 'gameweekId'> & { gameweekId?: string }) => Promise<void>;
+  saveSquadAssignments: (input: api.SquadAssignmentsInput) => Promise<void>;
+  substituteSquadPlayer: (outId: string, inId: string, expectedRevision?: number | null) => Promise<void>;
   confirmLineup: (lineupId: string) => Promise<void>;
   /** Competition + matches */
   createSeason: (name: string, startsAt: string, endsAt: string, count: number) => Promise<void>;
@@ -248,8 +250,8 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     league, isLeader, isOrganizer, myUserId: userId,
     selectLeague,
     reload: () => load(leagueId),
-    createLeague: async (name) => {
-      const created = await api.createLeague(name);
+    createLeague: async (name, format = '11-a-side') => {
+      const created = await api.createLeague(name, undefined, format);
       // Reload, then VERIFY. The RPC can succeed while the league never becomes
       // visible - a missing league_members row, an archived league, or a bootstrap
       // that does not list it - and the old code reported success regardless, so
@@ -294,6 +296,13 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
       ...input,
       gameweekId: input.gameweekId ?? state.gameweeks[0]?.id ?? '',
     })),
+    saveSquadAssignments: (input) => mutate(() => api.saveSquadAssignments(require(leagueId), {
+      ...input,
+      expectedRevision: input.expectedRevision ?? state.squad?.assignment_revision ?? null,
+    })),
+    substituteSquadPlayer: (outId, inId, expectedRevision) =>
+      mutate(() => api.substituteSquadPlayer(require(leagueId), outId, inId,
+        expectedRevision ?? state.squad?.assignment_revision ?? null)),
     confirmLineup: (id) => mutate(() => api.confirmLineup(require(leagueId), id)),
     createSeason: (name, startsAt, endsAt, count) =>
       mutate(() => api.createSeason(require(leagueId), name, startsAt, endsAt, count)),

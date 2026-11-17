@@ -686,6 +686,7 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [format, setFormat] = useState<'11-a-side' | '7-a-side' | '5-a-side'>('11-a-side');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -694,7 +695,7 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
     setError(''); setBusy(true);
     try {
       if (join) await live.joinLeague(code.trim());
-      else await live.createLeague(name.trim());
+      else await live.createLeague(name.trim(), format);
       await auth.refresh();
       // Confirm the action by going to the league. Before this the form stayed put
       // after a successful create, so "nothing happened" was indistinguishable from
@@ -719,6 +720,16 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
           <label>{t('League name')}
             <input required minLength={2} maxLength={100} value={name}
               onChange={(e) => setName(e.target.value)} placeholder={t('League name')} />
+          </label>
+        )}
+        {!join && (
+          <label>{t('Match format')}
+            <select aria-label={t('Match format')} value={format}
+              onChange={(event) => setFormat(event.target.value as typeof format)}>
+              <option value="11-a-side">{t('11-a-side')}</option>
+              <option value="7-a-side">{t('7-a-side')}</option>
+              <option value="5-a-side">{t('5-a-side')}</option>
+            </select>
           </label>
         )}
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}

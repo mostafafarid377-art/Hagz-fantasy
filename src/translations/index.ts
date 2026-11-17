@@ -81,6 +81,25 @@ Object.assign(ar, {
 const language=localStorage.getItem('ff-language')||'en';
 Object.assign(ar, {'Sign in to the real app':'تسجيل الدخول إلى التطبيق الحقيقي'});
 Object.assign(ar, {'Captaincy updated.':'تم تحديث تعيين القائد ونائبه.','Captain and vice captain must be different players.':'يجب أن يكون القائد ونائبه لاعبين مختلفين.'});
+Object.assign(ar, {
+  'Match format':'نوع المباراة','Derived formation':'التشكيل المستنتج','Not a legal formation':'تشكيل غير صالح','Unassigned players':'لاعبون غير معيّنين','Add to starters':'إضافة إلى الأساسيين',
+  'Add to bench':'إضافة إلى دكة البدلاء','Save assignments':'حفظ التعيينات','Save gameweek lineup':'حفظ تشكيلة الجولة',
+  'Squad assignments':'تعيينات الفريق','Squad assignments saved.':'تم حفظ تعيينات الفريق.',
+  'These players have no saved slot yet. Assign them explicitly; opening or refreshing this page will not move them.':'لا يوجد مركز محفوظ لهؤلاء اللاعبين بعد. عيّنهم يدوياً؛ فتح الصفحة أو تحديثها لن يغيّر تعييناتهم.',
+  'Move up':'تحريك لأعلى','Move down':'تحريك لأسفل',
+  'Squad needs {{required}} players; currently {{actual}}.':'يحتاج الفريق إلى {{required}} لاعباً؛ العدد الحالي {{actual}}.',
+  'Starting lineup needs {{required}} players; currently {{actual}}.':'تحتاج التشكيلة الأساسية إلى {{required}} لاعباً؛ العدد الحالي {{actual}}.',
+  'Squad needs {{required}} {{position}}; currently {{actual}}.':'يحتاج الفريق إلى {{required}} في مركز {{position}}؛ العدد الحالي {{actual}}.',
+  'Starting lineup needs at least {{required}} {{position}}; currently {{actual}}.':'تحتاج التشكيلة الأساسية إلى {{required}} على الأقل في مركز {{position}}؛ العدد الحالي {{actual}}.',
+  'Starting lineup needs exactly 1 GK; currently {{actual}}.':'تحتاج التشكيلة الأساسية إلى حارس واحد بالضبط؛ العدد الحالي {{actual}}.',
+  'Formation {{shape}} is not legal for {{format}}.':'التشكيل {{shape}} غير صالح لنظام {{format}}.',
+  'Bench needs {{required}} assigned players; currently {{actual}}.':'تحتاج دكة البدلاء إلى {{required}} لاعباً معيّناً؛ العدد الحالي {{actual}}.',
+  'Assign all {{count}} remaining squad players to a starter or ordered bench slot.':'عيّن اللاعبين المتبقين وعددهم {{count}} إلى مركز أساسي أو إلى ترتيب محدد على الدكة.',
+  '{{format}} squad · {{total}} players · {{starters}} starters · {{bench}} bench · {{budget}} budget.':'فريق {{format}} · {{total}} لاعباً · {{starters}} أساسي · {{bench}} بدلاء · الميزانية {{budget}}.',
+  '{{format}} · {{starters}} starters · {{bench}} ordered substitutes':'{{format}} · {{starters}} أساسي · {{bench}} بدلاء بترتيب محفوظ',
+  'No gameweek exists yet; assignments can be saved, but no gameweek snapshot will be created.':'لا توجد جولة بعد؛ يمكن حفظ التعيينات، لكن لن تُنشأ نسخة لتشكيلة الجولة.',
+  'Formation':'التشكيل','Lineup saved.':'تم حفظ التشكيلة.',
+});
 Object.assign(ar, {'Some data could not be loaded':'تعذر تحميل بعض البيانات','The numbers below may be incomplete. This is not an empty league.':'الأرقام أدناه قد تكون غير مكتملة. هذا ليس دورياً فارغاً.','That did not work':'لم ينجح ذلك','Try again':'حاول مجدداً'});
 Object.assign(ar, {
   'Add bench player':'إضافة لاعب إلى دكة البدلاء', 'Save lineup changes':'حفظ تغييرات التشكيلة',
