@@ -1,12 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock('../lib/supabase', () => ({ getSupabase: () => ({ rpc }) }));
 
-import { matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
+import { bootstrap, matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
 
 describe('Phase 4 Live RPC adapters', () => {
   beforeEach(() => { rpc.mockReset(); });
+  afterEach(() => { vi.useRealTimers(); });
 
   it('sends a suggestion batch in one RPC while preserving each independent item', async () => {
     const result = [{ id: 's1', name: 'Same Name' }, { id: 's2', name: 'Same Name' }];
@@ -42,15 +43,40 @@ describe('Phase 4 Live RPC adapters', () => {
     expect(abortSignal).toHaveBeenCalledWith(signal);
   });
 
-  it('passes an abort signal to the match read-model RPC', async () => {
-    const result = [{ id: 'match-1' }];
-    const signal = new AbortController().signal;
-    const abortSignal = vi.fn().mockResolvedValue({ data: result, error: null });
+  it('passes a combined abort signal to the match read-model RPC', async () => {
+    const caller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const abortSignal = vi.fn((signal: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    });
     rpc.mockReturnValue({ abortSignal });
 
-    await expect(matches('league-1', { signal })).resolves.toBe(result);
+    const pending = matches('league-1', { signal: caller.signal });
     expect(rpc).toHaveBeenCalledWith('ff_matches', { p_league: 'league-1' });
-    expect(abortSignal).toHaveBeenCalledWith(signal);
+    expect(abortSignal).toHaveBeenCalledTimes(1);
+    expect(requestSignal).not.toBe(caller.signal);
+    caller.abort();
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(pending).rejects.toThrow('aborted');
+  });
+
+  it('times out a read that never settles and aborts its request', async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    rpc.mockReturnValue({ abortSignal: (signal: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise(() => {});
+    } });
+    const pending = expect(bootstrap(undefined, { timeoutMs: 25 })).rejects.toMatchObject({
+      code: 'network', detail: 'timeout',
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    await pending;
+    expect(requestSignal?.aborted).toBe(true);
   });
 
   it('requests transfer history only for the selected league and bounded page size', async () => {
