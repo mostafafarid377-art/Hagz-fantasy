@@ -15,7 +15,7 @@ import { useLive } from '../../hooks/useLive';
 vi.mock('react-i18next', async importOriginal => ({ ...(await importOriginal<typeof import('react-i18next')>()), useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../../hooks/useLive', () => ({ useLive: vi.fn() }));
 vi.mock('../../services/api', () => ({
-  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), setMatchLineup: vi.fn(), saveMatchLineups: vi.fn(), submitMatchLineup: vi.fn(), cancelMatch: vi.fn(), setMatchScore: vi.fn(),
+  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), forkResult: vi.fn(), setMatchLineup: vi.fn(), saveMatchLineups: vi.fn(), submitMatchLineup: vi.fn(), cancelMatch: vi.fn(), setMatchScore: vi.fn(),
 }));
 vi.mock('./League', () => ({
   ErrorNote: () => null, Loading: () => <div>loading</div>, PartialDataNote: () => null,
@@ -218,7 +218,7 @@ describe('Live fixtures and scheduling', () => {
       { id: 'real-a', name: 'North', active: true }, { id: 'real-b', name: 'South', active: true },
     ]);
     vi.mocked(api.createMatch).mockResolvedValue({ id: 'new-match', starts_at: '2026-11-20T18:00:00Z', organizer_id: 'organizer-1' });
-    vi.mocked(api.matches).mockResolvedValue([{ ...live.matches[0], id: 'new-match', starts_at: '2026-11-20T18:00:00Z' }] as never);
+    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], id: 'new-match', starts_at: '2026-11-20T18:00:00Z' }] as never);
 
     renderFixtures(live);
     fireEvent.click(screen.getByRole('button', { name: 'Schedule match' }));
@@ -234,9 +234,29 @@ describe('Live fixtures and scheduling', () => {
     await waitFor(() => expect(api.createMatch).toHaveBeenCalledWith('league-1', expect.objectContaining({
       gameweekId: null, teamA: 'real-a', teamB: 'real-b', organizerId: 'organizer-1', venue: 'Community Ground',
     })));
-    await waitFor(() => expect(api.matches).toHaveBeenCalledWith('league-1'));
-    await waitFor(() => expect(live.refreshMatches).toHaveBeenCalled());
+    await waitFor(() => expect(live.refreshMatches).toHaveBeenCalledTimes(1));
+    expect(api.matches).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByText('Schedule a real match')).toBeNull());
+  });
+
+  it('uses the match refresh response to verify a result revision without a second read', async () => {
+    const live: any = mockLive();
+    const approved = { revision_id: 'approved-revision', version: 1, state: 'approved', based_on_lineup_revision_id: null,
+      team_a_score: null, team_b_score: null, submissions: [{ id: 'lineup-submission', kind: 'lineup',
+        approval: { id: 'lineup-approval', decision: 'approved' } }], events: [], correction: null, lineups: [] };
+    live.matches[0].revision_id = 'approved-revision';
+    live.matches[0].revision_state = 'approved';
+    live.matches[0].history = [approved];
+    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], revision_id: 'result-revision', revision_state: 'draft' }] as never);
+    vi.mocked(api.forkResult).mockResolvedValue({ revision_id: 'result-revision', request_id: 'request-1' });
+    openWorkflow(live);
+    vi.mocked(api.matches).mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Record match result' }));
+
+    expect((await screen.findByRole('status')).textContent).toContain('Editable result revision opened.');
+    expect(live.refreshMatches).toHaveBeenCalledTimes(1);
+    expect(api.matches).not.toHaveBeenCalled();
   });
 
   it('saves both lineups, then confirms the exact server-persisted selections before showing success', async () => {
