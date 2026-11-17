@@ -4,9 +4,9 @@
  */
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { LiveFixtures, LiveMatchCenter } from './Match';
+import { LiveFixtures, LiveMatchCenter, MATCH_WORKFLOW_TIMEOUT_MS } from './Match';
 import { LivePlayerSheet } from './LivePlayerSheet';
 import { PlayerSheet } from '../../components/PlayerSheet';
 import * as api from '../../services/api';
@@ -21,7 +21,7 @@ vi.mock('./League', () => ({
   ErrorNote: () => null, Loading: () => <div>loading</div>, PartialDataNote: () => null,
 }));
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 const showModal = vi.fn(function (this: HTMLDialogElement) { this.open = true; });
 beforeEach(() => { HTMLDialogElement.prototype.showModal = showModal; });
 
@@ -38,6 +38,22 @@ const mockLive = (isLeader = true) => ({
 function renderFixtures(value = mockLive()) {
   vi.mocked(useLive).mockReturnValue(value as never);
   return render(<MemoryRouter><LiveFixtures /></MemoryRouter>);
+}
+
+function editableMatch(isLeader = true) {
+  const live: any = mockLive(isLeader);
+  live.matches[0].revision_id = 'lineup-draft';
+  live.matches[0].revision_state = 'draft';
+  live.matches[0].history = [{ revision_id: 'lineup-draft', version: 1, state: 'draft', team_a_score: null, team_b_score: null,
+    submissions: [], events: [], correction: null, lineups: [] }];
+  if (!isLeader) live.myUserId = 'organizer-1';
+  return live;
+}
+
+function openWorkflow(live: any) {
+  vi.mocked(useLive).mockReturnValue(live as never);
+  render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open' }));
 }
 
 describe('Live fixtures and scheduling', () => {
@@ -119,7 +135,7 @@ describe('Live fixtures and scheduling', () => {
     ];
     vi.mocked(useLive).mockReturnValue(live as never);
     vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
-    vi.mocked(api.matches).mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedLineups }] }] as never);
+    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedLineups }] }] as never);
     render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     fireEvent.click((await screen.findAllByRole('checkbox'))[0]);
@@ -132,11 +148,62 @@ describe('Live fixtures and scheduling', () => {
     fireEvent.click(available[2]);
     fireEvent.click(screen.getByRole('button', { name: 'Save both lineups' }));
     await waitFor(() => expect(api.saveMatchLineups).toHaveBeenCalledTimes(1));
-    expect(api.matches).toHaveBeenCalledWith('league-1');
+    expect(live.refreshMatches).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect((await screen.findByRole('status')).textContent).toContain('Both lineups saved and verified on the server.');
+    expect(screen.getByRole('button', { name: 'Save both lineups' }).hasAttribute('disabled')).toBe(false);
     expect(api.saveMatchLineups).toHaveBeenCalledWith('league-1', 'lineup-draft',
       [expect.objectContaining({ player_id: 'player-a', selection: 'starter' })],
-      [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })]);
+      [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })],
+      { signal: expect.any(AbortSignal) });
+  });
+
+  it('shows RPC failures and always releases the Save Lineup loading state for an assigned Organizer', async () => {
+    const live = editableMatch(false);
+    vi.mocked(api.saveMatchLineups).mockRejectedValue(new Error('The database rejected this lineup.'));
+    openWorkflow(live);
+
+    const save = screen.getByRole('button', { name: 'Save both lineups' });
+    fireEvent.click(save);
+    expect((await screen.findByRole('alert')).textContent).toContain('The database rejected this lineup.');
+    expect(screen.getByRole('button', { name: 'Save both lineups' }).hasAttribute('disabled')).toBe(false);
+    expect(live.refreshMatches).toHaveBeenCalled();
+  });
+
+  it('ignores duplicate Save Lineup clicks while the first RPC is pending', async () => {
+    const live = editableMatch();
+    let resolveSave!: (value: unknown) => void;
+    vi.mocked(api.saveMatchLineups).mockImplementation(() => new Promise((resolve) => { resolveSave = resolve; }) as never);
+    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: [] }] }] as never);
+    openWorkflow(live);
+
+    const save = screen.getByRole('button', { name: 'Save both lineups' });
+    await act(async () => { fireEvent.click(save); fireEvent.click(save); await Promise.resolve(); });
+    expect(api.saveMatchLineups).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Saving lineups/ }).hasAttribute('disabled')).toBe(true));
+
+    await act(async () => { resolveSave({ saved: true }); });
+    expect(await screen.findByRole('status')).toBeTruthy();
+    expect(api.saveMatchLineups).toHaveBeenCalledTimes(1);
+  });
+
+  it('times out a permanently pending save RPC, aborts it and releases loading', async () => {
+    vi.useFakeTimers();
+    const live = editableMatch();
+    let saveSignal: AbortSignal | undefined;
+    vi.mocked(api.saveMatchLineups).mockImplementation((_league, _revision, _teamA, _teamB, options) => {
+      saveSignal = options?.signal;
+      return new Promise(() => {}) as never;
+    });
+    openWorkflow(live);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save both lineups' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByRole('button', { name: /Saving lineups/ }).hasAttribute('disabled')).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(MATCH_WORKFLOW_TIMEOUT_MS); });
+    expect(screen.getByRole('alert').textContent).toMatch(/timed out/i);
+    expect(saveSignal?.aborted).toBe(true);
+    expect(screen.getByRole('button', { name: 'Save both lineups' }).hasAttribute('disabled')).toBe(false);
   });
 
   it('lets the assigned Organizer cancel an unopened match with a reason', async () => {

@@ -55,11 +55,14 @@ function normalise(error: { code?: string; message?: string } | null): ApiError 
  * positionally by name so a signature change fails loudly rather than silently
  * binding the wrong value.
  */
-async function call<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
+type RpcOptions = { signal?: AbortSignal };
+
+async function call<T>(fn: string, args: Record<string, unknown> = {}, options: RpcOptions = {}): Promise<T> {
   const supabase = getSupabase();
   if (!supabase) throw new ApiError('notConfigured', 'Supabase is not configured');
 
-  const { data, error } = await supabase.rpc(fn, args);
+  const request = supabase.rpc(fn, args);
+  const { data, error } = await (options.signal ? request.abortSignal(options.signal) : request);
   if (error) {
     const normalised = normalise(error);
     if (normalised.code === 'unknown') {
@@ -292,7 +295,8 @@ export const createMatch = (leagueId: string, input: {
   p_starters_per_side: input.startersPerSide ?? 7, p_max_substitutes: input.maxSubstitutes ?? 5,
 });
 
-export const matches = (leagueId: string) => call<ApiMatch[]>('ff_matches', { p_league: leagueId });
+export const matches = (leagueId: string, options: RpcOptions = {}) =>
+  call<ApiMatch[]>('ff_matches', { p_league: leagueId }, options);
 
 export const openRevision = (leagueId: string, matchId: string) =>
   call<{ id: string; version: number; state: string }>('ff_match_open_revision', { p_league: leagueId, p_match: matchId });
@@ -303,8 +307,8 @@ export const saveMatchLineups = (leagueId: string, revisionId: string, teamAPlay
 }>, teamBPlayers: Array<{
   player_id: string; selection: 'starter' | 'substitute'; actual_position: 'GK' | 'DEF' | 'MID' | 'FWD';
   eligibility_kind?: 'registered' | 'temporary' | 'market'; eligibility_evidence?: Record<string, unknown>;
-}>) => call<{ revision_id: string; team_a: { lineup_id: string; players: number }; team_b: { lineup_id: string; players: number }; saved: true }>(
-  'ff_match_save_lineups', { p_league: leagueId, p_revision: revisionId, p_team_a_players: teamAPlayers, p_team_b_players: teamBPlayers });
+}>, options: RpcOptions = {}) => call<{ revision_id: string; team_a: { lineup_id: string; players: number }; team_b: { lineup_id: string; players: number }; saved: true }>(
+  'ff_match_save_lineups', { p_league: leagueId, p_revision: revisionId, p_team_a_players: teamAPlayers, p_team_b_players: teamBPlayers }, options);
 
 export const cancelMatch = (leagueId: string, matchId: string, reason: string) =>
   call<{ id: string; cancelled: true; cancelled_at: string; reason: string }>(

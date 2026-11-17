@@ -80,7 +80,7 @@ interface LiveContextValue extends LiveState {
   confirmLineup: (lineupId: string) => Promise<void>;
   /** Competition + matches */
   createSeason: (name: string, startsAt: string, endsAt: string, count: number) => Promise<void>;
-  refreshMatches: () => Promise<void>;
+  refreshMatches: (signal?: AbortSignal) => Promise<ApiMatch[]>;
   markNotificationRead: (id: string) => Promise<void>;
 }
 
@@ -204,12 +204,13 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
   // the provider-wide loading flag, unmounting MatchWorkflow and discarding its
   // inline success/error state. Keep the open workflow mounted while replacing
   // matches with the server-confirmed read model.
-  const refreshMatches = useCallback(async () => {
+  const refreshMatches = useCallback(async (signal?: AbortSignal): Promise<ApiMatch[]> => {
     const selectedLeague = leagueId;
-    if (!selectedLeague) return;
-    const matches = await api.matches(selectedLeague);
-    if (stateRef.current.leagueId !== selectedLeague) return;
+    if (!selectedLeague) return [];
+    const matches = await api.matches(selectedLeague, { signal });
+    if (stateRef.current.leagueId !== selectedLeague) return matches;
     commit((current) => ({ ...current, matches }));
+    return matches;
   }, [leagueId, commit]);
 
   /**

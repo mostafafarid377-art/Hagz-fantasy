@@ -14,6 +14,52 @@ import type { ApiMatch, ApiMatchRevision, Position } from '../../types/api';
 import { ScheduleMatchForm } from './ScheduleMatchForm';
 import './matchWorkflow.css';
 
+export const MATCH_WORKFLOW_TIMEOUT_MS = 30_000;
+const MATCH_REFRESH_TIMEOUT_MS = 8_000;
+
+type MatchDiagnostic = { operation: string; matchId: string; teamIds?: string[] };
+type MatchRunOptions = { diagnostic?: MatchDiagnostic; verifyMatches?: (matches: ApiMatch[]) => void };
+
+function withDeadline<T>(task: (signal: AbortSignal) => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(() => task(controller.signal)), timeout])
+    .finally(() => {
+      clearTimeout(timer);
+      if (!controller.signal.aborted) controller.abort();
+    });
+}
+
+function redactDiagnostic(value: string): string {
+  return value
+    .replace(/Bearer\s+[^\s]+/gi, 'Bearer [redacted]')
+    .replace(/\beyJ[\w-]*\.[\w-]*\.[\w-]*\b/g, '[redacted-token]')
+    .replace(/[\w.+-]+@[\w.-]+\.[A-Z]{2,}/gi, '[redacted-email]')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '[redacted-id]');
+}
+
+function logLineupStage(stage: string, diagnostic: MatchDiagnostic, startedAt: number, outcome: string, error?: unknown) {
+  const details: Record<string, unknown> = {
+    operation: diagnostic.operation,
+    stage,
+    outcome,
+    elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    matchId: diagnostic.matchId,
+    teamIds: diagnostic.teamIds,
+  };
+  if (error) {
+    details.errorCode = error instanceof Error && 'detail' in error ? (error as Error & { detail?: unknown }).detail : undefined;
+    details.errorMessage = redactDiagnostic(error instanceof Error ? error.message : String(error));
+  }
+  console.info('[fantasy-friends] live lineup save', details);
+}
+
 export function LiveMatchCenter() {
   const { t } = useTranslation();
   const live = useLive();
@@ -112,19 +158,44 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
     setScoreA(String(current?.team_a_score ?? 0)); setScoreB(String(current?.team_b_score ?? 0));
   }, [current?.revision_id]);
 
-  async function run(action: () => Promise<unknown>, success: string) {
+  async function run(action: (signal: AbortSignal) => Promise<unknown>, success: string, options: MatchRunOptions = {}) {
     if (!live.leagueId || actionLock.current) return;
     actionLock.current = true;
+    const startedAt = performance.now();
+    const { diagnostic } = options;
+    let stage = diagnostic ? 'rpc' : 'action';
     setBusy(true); setError(''); setNotice('');
-    try { await action(); await live.refreshMatches(); setNotice(success); }
-    catch (e) {
-      setError(e instanceof Error ? e.message : 'The server refused this action');
-      // A multi-call action (saving two side lineups) can partially persist before
-      // a later RPC is refused. Refresh even on failure so the UI reflects the
-      // server's actual state instead of hiding that committed first step.
-      try { await live.refreshMatches(); } catch { /* keep the original action error visible */ }
+    if (diagnostic) logLineupStage(stage, diagnostic, startedAt, 'started');
+    try {
+      await withDeadline(async (signal) => {
+        await action(signal);
+        if (diagnostic) {
+          logLineupStage(stage, diagnostic, startedAt, 'succeeded');
+          stage = 'server_read_model_verification';
+          logLineupStage(stage, diagnostic, startedAt, 'started');
+        }
+        const refreshed = await live.refreshMatches(signal);
+        options.verifyMatches?.(refreshed);
+        if (diagnostic) logLineupStage(stage, diagnostic, startedAt, 'succeeded');
+      }, MATCH_WORKFLOW_TIMEOUT_MS, diagnostic?.operation === 'lineup_save'
+        ? 'Lineup save timed out. Refresh the match to verify whether the server saved your selections before retrying.'
+        : 'This match action timed out. Refresh the match before retrying.');
+      setNotice(success);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'The server refused this action';
+      setError(message);
+      if (diagnostic) logLineupStage(stage, diagnostic, startedAt, 'failed', e);
+      // Refresh after failure because a timed-out/failed request may have reached
+      // the server. Bound this recovery read too, so it cannot hold loading
+      // forever or hide the original, visible error.
+      try {
+        await withDeadline((signal) => live.refreshMatches(signal), MATCH_REFRESH_TIMEOUT_MS,
+          'Refreshing the match after the failed action timed out.');
+      } catch { /* retain the original action error */ }
+    } finally {
+      actionLock.current = false;
+      setBusy(false);
     }
-    finally { actionLock.current = false; setBusy(false); }
   }
   async function openResultRevision(approvalId: string) {
     if (!live.leagueId) return;
@@ -172,23 +243,31 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
         {availablePlayers(side.id).map((player) => <label className={`match-player-choice${selectedPlayers[side.id]?.[player.player_id] ? ' is-selected' : ''}`} key={player.player_id}><input type="checkbox" checked={!!selectedPlayers[side.id]?.[player.player_id]} disabled={busy || !!playersBySide[side.id === match.team_a_id ? match.team_b_id : match.team_a_id]?.[player.player_id]} onChange={(e) => togglePlayer(side.id, player.player_id, e.target.checked)} /><span dir="auto">{player.name}{identityHint(player.player_id)} <small>{t(player.position)}</small></span>{selectedPlayers[side.id]?.[player.player_id] && <select aria-label={`${player.name} ${t('lineup role')}`} value={selectedPlayers[side.id][player.player_id]} onChange={(e) => setSelection(side.id, player.player_id, e.target.value as 'starter' | 'substitute')}><option value="starter">{t('Starter')}</option><option value="substitute">{t('Substitute')}</option></select>}</label>)}
         {availablePlayers(side.id).length === 0 && <p className="muted">{t('No active published Market players are available.')}</p>}
       </fieldset>)}
-      <button className="button button-outline" disabled={busy || match.is_cancelled} onClick={() => void run(async () => {
+      <button className="button button-outline" aria-busy={busy} disabled={busy || match.is_cancelled} onClick={() => {
+        const diagnostic: MatchDiagnostic = { operation: 'lineup_save', matchId: match.id, teamIds: [match.team_a_id, match.team_b_id] };
         const rowsFor = (sideId: string) => Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({
           player_id, selection,
           actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position,
           eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' },
         }));
-        await api.saveMatchLineups(live.leagueId!, current!.revision_id, rowsFor(match.team_a_id), rowsFor(match.team_b_id));
-        const persisted = await api.matches(live.leagueId!);
-        const savedRevision = persisted.find((row) => row.id === match.id)?.history?.find((revision) => revision.revision_id === current!.revision_id);
-        const saved = savedRevision?.lineups ?? [];
-        const matchesSelection = [match.team_a_id, match.team_b_id].every((sideId) => {
-          const actual = saved.find((lineup) => lineup.team_id === sideId)?.players ?? [];
-          const expected = Object.entries(selectedPlayers[sideId] ?? {});
-          return actual.length === expected.length && expected.every(([playerId, selection]) => actual.some((player) => player.player_id === playerId && player.selection === selection));
+        void run((signal) => api.saveMatchLineups(live.leagueId!, current!.revision_id,
+          rowsFor(match.team_a_id), rowsFor(match.team_b_id), { signal }),
+        t('Both lineups saved and verified on the server.'), {
+          diagnostic,
+          verifyMatches: (persisted) => {
+            const savedRevision = persisted.find((row) => row.id === match.id)?.history?.find((revision) => revision.revision_id === current!.revision_id);
+            const saved = savedRevision?.lineups ?? [];
+            const matchesSelection = [match.team_a_id, match.team_b_id].every((sideId) => {
+              const actual = saved.find((lineup) => lineup.team_id === sideId)?.players ?? [];
+              const expected = Object.entries(selectedPlayers[sideId] ?? {});
+              return actual.length === expected.length && expected.every(([playerId, selection]) => actual.some((player) => player.player_id === playerId && player.selection === selection));
+            });
+            if (!matchesSelection) throw new Error('Lineups were sent but the saved server state did not match. Refresh and verify before submitting.');
+          },
         });
-        if (!matchesSelection) throw new Error('Lineups were sent but the saved server state did not match. Refresh and verify before submitting.');
-      }, t('Both lineups saved and verified on the server.'))}>{t('Save both lineups')}</button>
+      }}>
+        {busy ? <><RefreshCw size={15} className="spin" /> {t('Saving lineups…')}</> : t('Save both lineups')}
+      </button>
       <button className="button button-primary" disabled={busy || match.is_cancelled} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
     </section>}
     {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}

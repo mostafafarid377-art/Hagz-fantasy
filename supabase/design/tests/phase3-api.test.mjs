@@ -678,6 +678,11 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   const revision = await rpc(BOB, 'ff_match_open_revision', LEAGUE.id, match.id);
   assert.equal(revision.state, 'draft');
 
+  // Being an active League Organizer is insufficient unless assigned to this
+  // specific match. The Leader and the assigned active Organizer are authorized.
+  await expectDenied(() => rpc(CAROL, 'ff_match_save_lineups', LEAGUE.id, revision.id, '[]', '[]'),
+    '42501', 'active but unassigned organizer saving match lineups');
+
   await expectDenied(() => rpc(CAROL, 'ff_match_set_lineup', LEAGUE.id, revision.id, teamA.id,
     JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }])), '42501', 'non-organizer setting a lineup');
 
@@ -716,6 +721,18 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, false, null, null, marketA.player_id);
   await expectDenied(() => rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id), '23514', 'inactive Market player cannot be submitted');
   await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id, 'Fares Market', 'MID', 5500000, 81, true, null, null, marketA.player_id);
+
+  const leaderSaved = await rpc(ALICE, 'ff_match_save_lineups', LEAGUE.id, revision.id,
+    JSON.stringify([{ player_id: prof, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]),
+    JSON.stringify([{ player_id: profB, selection: 'starter', actual_position: 'FWD', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]));
+  assert.equal(leaderSaved.saved, true, 'the Leader can save both sides of an editable match');
+  assert.equal(leaderSaved.team_a.players, 1);
+  assert.equal(leaderSaved.team_b.players, 1);
+  const refreshedMatches = await rpc(BOB, 'ff_matches', LEAGUE.id);
+  const persistedRevision = refreshedMatches.find((row) => row.id === match.id).history.find((row) => row.revision_id === revision.id);
+  assert.deepEqual(Object.fromEntries(persistedRevision.lineups.map((lineup) => [lineup.team_id, lineup.players.map((player) => player.player_id)])), {
+    [teamA.id]: [prof], [teamB.id]: [profB],
+  }, 'a fresh server read still exposes the saved lineup after the original save call');
 
   const submitted = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
   assert.ok(submitted.submission_id);

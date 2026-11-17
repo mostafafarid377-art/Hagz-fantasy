@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock('../lib/supabase', () => ({ getSupabase: () => ({ rpc }) }));
 
-import { submitSuggestionBatch, transfers } from './api';
+import { matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
 
 describe('Phase 4 Live RPC adapters', () => {
   beforeEach(() => { rpc.mockReset(); });
@@ -23,6 +23,34 @@ describe('Phase 4 Live RPC adapters', () => {
         { name: 'Same Name', position: 'FWD', notes: null, image_path: null, image_url: null },
       ],
     });
+  });
+
+  it('calls the atomic two-lineup RPC with named arguments and propagates cancellation', async () => {
+    const response = { revision_id: 'revision-1', team_a: { lineup_id: 'la', players: 1 }, team_b: { lineup_id: 'lb', players: 1 }, saved: true };
+    const signal = new AbortController().signal;
+    const abortSignal = vi.fn().mockResolvedValue({ data: response, error: null });
+    rpc.mockReturnValue({ abortSignal });
+    const sideA = [{ player_id: 'player-a', selection: 'starter' as const, actual_position: 'DEF' as const,
+      eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' } }];
+    const sideB = [{ player_id: 'player-b', selection: 'substitute' as const, actual_position: 'FWD' as const,
+      eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' } }];
+
+    await expect(saveMatchLineups('league-1', 'revision-1', sideA, sideB, { signal })).resolves.toBe(response);
+    expect(rpc).toHaveBeenCalledWith('ff_match_save_lineups', {
+      p_league: 'league-1', p_revision: 'revision-1', p_team_a_players: sideA, p_team_b_players: sideB,
+    });
+    expect(abortSignal).toHaveBeenCalledWith(signal);
+  });
+
+  it('passes an abort signal to the match read-model RPC', async () => {
+    const result = [{ id: 'match-1' }];
+    const signal = new AbortController().signal;
+    const abortSignal = vi.fn().mockResolvedValue({ data: result, error: null });
+    rpc.mockReturnValue({ abortSignal });
+
+    await expect(matches('league-1', { signal })).resolves.toBe(result);
+    expect(rpc).toHaveBeenCalledWith('ff_matches', { p_league: 'league-1' });
+    expect(abortSignal).toHaveBeenCalledWith(signal);
   });
 
   it('requests transfer history only for the selected league and bounded page size', async () => {
