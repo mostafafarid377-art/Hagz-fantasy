@@ -459,6 +459,10 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
     for (const shape of ['4-3-3', '4-4-2', '3-5-2', '3-4-3', '4-5-1', '5-3-2', '5-4-1']) {
       await act(async () => { fireEvent.change(select, { target: { value: shape } }); });
       expect(select.value).toBe(shape);
+      if (shape === '4-4-2') {
+        expect(document.querySelector('.formation-validation')?.textContent).toContain('Starting XI currently has:');
+        expect(document.querySelector('.formation-validation')?.textContent).toContain('GK 1, DEF 4, MID 3, FWD 3');
+      }
       expect([...document.querySelectorAll('.pitch .pitch-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(initialPitch);
       expect([...document.querySelectorAll('.bench-player strong')].map(node => node.textContent?.trim()).sort()).toEqual(initialBench);
       expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
@@ -468,6 +472,7 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
     expect((screen.getByRole('button', { name: 'Save lineup' }) as HTMLButtonElement).disabled).toBe(true);
 
     await act(async () => { fireEvent.change(select, { target: { value: '4-3-3' } }); });
+    expect(document.querySelector('.formation-validation')).toBeNull();
     await act(async () => { screen.getByRole('button', { name: 'Save lineup' }).click(); });
     const saved = rpcCalls.find(call => call.fn === 'ff_lineup_save');
     expect(saved?.args?.p_formation).toBe('4-3-3');

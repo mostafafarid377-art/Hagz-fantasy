@@ -319,6 +319,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               </select>
             </label>
           )}
+          {!formationMatches && <p className="notice formation-validation" role="status"><AlertCircle size={15} aria-hidden="true"/><span>{formationIssue}</span></p>}
 
           {/* An empty squad (or edit mode) shows all 15 capacity places, so every
               position can be filled; otherwise the pitch is the starting XI in the
