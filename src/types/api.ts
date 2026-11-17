@@ -10,7 +10,9 @@
 // the client only displays, and compares with a tolerance.
 
 export type Position = 'GK' | 'DEF' | 'MID' | 'FWD';
-export type Formation = '4-3-3' | '4-4-2' | '3-5-2' | '3-4-3' | '4-5-1' | '5-3-2' | '5-4-1';
+export type Formation = '4-3-3' | '4-4-2' | '3-5-2' | '3-4-3' | '4-5-1' | '5-3-2' | '5-4-1'
+  | '3-2-1' | '2-3-1' | '2-2-2' | '2-1-1' | '1-2-1';
+export type MatchFormat = '11-a-side' | '7-a-side' | '5-a-side';
 export type LeagueRole = 'leader' | 'manager';
 
 export interface ApiLeague {
@@ -19,6 +21,7 @@ export interface ApiLeague {
   role: LeagueRole;
   budget: number;
   market_open: boolean;
+  match_format?: MatchFormat;
 }
 
 export interface ApiMember {
@@ -88,6 +91,8 @@ export interface ApiSquad {
   players: ApiSquadPlayer[];
   budget: number;
   spent: number;
+  match_format?: MatchFormat;
+  assignment_revision?: number;
 }
 
 export interface ApiMatchEvent {

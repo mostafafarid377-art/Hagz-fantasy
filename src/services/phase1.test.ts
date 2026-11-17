@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { demoPlayers, initialState } from '../data/demo';
 import { canAddPlayer, canManage, formations, reviewSuggestion, saveMarketPlayer, setMarketStatus, squadSummary, submitSuggestion, transferPlayer, validateSquad } from './rules';
 import { filterMarket, ownershipCount, type MarketFilters } from './market';
-import type { Formation, Player, Squad, Suggestion } from '../types';
+import type { Player, Squad, Suggestion } from '../types';
 const team = initialState.squads[0];
 const players = initialState.players;
 const filters: MarketFilters = {search:'',position:'All',price:'All',rating:'All',status:'All',sort:'Highest rated'};
@@ -35,7 +35,7 @@ describe('complete squad validation', () => {
   it('defines seven formations with exactly one keeper and ten outfield players', () => {
     expect(Object.keys(formations)).toHaveLength(7);
     for (const formation of Object.values(formations)) expect(Object.values(formation).reduce((a,b)=>a+b,0)).toBe(11);
-    expect((Object.keys(formations) as Formation[]).every(f=>formations[f].GK===1)).toBe(true);
+    expect(Object.values(formations).every(shape=>shape.GK===1)).toBe(true);
   });
   it('prevents duplicates within a team and allows multiple managers to own the same player', () => {
     expect(canAddPlayer(['p1'],demoPlayers[0],demoPlayers)).toBe('alreadySelected');

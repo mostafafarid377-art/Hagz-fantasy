@@ -2,7 +2,7 @@ import { validImageValue } from '../utils/image';
 import type { DemoState, Formation, Player, Position, Role, Suggestion, Squad } from '../types';
 
 export const limits: Record<Position, number> = { GK: 2, DEF: 5, MID: 5, FWD: 3 };
-export const formations: Record<Formation, Record<Position, number>> = {
+export const formations: Partial<Record<Formation, Record<Position, number>>> = {
   '4-3-3': { GK: 1, DEF: 4, MID: 3, FWD: 3 },
   '4-4-2': { GK: 1, DEF: 4, MID: 4, FWD: 2 },
   '3-5-2': { GK: 1, DEF: 3, MID: 5, FWD: 2 },
@@ -37,7 +37,7 @@ export function validateSquad(squad: Squad, players: Player[], budget = 100): Sq
   const scoped = players.filter(p => p.leagueId === squad.leagueId);
   const summary = squadSummary(squad.playerIds, scoped, budget);
   const starting = squadSummary(squad.playerIds.slice(0, 11), scoped, budget);
-  const formation = formations[squad.formation || defaultFormation] || formations[defaultFormation];
+  const formation = formations[squad.formation || defaultFormation] || formations[defaultFormation]!;
   if (squad.playerIds.length !== 15) issues.push('squadSize');
   if (new Set(squad.playerIds).size !== squad.playerIds.length) issues.push('duplicatePlayer');
   if (summary.size !== squad.playerIds.length) issues.push('unknownPlayer');
@@ -58,7 +58,7 @@ export function substitutionTargets(squad: Squad, players: Player[], sourceId: s
   const source = squad.playerIds.indexOf(sourceId);
   if (source < 0) return [];
   const scoped = players.filter(p => p.leagueId === squad.leagueId);
-  const desired = formations[squad.formation || defaultFormation] || formations[defaultFormation];
+  const desired = formations[squad.formation || defaultFormation] || formations[defaultFormation]!;
   const difference = (ids:string[]) => {
     const actual=squadSummary(ids.slice(0,11),scoped).counts;
     return positions.reduce((total,pos)=>total+Math.abs(actual[pos]-desired[pos]),0);
