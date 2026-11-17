@@ -35,7 +35,7 @@ const PKG = [
   '20261115000017_squad_captaincy', '20261115000018_live_match_market_workflow',
   '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
   '20261116210000_phase4_market_and_transfer_gaps', '20261116220000_restore_real_team_name_uniqueness',
-  '20261116230000_match_cancellation_and_atomic_lineup_save',
+  '20261116230000_match_cancellation_and_atomic_lineup_save', '20261116235900_idempotent_match_lineup_submission',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -736,12 +736,24 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
 
   const submitted = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
   assert.ok(submitted.submission_id);
+  assert.equal(submitted.state, 'submitted');
+  const submittedReplay = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
+  assert.equal(submittedReplay.submission_id, submitted.submission_id, 'a repeated Organizer request returns the same pending submission');
+  assert.equal(submittedReplay.state, 'submitted');
 
   // Self-approval is forbidden even for the leader acting on their own submission.
   await expectDenied(() => rpc(BOB, 'ff_match_review_submission', LEAGUE.id, submitted.submission_id, 'approved'), '42501', 'organizer approving as non-leader');
 
   const approved = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, submitted.submission_id, 'approved');
   assert.equal(approved.decision, 'approved');
+  const approvedReplay = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
+  assert.equal(approvedReplay.submission_id, submitted.submission_id, 'an Organizer retry after approval returns the same submission');
+  assert.equal(approvedReplay.approval_id, approved.approval_id, 'replay preserves the exact Leader approval');
+  assert.equal(approvedReplay.state, 'approved');
+  const leaderReplay = await rpc(ALICE, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
+  assert.equal(leaderReplay.approval_id, approved.approval_id, 'Leader replay cannot create a second approval');
+  assert.equal(await scalar(`select count(*)::int from public.match_submissions where league_id=$1 and revision_id=$2 and kind='lineup'`, [LEAGUE.id, revision.id]), 1);
+  assert.equal(await scalar(`select count(*)::int from public.match_approvals where league_id=$1 and revision_id=$2 and kind='lineup'`, [LEAGUE.id, revision.id]), 1);
 
   // Result path: fork, save a complete score/events record, then finalize atomically.
   const forkRequestId = crypto.randomUUID();
@@ -1058,7 +1070,10 @@ test('Phase 4 RPCs retain authenticated-only execute permissions and definer own
   assert.equal(create, true); assert.equal(anonCreate, false);
   assert.equal(read, true); assert.equal(anonRead, false);
   assert.equal(lineup, true); assert.equal(anonLineup, false);
-  for (const signature of ['public.ff_match_save_lineups(uuid,uuid,jsonb,jsonb)', 'public.ff_match_cancel(uuid,uuid,text)']) {
+  for (const signature of [
+    'public.ff_match_save_lineups(uuid,uuid,jsonb,jsonb)', 'public.ff_match_cancel(uuid,uuid,text)',
+    'public.ff_match_submit_lineup(uuid,uuid)',
+  ]) {
     assert.equal(await scalar(`select has_function_privilege('authenticated', '${signature}'::regprocedure, 'execute')`), true);
     assert.equal(await scalar(`select has_function_privilege('anon', '${signature}'::regprocedure, 'execute')`), false);
     assert.equal(await scalar(`select pg_get_userbyid(proowner) from pg_proc where oid='${signature}'::regprocedure`), 'ff_migration_owner');

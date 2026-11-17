@@ -32,6 +32,7 @@ async function mountLive(opts: {
   createdId: string;
   /** Leagues bootstrap reports on the SECOND (post-create) load. */
   bootstrapAfterCreate: ReturnType<typeof league>[];
+  matchReadHandler?: (readNumber: number) => Promise<unknown>;
 }) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
@@ -58,6 +59,7 @@ async function mountLive(opts: {
       }
       if (fn === 'ff_matches') {
         matchRead += 1;
+        if (opts.matchReadHandler) return { data: await opts.matchReadHandler(matchRead), error: null };
         return { data: [{ id: matchRead === 1 ? 'match-before' : 'match-after' }], error: null };
       }
       // Every other read returns an empty payload.
@@ -123,6 +125,33 @@ describe('match refresh keeps the open workflow mounted', () => {
     expect(app.get().matches[0].id).toBe('match-after');
     expect(app.loadingSnapshots().slice(renderStart)).not.toContain(true);
     expect(app.get().loading).toBe(false);
+  });
+});
+
+describe('match refresh keeps the newest active-match snapshot', () => {
+  it('does not let an older read overwrite a newer league-wide match response', async () => {
+    let resolveOlder!: (value: unknown) => void;
+    let resolveNewer!: (value: unknown) => void;
+    const older = new Promise<unknown>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<unknown>((resolve) => { resolveNewer = resolve; });
+    const app = await mountLive({
+      createdId: 'L-match-race',
+      bootstrapAfterCreate: [league('L-match-race', 'Match League')],
+      matchReadHandler: (readNumber) => readNumber === 1 ? Promise.resolve([{ id: 'match-initial' }])
+        : readNumber === 2 ? older : newer,
+    });
+    expect((await app.create()).rejected).toBe(false);
+
+    let olderRequest!: Promise<unknown>;
+    let newerRequest!: Promise<unknown>;
+    await act(async () => {
+      olderRequest = app.get().refreshMatches();
+      newerRequest = app.get().refreshMatches();
+    });
+    await act(async () => { resolveNewer([{ id: 'match-newest' }]); await newerRequest; });
+    await act(async () => { resolveOlder([{ id: 'match-stale' }]); await olderRequest; });
+
+    expect(app.get().matches.map((row: any) => row.id)).toEqual(['match-newest']);
   });
 });
 

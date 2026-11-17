@@ -320,9 +320,9 @@ export const setMatchLineup = (leagueId: string, revisionId: string, teamId: str
 }>) => call<{ lineup_id: string; players: number }>(
   'ff_match_set_lineup', { p_league: leagueId, p_revision: revisionId, p_team: teamId, p_players: players });
 
-export const submitMatchLineup = (leagueId: string, revisionId: string) =>
-  call<{ submission_id: string; approval_id?: string; state: 'submitted' | 'approved' }>(
-    'ff_match_submit_lineup', { p_league: leagueId, p_revision: revisionId });
+export const submitMatchLineup = (leagueId: string, revisionId: string, options: RpcOptions = {}) =>
+  call<{ submission_id: string; approval_id?: string; state: 'submitted' | 'approved' | 'rejected' }>(
+    'ff_match_submit_lineup', { p_league: leagueId, p_revision: revisionId }, options);
 
 export const forkResult = (leagueId: string, approvalId: string, requestId: string) =>
   call<{ revision_id: string; request_id: string }>(
