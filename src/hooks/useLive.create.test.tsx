@@ -38,6 +38,8 @@ async function mountLive(opts: {
   vi.resetModules();
 
   let created = false;
+  let matchRead = 0;
+  const loadingSnapshots: boolean[] = [];
   const client = {
     auth: { getSession: async () => ({ data: { session: null }, error: null }) },
     rpc: async (fn: string) => {
@@ -53,6 +55,10 @@ async function mountLive(opts: {
           },
           error: null,
         };
+      }
+      if (fn === 'ff_matches') {
+        matchRead += 1;
+        return { data: [{ id: matchRead === 1 ? 'match-before' : 'match-after' }], error: null };
       }
       // Every other read returns an empty payload.
       return { data: [], error: null };
@@ -71,6 +77,7 @@ async function mountLive(opts: {
   let ctx: any = null;
   function Probe() {
     ctx = useLive();
+    loadingSnapshots.push(ctx.loading);
     return <div>{ctx.loading ? 'loading' : 'ready'}</div>;
   }
 
@@ -85,6 +92,10 @@ async function mountLive(opts: {
 
   return {
     get: () => ctx,
+    loadingSnapshots: () => [...loadingSnapshots],
+    refreshMatches: async () => {
+      await act(async () => { await ctx.refreshMatches(); });
+    },
     /** Call createLeague and report whether it rejected, and with what message. */
     create: async (): Promise<{ rejected: boolean; message?: string }> => {
       let rejected = false; let message: string | undefined;
@@ -96,6 +107,24 @@ async function mountLive(opts: {
     },
   };
 }
+
+describe('match refresh keeps the open workflow mounted', () => {
+  it('updates only matches without toggling the provider loading screen', async () => {
+    const app = await mountLive({
+      createdId: 'L-match',
+      bootstrapAfterCreate: [league('L-match', 'Match League')],
+    });
+    expect((await app.create()).rejected).toBe(false);
+    expect(app.get().matches[0].id).toBe('match-before');
+    const renderStart = app.loadingSnapshots().length;
+
+    await app.refreshMatches();
+
+    expect(app.get().matches[0].id).toBe('match-after');
+    expect(app.loadingSnapshots().slice(renderStart)).not.toContain(true);
+    expect(app.get().loading).toBe(false);
+  });
+});
 
 describe('createLeague reports failure instead of failing silently', () => {
   it('resolves successfully when the created league becomes visible', async () => {

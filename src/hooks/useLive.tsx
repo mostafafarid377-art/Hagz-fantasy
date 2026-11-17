@@ -200,6 +200,18 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     setState(stateRef.current);
   }, []);
 
+  // Refresh just the match slice after match actions. Calling `load()` here sets
+  // the provider-wide loading flag, unmounting MatchWorkflow and discarding its
+  // inline success/error state. Keep the open workflow mounted while replacing
+  // matches with the server-confirmed read model.
+  const refreshMatches = useCallback(async () => {
+    const selectedLeague = leagueId;
+    if (!selectedLeague) return;
+    const matches = await api.matches(selectedLeague);
+    if (stateRef.current.leagueId !== selectedLeague) return;
+    commit((current) => ({ ...current, matches }));
+  }, [leagueId, commit]);
+
   /**
    * Run a mutation, then refresh. `failure` is returned rather than thrown so
    * callers can render inline errors; the refresh still happens because a partial
@@ -275,9 +287,9 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     confirmLineup: (id) => mutate(() => api.confirmLineup(require(leagueId), id)),
     createSeason: (name, startsAt, endsAt, count) =>
       mutate(() => api.createSeason(require(leagueId), name, startsAt, endsAt, count)),
-    refreshMatches: () => load(leagueId),
+    refreshMatches,
     markNotificationRead: (id) => mutate(() => api.markNotificationRead(id)),
-  }), [state, league, isLeader, isOrganizer, userId, selectLeague, load, leagueId, mutate]);
+  }), [state, league, isLeader, isOrganizer, userId, selectLeague, load, leagueId, mutate, refreshMatches]);
 
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
 }
