@@ -4,7 +4,7 @@
  */
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { LiveFixtures, LiveMatchCenter, MATCH_WORKFLOW_TIMEOUT_MS } from './Match';
 import { LivePlayerSheet } from './LivePlayerSheet';
@@ -15,7 +15,7 @@ import { useLive } from '../../hooks/useLive';
 vi.mock('react-i18next', async importOriginal => ({ ...(await importOriginal<typeof import('react-i18next')>()), useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../../hooks/useLive', () => ({ useLive: vi.fn() }));
 vi.mock('../../services/api', () => ({
-  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), setMatchLineup: vi.fn(), saveMatchLineups: vi.fn(), cancelMatch: vi.fn(), setMatchScore: vi.fn(),
+  realTeams: vi.fn(), createRealTeam: vi.fn(), createMatch: vi.fn(), matches: vi.fn(), setMatchLineup: vi.fn(), saveMatchLineups: vi.fn(), submitMatchLineup: vi.fn(), cancelMatch: vi.fn(), setMatchScore: vi.fn(),
 }));
 vi.mock('./League', () => ({
   ErrorNote: () => null, Loading: () => <div>loading</div>, PartialDataNote: () => null,
@@ -52,6 +52,7 @@ function editableMatch(isLeader = true) {
 
 function openWorkflow(live: any) {
   vi.mocked(useLive).mockReturnValue(live as never);
+  vi.mocked(api.matches).mockResolvedValue(live.matches as never);
   render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
   fireEvent.click(screen.getByRole('button', { name: 'Open' }));
 }
@@ -135,7 +136,9 @@ describe('Live fixtures and scheduling', () => {
     ];
     vi.mocked(useLive).mockReturnValue(live as never);
     vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
-    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedLineups }] }] as never);
+    const persistedMatch = { ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedLineups }] };
+    vi.mocked(api.matches).mockResolvedValueOnce(live.matches as never).mockResolvedValueOnce([persistedMatch] as never);
+    live.refreshMatches.mockResolvedValue([persistedMatch] as never);
     render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     fireEvent.click((await screen.findAllByRole('checkbox'))[0]);
@@ -157,6 +160,186 @@ describe('Live fixtures and scheduling', () => {
       { signal: expect.any(AbortSignal) });
   });
 
+  it('Save and Approve saves both active sides for the exact match/revision, then approves', async () => {
+    const live: any = editableMatch(true);
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+    ];
+    const savedSides = [
+      { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
+      { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
+    ];
+    const submitted = { ...live.matches[0], revision_state: 'approved', history: [{ ...live.matches[0].history[0], state: 'approved',
+      lineups: savedSides, submissions: [{ kind: 'lineup', approval: { decision: 'approved', id: 'approval-1' } }] }] };
+    live.refreshMatches.mockResolvedValue([submitted] as never);
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
+    vi.mocked(api.submitMatchLineup).mockResolvedValue({ submission_id: 'submission-1', approval_id: 'approval-1', state: 'approved' } as never);
+    openWorkflow(live);
+    vi.mocked(api.matches).mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedSides }] }] as never);
+
+    await screen.findAllByRole('checkbox');
+    fireEvent.click(within(screen.getByRole('group', { name: /North/ })).getByRole('checkbox', { name: /A Player/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: /South/ })).getByRole('checkbox', { name: /B Player/ }));
+    expect(screen.getByRole('group', { name: /North/ }).textContent).toContain('1/7');
+    expect(screen.getByRole('group', { name: /South/ }).textContent).toContain('1/7');
+    fireEvent.click(screen.getByRole('button', { name: 'Save and approve lineups' }));
+
+    await waitFor(() => expect(api.submitMatchLineup).toHaveBeenCalledWith('league-1', 'lineup-draft', { signal: expect.any(AbortSignal) }));
+    expect(api.matches).toHaveBeenCalledWith('league-1', { signal: expect.any(AbortSignal) });
+    expect(api.saveMatchLineups).toHaveBeenCalledWith('league-1', 'lineup-draft',
+      [expect.objectContaining({ player_id: 'player-a', selection: 'starter' })],
+      [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })], { signal: expect.any(AbortSignal) });
+    expect((await screen.findByRole('status')).textContent).toContain('Lineup saved and approved.');
+  });
+
+  it('saves a lineup and immediately approves the latest editor state without stale selections', async () => {
+    const live: any = editableMatch(true);
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+    ];
+    const savedSides = [
+      { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
+      { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
+    ];
+    const saved = { ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: savedSides }] };
+    const approved = { ...saved, revision_state: 'approved', history: [{ ...saved.history[0], state: 'approved',
+      submissions: [{ kind: 'lineup', approval: { decision: 'approved', id: 'approval-1' } }] }] };
+    live.refreshMatches.mockResolvedValueOnce([saved] as never).mockResolvedValueOnce([approved] as never);
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
+    vi.mocked(api.submitMatchLineup).mockResolvedValue({ submission_id: 'submission-1', approval_id: 'approval-1', state: 'approved' } as never);
+    openWorkflow(live);
+    vi.mocked(api.matches).mockResolvedValue([saved] as never);
+
+    await screen.findAllByRole('checkbox');
+    fireEvent.click(within(screen.getByRole('group', { name: /North/ })).getByRole('checkbox', { name: /A Player/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: /South/ })).getByRole('checkbox', { name: /B Player/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save both lineups' }));
+    await screen.findByRole('status');
+    fireEvent.click(screen.getByRole('button', { name: 'Save and approve lineups' }));
+
+    await waitFor(() => expect(api.submitMatchLineup).toHaveBeenCalledTimes(1));
+    expect(api.saveMatchLineups).toHaveBeenCalledTimes(2);
+    expect(api.saveMatchLineups).toHaveBeenLastCalledWith('league-1', 'lineup-draft',
+      [expect.objectContaining({ player_id: 'player-a', selection: 'starter' })],
+      [expect.objectContaining({ player_id: 'player-b', selection: 'starter' })], { signal: expect.any(AbortSignal) });
+  });
+
+  it('clears editor state when switching matches and submits only the newly active match IDs', async () => {
+    const live: any = editableMatch(true);
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+      { player_id: 'player-c', name: 'C Player', position: 'FWD', active: true },
+      { player_id: 'player-d', name: 'D Player', position: 'GK', active: true },
+    ];
+    const second = { ...live.matches[0], id: 'match-2', team_a_id: 'c', team_a: 'East', team_b_id: 'd', team_b: 'West',
+      revision_id: 'revision-2', history: [{ ...live.matches[0].history[0], revision_id: 'revision-2', lineups: [
+        { team_id: 'c', players: [{ player_id: 'player-c', selection: 'starter' }] },
+        { team_id: 'd', players: [{ player_id: 'player-d', selection: 'starter' }] },
+      ] }] };
+    live.matches = [...live.matches, second];
+    const approvedSecond = { ...second, revision_state: 'approved', history: [{ ...second.history[0], state: 'approved',
+      submissions: [{ kind: 'lineup', approval: { decision: 'approved', id: 'approval-2' } }] }] };
+    vi.mocked(api.matches).mockResolvedValue(live.matches as never);
+    live.refreshMatches.mockResolvedValue([live.matches[0], approvedSecond] as never);
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
+    vi.mocked(api.submitMatchLineup).mockResolvedValue({ submission_id: 'submission-2', approval_id: 'approval-2', state: 'approved' } as never);
+    vi.mocked(useLive).mockReturnValue(live as never);
+    render(<MemoryRouter><LiveMatchCenter /></MemoryRouter>);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Open' })[0]);
+    fireEvent.click((await screen.findAllByRole('checkbox'))[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Open' })[1]);
+    await screen.findByText('East vs West');
+    expect((await screen.findAllByRole('checkbox')).filter((box) => (box as HTMLInputElement).checked)).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Save and approve lineups' }));
+
+    await waitFor(() => expect(api.submitMatchLineup).toHaveBeenCalledWith('league-1', 'revision-2', { signal: expect.any(AbortSignal) }));
+    expect(api.saveMatchLineups).toHaveBeenCalledWith('league-1', 'revision-2',
+      [expect.objectContaining({ player_id: 'player-c' })], [expect.objectContaining({ player_id: 'player-d' })], { signal: expect.any(AbortSignal) });
+    expect(api.saveMatchLineups).not.toHaveBeenCalledWith('league-1', 'revision-2',
+      [expect.objectContaining({ player_id: 'player-a' })], expect.anything(), expect.anything());
+  });
+
+  it('shows clear validation when the active match is missing either team ID and makes no mutation', async () => {
+    const live: any = editableMatch(true);
+    live.matches[0].team_b_id = '';
+    vi.mocked(api.matches).mockResolvedValue(live.matches as never);
+    openWorkflow(live);
+    fireEvent.click(screen.getByRole('button', { name: 'Save and approve lineups' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('missing distinct Home and Away team IDs');
+    expect(api.saveMatchLineups).not.toHaveBeenCalled();
+    expect(api.submitMatchLineup).not.toHaveBeenCalled();
+  });
+
+  it('keeps duplicate approval clicks to one request while pending and submits for the Organizer', async () => {
+    const live: any = editableMatch(false);
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+    ];
+    const sides = [
+      { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
+      { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
+    ];
+    const saved = { ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: sides }] };
+    const submitted = { ...saved, revision_state: 'submitted', history: [{ ...saved.history[0], state: 'submitted',
+      submissions: [{ kind: 'lineup' }] }] };
+    live.refreshMatches.mockResolvedValue([submitted] as never);
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
+    let resolveSubmission!: (value: unknown) => void;
+    vi.mocked(api.submitMatchLineup).mockImplementation(() => new Promise((resolve) => { resolveSubmission = resolve; }) as never);
+    openWorkflow(live);
+    vi.mocked(api.matches).mockResolvedValue([saved] as never);
+    await screen.findAllByRole('checkbox');
+    fireEvent.click(within(screen.getByRole('group', { name: /North/ })).getByRole('checkbox', { name: /A Player/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: /South/ })).getByRole('checkbox', { name: /B Player/ }));
+    const approve = screen.getByRole('button', { name: 'Submit lineups for review' });
+    await act(async () => { fireEvent.click(approve); fireEvent.click(approve); await Promise.resolve(); });
+    expect(api.submitMatchLineup).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveSubmission({ submission_id: 'submission-1', state: 'submitted' }); });
+    expect((await screen.findByRole('status')).textContent).toContain('Lineup submitted for Leader review.');
+  });
+
+  it('retries a committed but response-lost approval without saving or creating another submission', async () => {
+    const live: any = editableMatch(false);
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+    ];
+    const sides = [
+      { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
+      { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
+    ];
+    const saved = { ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: sides }] };
+    const submitted = { ...saved, revision_state: 'submitted', history: [{ ...saved.history[0], state: 'submitted',
+      submissions: [{ kind: 'lineup' }] }] };
+    vi.mocked(api.saveMatchLineups).mockResolvedValue({ saved: true } as never);
+    vi.mocked(api.matches).mockResolvedValueOnce([saved] as never).mockResolvedValueOnce([saved] as never).mockResolvedValueOnce([submitted] as never);
+    live.refreshMatches.mockResolvedValue([submitted] as never);
+    vi.mocked(api.submitMatchLineup)
+      .mockRejectedValueOnce(new Error('Response lost after commit'))
+      .mockResolvedValueOnce({ submission_id: 'submission-1', state: 'submitted' } as never);
+    openWorkflow(live);
+    await screen.findAllByRole('checkbox');
+    fireEvent.click(within(screen.getByRole('group', { name: /North/ })).getByRole('checkbox', { name: /A Player/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: /South/ })).getByRole('checkbox', { name: /B Player/ }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Submit lineups for review' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Response lost after commit');
+    expect(api.submitMatchLineup).toHaveBeenCalledTimes(1);
+    expect(api.saveMatchLineups).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Submit lineups for review' }));
+    await waitFor(() => expect(api.submitMatchLineup).toHaveBeenCalledTimes(2));
+    expect(api.saveMatchLineups).toHaveBeenCalledTimes(1);
+    expect((await screen.findByRole('status')).textContent).toContain('Lineup submitted for Leader review.');
+  });
+
   it('shows RPC failures and always releases the Save Lineup loading state for an assigned Organizer', async () => {
     const live = editableMatch(false);
     vi.mocked(api.saveMatchLineups).mockRejectedValue(new Error('The database rejected this lineup.'));
@@ -170,12 +353,25 @@ describe('Live fixtures and scheduling', () => {
   });
 
   it('ignores duplicate Save Lineup clicks while the first RPC is pending', async () => {
-    const live = editableMatch();
+    const live: any = editableMatch();
+    live.players = [
+      { player_id: 'player-a', name: 'A Player', position: 'DEF', active: true },
+      { player_id: 'player-b', name: 'B Player', position: 'MID', active: true },
+    ];
+    const sides = [
+      { team_id: 'a', players: [{ player_id: 'player-a', selection: 'starter' }] },
+      { team_id: 'b', players: [{ player_id: 'player-b', selection: 'starter' }] },
+    ];
+    const persisted = { ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: sides }] };
     let resolveSave!: (value: unknown) => void;
     vi.mocked(api.saveMatchLineups).mockImplementation(() => new Promise((resolve) => { resolveSave = resolve; }) as never);
-    live.refreshMatches.mockResolvedValue([{ ...live.matches[0], history: [{ ...live.matches[0].history[0], lineups: [] }] }] as never);
+    live.refreshMatches.mockResolvedValue([persisted] as never);
     openWorkflow(live);
+    vi.mocked(api.matches).mockResolvedValue([persisted] as never);
 
+    await screen.findAllByRole('checkbox');
+    fireEvent.click(within(screen.getByRole('group', { name: /North/ })).getByRole('checkbox', { name: /A Player/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: /South/ })).getByRole('checkbox', { name: /B Player/ }));
     const save = screen.getByRole('button', { name: 'Save both lineups' });
     await act(async () => { fireEvent.click(save); fireEvent.click(save); await Promise.resolve(); });
     expect(api.saveMatchLineups).toHaveBeenCalledTimes(1);

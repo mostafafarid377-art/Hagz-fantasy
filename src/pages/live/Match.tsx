@@ -17,7 +17,7 @@ import './matchWorkflow.css';
 export const MATCH_WORKFLOW_TIMEOUT_MS = 30_000;
 const MATCH_REFRESH_TIMEOUT_MS = 8_000;
 
-type MatchDiagnostic = { operation: string; matchId: string; teamIds?: string[] };
+type MatchDiagnostic = { operation: string; matchId: string; revisionId: string; teamIds: string[] };
 type MatchRunOptions = { diagnostic?: MatchDiagnostic; verifyMatches?: (matches: ApiMatch[]) => void };
 
 function withDeadline<T>(task: (signal: AbortSignal) => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
@@ -51,6 +51,7 @@ function logLineupStage(stage: string, diagnostic: MatchDiagnostic, startedAt: n
     outcome,
     elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
     matchId: diagnostic.matchId,
+    revisionId: diagnostic.revisionId,
     teamIds: diagnostic.teamIds,
   };
   if (error) {
@@ -113,7 +114,7 @@ export function LiveMatchCenter() {
       <button type="button" className="sheet-close" aria-label={t('Close')} onClick={closeMatch}><X size={20} /></button>
       <div className="eyebrow">{t('MATCHDAY')}</div><h2 id="match-title">{selected.team_a} vs {selected.team_b}</h2>
       <p className="sheet-note"><CalendarDays size={14} /> {new Date(selected.starts_at).toLocaleString()} · <MapPin size={14} /> {selected.venue}</p>
-      <MatchWorkflow match={selected} />
+      <MatchWorkflow key={selected.id} match={selected} />
       <div className="sheet-actions"><button type="button" className="button button-outline" onClick={closeMatch}>{t('Close')}</button></div>
     </dialog>}
   </>;
@@ -130,6 +131,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   const [reason, setReason] = useState('');
   const [cancelReason, setCancelReason] = useState('');
   const [playersBySide, setPlayersBySide] = useState<Record<string, Record<string, 'starter' | 'substitute'>>>({});
+  const playersBySideRef = useRef(playersBySide);
   const [scoreA, setScoreA] = useState('0'); const [scoreB, setScoreB] = useState('0');
   const [eventPlayer, setEventPlayer] = useState(''); const [eventType, setEventType] = useState('goal');
   const [eventMinute, setEventMinute] = useState(''); const [relatedPlayer, setRelatedPlayer] = useState('');
@@ -154,6 +156,7 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
   useEffect(() => {
     const seeded: Record<string, Record<string, 'starter' | 'substitute'>> = {};
     for (const l of current?.lineups ?? []) seeded[l.team_id] = Object.fromEntries(l.players.map((p) => [p.player_id, p.selection]));
+    playersBySideRef.current = seeded;
     setPlayersBySide(seeded);
     setScoreA(String(current?.team_a_score ?? 0)); setScoreB(String(current?.team_b_score ?? 0));
   }, [current?.revision_id]);
@@ -197,6 +200,94 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
       setBusy(false);
     }
   }
+  function requireActiveMatch(rows: ApiMatch[], diagnostic: MatchDiagnostic): ApiMatch {
+    if (!diagnostic.matchId || diagnostic.teamIds.some((id) => !id) || diagnostic.teamIds[0] === diagnostic.teamIds[1]) {
+      throw new Error(t('Cannot continue: this match is missing distinct Home and Away team IDs. Refresh the match details and try again.'));
+    }
+    const latest = rows.find((row) => row.id === diagnostic.matchId);
+    if (!latest) throw new Error(t('The active match is no longer available. Refresh Match Details and try again.'));
+    if (latest.revision_id !== diagnostic.revisionId
+      || latest.team_a_id !== diagnostic.teamIds[0] || latest.team_b_id !== diagnostic.teamIds[1]) {
+      throw new Error(t('This match changed while you were editing. Refresh Match Details before continuing.'));
+    }
+    return latest;
+  }
+
+  function requireBothSavedSides(row: ApiMatch, diagnostic: MatchDiagnostic) {
+    const revision = row.history.find((item) => item.revision_id === diagnostic.revisionId);
+    const savedSides = revision?.lineups ?? [];
+    const exactSides = savedSides.length === 2 && diagnostic.teamIds.every((teamId) =>
+      savedSides.filter((side) => side.team_id === teamId).length === 1);
+    if (!exactSides || !revision) {
+      throw new Error(t('The saved lineups do not match the active match. Refresh and verify both sides before approving.'));
+    }
+    return revision;
+  }
+
+  function verifySavedSelection(row: ApiMatch, diagnostic: MatchDiagnostic,
+    selection: Record<string, Record<string, 'starter' | 'substitute'>>) {
+    const revision = requireBothSavedSides(row, diagnostic);
+    const savedSides = revision.lineups;
+    const exactPlayers = diagnostic.teamIds.every((teamId) => {
+      const actual = savedSides.find((side) => side.team_id === teamId)?.players ?? [];
+      const expected = Object.entries(selection[teamId] ?? {}).map(([playerId, role]) => `${playerId}:${role}`).sort();
+      const persisted = actual.map((player) => `${player.player_id}:${player.selection}`).sort();
+      return expected.length === persisted.length && expected.every((item, index) => item === persisted[index]);
+    });
+    if (!exactPlayers) {
+      throw new Error(t('The saved lineups do not match the active match. Refresh and verify both sides before approving.'));
+    }
+    return revision;
+  }
+
+  async function saveAndVerifyActiveLineups(signal: AbortSignal,
+    selection: Record<string, Record<string, 'starter' | 'substitute'>>, diagnostic: MatchDiagnostic) {
+    if (!live.leagueId) throw new Error(t('Select a league before saving match lineups.'));
+    const startedAt = performance.now();
+    let stage = 'active_match_preflight';
+    logLineupStage(stage, diagnostic, startedAt, 'started');
+    const active = requireActiveMatch(await api.matches(live.leagueId, { signal }), diagnostic);
+    logLineupStage(stage, diagnostic, startedAt, 'succeeded');
+    if (active.revision_state === 'submitted' || active.revision_state === 'approved') {
+      const persistedRevision = requireBothSavedSides(active, diagnostic);
+      if (!persistedRevision.submissions.some((submission) => submission.kind === 'lineup')) {
+        throw new Error(t('The server shows a submitted match without a lineup submission. Refresh Match Details before retrying.'));
+      }
+      logLineupStage('reuse_existing_match_submission', diagnostic, startedAt, 'succeeded');
+      return;
+    }
+    if (active.revision_state !== 'draft' && active.revision_state !== 'corrected') {
+      throw new Error(t('This match revision is no longer editable. Refresh Match Details before continuing.'));
+    }
+
+    const rowsFor = (sideId: string) => Object.entries(selection[sideId] ?? {}).map(([player_id, role]) => ({
+      player_id, selection: role,
+      actual_position: (live.players.find((player) => player.player_id === player_id)?.position ?? 'MID') as Position,
+      eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' },
+    }));
+    stage = 'save_both_active_match_sides';
+    logLineupStage(stage, diagnostic, startedAt, 'started');
+    await api.saveMatchLineups(live.leagueId, active.revision_id!,
+      rowsFor(active.team_a_id), rowsFor(active.team_b_id), { signal });
+    logLineupStage(stage, diagnostic, startedAt, 'succeeded');
+
+    stage = 'verify_persisted_active_match_sides';
+    logLineupStage(stage, diagnostic, startedAt, 'started');
+    const persisted = requireActiveMatch(await api.matches(live.leagueId, { signal }), diagnostic);
+    verifySavedSelection(persisted, diagnostic, selection);
+    logLineupStage(stage, diagnostic, startedAt, 'succeeded');
+  }
+
+  function verifySubmittedMatch(rows: ApiMatch[], diagnostic: MatchDiagnostic) {
+    const active = requireActiveMatch(rows, diagnostic);
+    const revision = requireBothSavedSides(active, diagnostic);
+    const hasSubmission = revision.submissions.some((submission) => submission.kind === 'lineup');
+    const stateMatches = live.isLeader ? revision.state === 'approved' : revision.state === 'submitted';
+    if (!hasSubmission || !stateMatches) {
+      throw new Error(t('The server did not confirm the expected lineup submission state. Refresh Match Details before retrying.'));
+    }
+  }
+
   async function openResultRevision(approvalId: string) {
     if (!live.leagueId) return;
     if (actionLock.current) return;
@@ -219,12 +310,17 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
       try { await live.refreshMatches(); } catch { /* retain the retry key */ }
     } finally { actionLock.current = false; setBusy(false); }
   }
-  const togglePlayer = (team: string, id: string, checked: boolean) => setPlayersBySide((prev) => {
-    const side = { ...(prev[team] ?? {}) };
-    if (checked) side[id] = 'starter'; else delete side[id];
-    return { ...prev, [team]: side };
-  });
-  const setSelection = (team: string, id: string, selection: 'starter' | 'substitute') => setPlayersBySide((prev) => ({ ...prev, [team]: { ...(prev[team] ?? {}), [id]: selection } }));
+  const togglePlayer = (team: string, id: string, checked: boolean) => {
+    const next = { ...playersBySideRef.current, [team]: { ...(playersBySideRef.current[team] ?? {}) } };
+    if (checked) next[team][id] = 'starter'; else delete next[team][id];
+    playersBySideRef.current = next;
+    setPlayersBySide(next);
+  };
+  const setSelection = (team: string, id: string, selection: 'starter' | 'substitute') => {
+    const next = { ...playersBySideRef.current, [team]: { ...(playersBySideRef.current[team] ?? {}), [id]: selection } };
+    playersBySideRef.current = next;
+    setPlayersBySide(next);
+  };
   const pending = history.flatMap((r) => r.submissions.filter((s) => s.kind === 'lineup' && !s.approval).map((s) => ({ revision: r, submission: s })));
   const pendingResult = current?.submissions.find((s) => s.kind === 'result' && !s.approval);
   const canEditDraft = canOrganize && !!current && (current.state === 'draft' || current.state === 'corrected');
@@ -244,31 +340,36 @@ function MatchWorkflow({ match }: { match: ApiMatch }) {
         {availablePlayers(side.id).length === 0 && <p className="muted">{t('No active published Market players are available.')}</p>}
       </fieldset>)}
       <button className="button button-outline" aria-busy={busy} disabled={busy || match.is_cancelled} onClick={() => {
-        const diagnostic: MatchDiagnostic = { operation: 'lineup_save', matchId: match.id, teamIds: [match.team_a_id, match.team_b_id] };
-        const rowsFor = (sideId: string) => Object.entries(selectedPlayers[sideId] ?? {}).map(([player_id, selection]) => ({
-          player_id, selection,
-          actual_position: (live.players.find((p) => p.player_id === player_id)?.position ?? 'MID') as Position,
-          eligibility_kind: 'market' as const, eligibility_evidence: { source: 'league_market' },
-        }));
-        void run((signal) => api.saveMatchLineups(live.leagueId!, current!.revision_id,
-          rowsFor(match.team_a_id), rowsFor(match.team_b_id), { signal }),
-        t('Both lineups saved and verified on the server.'), {
-          diagnostic,
-          verifyMatches: (persisted) => {
-            const savedRevision = persisted.find((row) => row.id === match.id)?.history?.find((revision) => revision.revision_id === current!.revision_id);
-            const saved = savedRevision?.lineups ?? [];
-            const matchesSelection = [match.team_a_id, match.team_b_id].every((sideId) => {
-              const actual = saved.find((lineup) => lineup.team_id === sideId)?.players ?? [];
-              const expected = Object.entries(selectedPlayers[sideId] ?? {});
-              return actual.length === expected.length && expected.every(([playerId, selection]) => actual.some((player) => player.player_id === playerId && player.selection === selection));
-            });
-            if (!matchesSelection) throw new Error('Lineups were sent but the saved server state did not match. Refresh and verify before submitting.');
-          },
-        });
+        const diagnostic: MatchDiagnostic = {
+          operation: 'lineup_save', matchId: match.id, revisionId: current!.revision_id,
+          teamIds: [match.team_a_id, match.team_b_id],
+        };
+        const selection = structuredClone(playersBySideRef.current);
+        void run((signal) => saveAndVerifyActiveLineups(signal, selection, diagnostic),
+          t('Both lineups saved and verified on the server.'), {
+            diagnostic,
+            verifyMatches: (persisted) => {
+              const active = requireActiveMatch(persisted, diagnostic);
+              verifySavedSelection(active, diagnostic, selection);
+            },
+          });
       }}>
         {busy ? <><RefreshCw size={15} className="spin" /> {t('Saving lineups…')}</> : t('Save both lineups')}
       </button>
-      <button className="button button-primary" disabled={busy || match.is_cancelled} onClick={() => void run(() => api.submitMatchLineup(live.leagueId!, current.revision_id), t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'))}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
+      <button className="button button-primary" disabled={busy || match.is_cancelled} onClick={() => {
+        const diagnostic: MatchDiagnostic = {
+          operation: 'lineup_approval', matchId: match.id, revisionId: current.revision_id,
+          teamIds: [match.team_a_id, match.team_b_id],
+        };
+        const selection = structuredClone(playersBySideRef.current);
+        void run(async (signal) => {
+          await saveAndVerifyActiveLineups(signal, selection, diagnostic);
+          await api.submitMatchLineup(live.leagueId!, diagnostic.revisionId, { signal });
+        }, t(live.isLeader ? 'Lineup saved and approved.' : 'Lineup submitted for Leader review.'), {
+          diagnostic,
+          verifyMatches: (persisted) => verifySubmittedMatch(persisted, diagnostic),
+        });
+      }}>{t(live.isLeader ? 'Save and approve lineups' : 'Submit lineups for review')}</button>
     </section>}
     {live.isLeader && pending.length > 0 && <section className="workflow-section"><h3>Review queue</h3>{pending.map(({revision,submission}) => <div className="review-row" key={submission.id}><span>{submission.kind} · revision {revision.version} · submitted {new Date(submission.submitted_at).toLocaleString()}</span><div><input aria-label="Review reason" placeholder="Reason required when rejecting" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="button button-small button-primary" disabled={busy} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'approved'), `${submission.kind} approved.`)}>Approve</button><button className="button button-small button-outline" disabled={busy || !reason.trim()} onClick={() => void run(() => api.reviewMatchSubmission(live.leagueId!, submission.id, 'rejected', reason), `${submission.kind} rejected.`)}>Reject</button></div></div>)}</section>}
     {canOrganize && approvedLineup && current?.state === 'approved' && current.revision_id === approvedLineup.revision.revision_id && !current.submissions.some((s) => s.kind === 'result' && s.approval?.decision === 'approved') && <button className="button button-primary" disabled={busy} onClick={() => void openResultRevision(approvedLineup.approval.id)}>{t('Record match result')}</button>}

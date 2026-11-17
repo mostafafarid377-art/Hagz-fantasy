@@ -49,6 +49,8 @@ const DESIGN_MIGRATIONS = {
   // removed by 021; player-profile names remain non-unique.
   '022_restore_real_team_name_uniqueness.sql': 'eba5ffdd2c7362658912b94f6f4d97f1387f42cab4cf54e5db4620b1e49fc73a',
   '023_match_cancellation_and_atomic_lineup_save.sql': 'f2345df49b182424255ab577e483279c08f1b71c9217e0eecf156c24974957e9',
+  // Retry-safe replay for the existing lineup submission RPC; validation and ACL stay intact.
+  '024_idempotent_match_lineup_submission.sql': 'efffb36e1d5b0eadc5f186c06b77b7a983735841a54064e5315c1933029bd410',
   // Phase 2A reviewed baseline. These must never change.
   '001_schema.sql': '5207d5938696fd0e012125296eb35723d8aaa7cafeca48424dbc211fe25ca9b3',
   '002_security.sql': '8986954237db1cbb500564229678ea6dc4ea15673678b3d59da14438561feb08',
@@ -103,6 +105,7 @@ const PACKAGE = [
   ['20261116210000_phase4_market_and_transfer_gaps.sql', 'design/migrations/021_phase4_market_and_transfer_gaps.sql'],
   ['20261116220000_restore_real_team_name_uniqueness.sql', 'design/migrations/022_restore_real_team_name_uniqueness.sql'],
   ['20261116230000_match_cancellation_and_atomic_lineup_save.sql', 'design/migrations/023_match_cancellation_and_atomic_lineup_save.sql'],
+  ['20261116235900_idempotent_match_lineup_submission.sql', 'design/migrations/024_idempotent_match_lineup_submission.sql'],
 ];
 
 /**
@@ -111,9 +114,11 @@ const PACKAGE = [
  * The rule "the API surface verification runs last" protects the certified
  * privilege posture. Explicit forward-only migrations may follow it: 015 repairs
  * a function body, 016 adds one checked RPC, and 017 adds team-level captaincy
- * columns plus one separately checked RPC. They are individually reviewed and
- * must remain explicitly allowlisted here rather than relying on a "skip the last
- * file" rule.
+ * columns plus one separately checked RPC. Migration 024 only replaces the
+ * existing lineup-submit body, keeps its signature/owner/ACL, and delegates the
+ * first submission to the existing validation trigger. They are individually
+ * reviewed and must remain explicitly allowlisted here rather than relying on a
+ * "skip the last file" rule.
  */
 const POST_VERIFICATION_REPAIRS = [
   '20261115000015_actor_identity_claim_fallback.sql',
@@ -129,6 +134,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261116210000_phase4_market_and_transfer_gaps.sql',
   '20261116220000_restore_real_team_name_uniqueness.sql',
   '20261116230000_match_cancellation_and_atomic_lineup_save.sql',
+  '20261116235900_idempotent_match_lineup_submission.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */

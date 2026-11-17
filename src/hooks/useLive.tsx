@@ -97,9 +97,11 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
     error: null, partialFailures: [],
   });
   const generation = useRef(0);
+  const matchesRefreshGeneration = useRef(0);
 
   const load = useCallback(async (leagueId: string | null) => {
     const mine = ++generation.current;
+    matchesRefreshGeneration.current += 1;
     commit((s) => ({ ...s, loading: true, error: null }));
     try {
       const boot = await api.bootstrap();
@@ -207,7 +209,14 @@ export function LiveProvider({ userId, children }: { userId: string | null; chil
   const refreshMatches = useCallback(async (signal?: AbortSignal): Promise<ApiMatch[]> => {
     const selectedLeague = leagueId;
     if (!selectedLeague) return [];
+    const request = ++matchesRefreshGeneration.current;
     const matches = await api.matches(selectedLeague, { signal });
+    // Match reads cover the whole league. If responses arrive out of order, an
+    // older in-flight request must not replace newer match details or make an
+    // action verify against a different/stale match snapshot.
+    if (request !== matchesRefreshGeneration.current) {
+      return stateRef.current.leagueId === selectedLeague ? stateRef.current.matches : matches;
+    }
     if (stateRef.current.leagueId !== selectedLeague) return matches;
     commit((current) => ({ ...current, matches }));
     return matches;
