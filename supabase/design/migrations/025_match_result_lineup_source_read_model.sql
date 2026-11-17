@@ -1,0 +1,65 @@
+-- Forward-only read-model addition for correction/result lineage.
+-- Result forks are immutable child revisions sourced from an approved lineup
+-- revision. Exposing that existing FK lets the client keep the lineup editor on
+-- the correction attempt and prevent lineup submissions against result children.
+-- No rows, policies, grants, function signature, owner or authorization rules
+-- change. CREATE OR REPLACE preserves the existing function owner and ACL.
+
+begin;
+
+create or replace function public.ff_matches(p_league uuid)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,ff_private as $$
+begin
+  perform ff_private.require_member(p_league);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'id',m.id,'gameweek_id',m.gameweek_id,'starts_at',m.starts_at,'venue',m.venue,
+      'team_a_id',m.team_a_id,'team_a',ta.name,'team_b_id',m.team_b_id,'team_b',tb.name,
+      'organizer_id',m.organizer_id,'starters_per_side',m.starters_per_side,'max_substitutes',m.max_substitutes,
+      'is_cancelled',(m.cancelled_at is not null),'cancelled_at',m.cancelled_at,'cancel_reason',m.cancel_reason,
+      'revision_id',r.id,'revision_version',r.version,'revision_state',r.state,
+      'team_a_score',official_revision.team_a_score,'team_b_score',official_revision.team_b_score,
+      'is_official',(o.id is not null),'official_result_id',o.id,'official_revision_id',o.revision_id,
+      'finalized_by',o.finalized_by,'finalized_at',o.finalized_at,
+      'has_pending_lineup',exists(select 1 from public.match_submissions s where s.league_id=m.league_id and s.match_id=m.id and s.kind='lineup'
+        and not exists(select 1 from public.match_approvals a where a.league_id=s.league_id and a.submission_id=s.id)),
+      'has_pending_result',exists(select 1 from public.match_submissions s where s.league_id=m.league_id and s.match_id=m.id and s.kind='result'
+        and not exists(select 1 from public.match_approvals a where a.league_id=s.league_id and a.submission_id=s.id)),
+      'events',coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'type',e.event_type,'minute',e.minute,'quantity',e.quantity,
+        'player_id',e.player_id,'player_name',pp.display_name,'related_player_id',e.related_player_id) order by e.minute nulls last)
+        from public.match_events e join public.player_profiles pp on pp.league_id=e.league_id and pp.id=e.player_id
+        where e.league_id=m.league_id and e.revision_id=coalesce(o.revision_id,r.id)),'[]'::jsonb),
+      'history',coalesce((select jsonb_agg(jsonb_build_object(
+        'revision_id',v.id,'version',v.version,'based_on_lineup_revision_id',v.based_on_lineup_revision_id,'state',v.state,'team_a_score',v.team_a_score,'team_b_score',v.team_b_score,
+        'correction',(select jsonb_build_object('reason',c.reason,'actor_id',c.actor_id,'created_at',c.created_at)
+          from public.match_corrections c left join public.match_correction_attempts ca on ca.league_id=c.league_id and ca.correction_id=c.id
+          where c.league_id=v.league_id and c.match_id=v.match_id
+            and (ca.draft_revision_id=v.id or ca.draft_revision_id=v.based_on_lineup_revision_id or c.draft_revision_id=v.id)
+          order by ca.attempt_no desc limit 1),
+        'events',coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'type',e.event_type,'minute',e.minute,'quantity',e.quantity,
+          'player_id',e.player_id,'player_name',(select pp.display_name from public.player_profiles pp where pp.league_id=e.league_id and pp.id=e.player_id),
+          'related_player_id',e.related_player_id) order by e.minute nulls last) from public.match_events e where e.league_id=v.league_id and e.revision_id=v.id),'[]'::jsonb),
+        'submissions',coalesce((select jsonb_agg(jsonb_build_object('id',s.id,'kind',s.kind,'submitted_by',s.submitted_by,'submitted_at',s.submitted_at,
+          'approval',(select jsonb_build_object('id',a.id,'decision',a.decision,'reason',a.reason,'reviewed_by',a.reviewed_by,'reviewed_at',a.reviewed_at,
+            'finalized_by',case when s.kind='result' and a.decision='approved' then a.reviewed_by else null end,
+            'finalized_at',case when s.kind='result' and a.decision='approved' then a.reviewed_at else null end)
+            from public.match_approvals a where a.league_id=s.league_id and a.submission_id=s.id)) order by s.submitted_at)
+          from public.match_submissions s where s.league_id=v.league_id and s.revision_id=v.id),'[]'::jsonb),
+        'lineups',coalesce((select jsonb_agg(jsonb_build_object('team_id',ln.team_id,'players',coalesce(
+          (select jsonb_agg(jsonb_build_object('player_id',lp.player_id,'name',pp.display_name,'selection',lp.selection,'actual_position',lp.actual_position)
+            order by lp.selection,pp.display_name) from public.real_match_lineup_players lp join public.player_profiles pp
+            on pp.league_id=lp.league_id and pp.id=lp.player_id where lp.league_id=ln.league_id and lp.lineup_id=ln.id),'[]'::jsonb)) order by ln.team_id)
+          from public.real_match_lineups ln where ln.league_id=v.league_id and ln.revision_id=v.id),'[]'::jsonb)
+      ) order by v.version desc) from public.match_revisions v where v.league_id=m.league_id and v.match_id=m.id),'[]'::jsonb)
+    ) order by m.starts_at desc)
+    from public.real_matches m
+    join public.real_football_teams ta on ta.league_id=m.league_id and ta.id=m.team_a_id
+    join public.real_football_teams tb on tb.league_id=m.league_id and tb.id=m.team_b_id
+    left join lateral (select v0.* from public.match_revisions v0 where v0.league_id=m.league_id and v0.match_id=m.id order by v0.version desc limit 1) r on true
+    left join lateral (select o0.* from public.official_match_results o0 where o0.league_id=m.league_id and o0.match_id=m.id and o0.is_current limit 1) o on true
+    left join public.match_revisions official_revision on official_revision.league_id=o.league_id and official_revision.id=o.revision_id
+    where m.league_id=p_league
+  ),'[]'::jsonb);
+end $$;
+
+commit;

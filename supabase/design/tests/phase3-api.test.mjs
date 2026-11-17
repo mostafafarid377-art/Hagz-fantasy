@@ -36,6 +36,7 @@ const PKG = [
   '20261115000019_optional_match_gameweek', '20261115000020_leader_match_result_finalization',
   '20261116210000_phase4_market_and_transfer_gaps', '20261116220000_restore_real_team_name_uniqueness',
   '20261116230000_match_cancellation_and_atomic_lineup_save', '20261116235900_idempotent_match_lineup_submission',
+  '20261117000000_match_result_lineup_source_read_model',
 ];
 await load('setup.sql');
 for (const name of PKG) await load(`../../migrations/${name}.sql`);
@@ -805,6 +806,9 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
   assert.equal(matches[0].history.length, 2, 'the read RPC includes append-only revision history');
   assert.equal(matches[0].history[0].events.length, 1, 'result events are retained in revision history');
   assert.equal(matches[0].history[0].submissions[0].approval.decision, 'approved');
+  assert.equal(matches[0].history[0].based_on_lineup_revision_id, revision.id,
+    'result revisions expose the existing approved-lineup source ID');
+  assert.equal(matches[0].history[1].based_on_lineup_revision_id, null, 'lineup revisions are not result children');
   assert.equal(matches[0].history[1].lineups[0].players[0].selection, 'starter');
 
   globalThis.MATCH = match;
@@ -816,6 +820,7 @@ test('matches: organizer workflow is reachable, and approval cannot be self-appr
 
 test('matches: a correction preserves history and supersedes the old result', async () => {
   const { LEAGUE, MATCH, LINEUP_APPROVAL } = globalThis;
+  const { playerA, playerB } = globalThis.MATCH_LINEUP;
   await expectDenied(() => rpc(CAROL, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'typo'), '42501', 'unassigned manager opening a correction');
   await expectDenied(() => rpc(ALICE, 'ff_match_open_correction', LEAGUE.id, MATCH.id, '   '), '23514', 'correction without a reason');
 
@@ -844,8 +849,19 @@ test('matches: a correction preserves history and supersedes the old result', as
   // A correction must get its own lineup approval before it can back another
   // result. The immutable copied lineup is already complete and eligible.
   const correctionRevision = history[0].history[0].revision_id;
+  assert.equal(history[0].revision_id, correctionRevision, 'the current read model exposes the just-opened correction revision');
+  // Saving and then submitting on the latest correction revision must succeed;
+  // its copied lineup belongs to this immutable revision, not the old official one.
+  const correctionSaved = await rpc(BOB, 'ff_match_save_lineups', LEAGUE.id, correctionRevision,
+    JSON.stringify([{ player_id: playerA, selection: 'starter', actual_position: 'MID', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]),
+    JSON.stringify([{ player_id: playerB, selection: 'starter', actual_position: 'FWD', eligibility_kind: 'market', eligibility_evidence: { source: 'league_market' } }]));
+  assert.equal(correctionSaved.saved, true);
   const correctionSubmission = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, correctionRevision);
   const correctionLineupApproval = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, correctionSubmission.submission_id, 'approved');
+  const correctionReplay = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, correctionRevision);
+  assert.equal(correctionReplay.submission_id, correctionSubmission.submission_id, 'replaying the approved correction returns its existing submission');
+  assert.equal(correctionReplay.approval_id, correctionLineupApproval.approval_id);
+  assert.equal(correctionReplay.state, 'approved');
   await expectDenied(() => rpc(BOB, 'ff_match_fork_result', LEAGUE.id, LINEUP_APPROVAL, crypto.randomUUID()), '23514', 'old lineup approval cannot bypass correction reapproval');
   const correctedDraft = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, correctionLineupApproval.approval_id, crypto.randomUUID());
   await rpc(BOB, 'ff_match_set_score', LEAGUE.id, correctedDraft.revision_id, 2, 1);
@@ -866,6 +882,88 @@ test('matches: a correction preserves history and supersedes the old result', as
   assert.equal(refreshed.official_revision_id, correctedDraft.revision_id);
   assert.equal(refreshed.finalized_by, ALICE);
   assert.notEqual(refreshed.official_result_id, globalThis.MATCH_OFFICIAL_ID, 'refresh reveals the newly finalized result');
+
+  // A later correction is a new immutable case/revision, not a rewrite of the
+  // previous correction or either approved result. The assigned Organizer can
+  // save/submit it; the Leader retains review authority.
+  const nextCorrection = await rpc(BOB, 'ff_match_open_correction', LEAGUE.id, MATCH.id, 'Second correction');
+  const nextSnapshot = (await rpc(CAROL, 'ff_matches', LEAGUE.id))[0];
+  assert.equal(nextSnapshot.revision_id, nextCorrection.draft_revision_id);
+  assert.equal(nextSnapshot.official_revision_id, correctedDraft.revision_id, 'opening a second correction leaves the prior official result active');
+  const nextLineupSubmission = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, nextCorrection.draft_revision_id);
+  const nextLineupApproval = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, nextLineupSubmission.submission_id, 'approved');
+  const nextResult = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, nextLineupApproval.approval_id, crypto.randomUUID());
+  await rpc(BOB, 'ff_match_set_score', LEAGUE.id, nextResult.revision_id, 2, 2);
+  await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, nextResult.revision_id, nextLineupApproval.approval_id);
+  const afterTwoCorrections = (await rpc(CAROL, 'ff_matches', LEAGUE.id))[0];
+  assert.equal(afterTwoCorrections.official_revision_id, nextResult.revision_id);
+  assert.equal(afterTwoCorrections.history.length, 6, 'both corrections and all result revisions remain in history');
+  assert.equal(await scalar('select count(*)::int from public.match_corrections where league_id=$1 and match_id=$2', [LEAGUE.id, MATCH.id]), 2);
+  assert.equal(await scalar('select count(*)::int from public.official_match_results where league_id=$1 and match_id=$2', [LEAGUE.id, MATCH.id]), 3,
+    'prior official results are preserved as immutable history');
+});
+
+test('match read model preserves the exact 11 starters and 4 substitutes through approval, result, refresh and correction', async () => {
+  const { LEAGUE, GAMEWEEK } = globalThis;
+  const { teamA, teamB } = globalThis.MATCH_LINEUP;
+  const marketPlayers = [];
+  for (let index = 1; index <= 31; index++) {
+    marketPlayers.push(await rpc(ALICE, 'ff_market_upsert_player', LEAGUE.id,
+      `Match display seed ${index}`, 'MID', 5000000, 70));
+  }
+  const match = await rpc(ALICE, 'ff_match_create', LEAGUE.id, GAMEWEEK, teamA, teamB, BOB,
+    '2025-08-12T19:00:00Z', 'Display regression ground', 11, 4);
+  const revision = await rpc(BOB, 'ff_match_open_revision', LEAGUE.id, match.id);
+  const playersFor = (offset) => marketPlayers.slice(offset, offset + 15).map((player, index) => ({
+    player_id: player.player_id,
+    selection: index < 11 ? 'starter' : 'substitute',
+    actual_position: 'MID',
+    eligibility_kind: 'market',
+    eligibility_evidence: { source: 'league_market' },
+  }));
+  const home = playersFor(0);
+  const away = playersFor(15);
+  const saved = await rpc(BOB, 'ff_match_save_lineups', LEAGUE.id, revision.id,
+    JSON.stringify(home), JSON.stringify(away));
+  assert.equal(saved.saved, true);
+  await rpc(BOB, 'ff_match_record_event', LEAGUE.id, revision.id, home[0].player_id, 'goal', 10, null, 1, {});
+  const submitted = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, revision.id);
+  const approved = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, submitted.submission_id, 'approved');
+  const afterApproval = (await rpc(CAROL, 'ff_matches', LEAGUE.id)).find((row) => row.id === match.id);
+  const lineupOn = (row, revisionId) => row.history.find((item) => item.revision_id === revisionId).lineups;
+  const assertFullLineups = (lineups, expectedIds, label) => {
+    assert.equal(lineups.length, 2, `${label}: Home and Away lineups are present`);
+    for (const [index, teamId] of [teamA, teamB].entries()) {
+      const actual = lineups.find((lineup) => lineup.team_id === teamId).players;
+      assert.equal(actual.length, 15, `${label}: side ${index + 1} has exactly 15 selected players`);
+      assert.equal(actual.filter((player) => player.selection === 'starter').length, 11);
+      assert.equal(actual.filter((player) => player.selection === 'substitute').length, 4);
+      assert.equal(new Set(actual.map((player) => player.player_id)).size, 15, 'no duplicate selected players');
+      assert.deepEqual(new Set(actual.map((player) => player.player_id)), new Set(expectedIds[index]));
+      assert.ok(actual.every((player) => !player.player_id || player.name), 'all selected players retain their profile name');
+    }
+  };
+  assertFullLineups(lineupOn(afterApproval, revision.id), [home.map((p) => p.player_id), away.map((p) => p.player_id)], 'approved revision');
+  assert.equal(afterApproval.history[0].events.length, 1, 'only one of the 30 selected players has an event');
+  assert.ok(!JSON.stringify(lineupOn(afterApproval, revision.id)).includes(marketPlayers[30].player_id), 'unselected market player is omitted');
+
+  const resultDraft = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, approved.approval_id, crypto.randomUUID());
+  await rpc(BOB, 'ff_match_set_score', LEAGUE.id, resultDraft.revision_id, 1, 0);
+  await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, resultDraft.revision_id, approved.approval_id);
+  const fullTime = (await rpc(CAROL, 'ff_matches', LEAGUE.id)).find((row) => row.id === match.id);
+  assertFullLineups(lineupOn(fullTime, fullTime.official_revision_id), [home.map((p) => p.player_id), away.map((p) => p.player_id)], 'full-time official revision');
+
+  const correction = await rpc(BOB, 'ff_match_open_correction', LEAGUE.id, match.id, 'Verify corrected lineup display');
+  const reopened = (await rpc(CAROL, 'ff_matches', LEAGUE.id)).find((row) => row.id === match.id);
+  assert.equal(reopened.revision_id, correction.draft_revision_id);
+  assertFullLineups(lineupOn(reopened, correction.draft_revision_id), [home.map((p) => p.player_id), away.map((p) => p.player_id)], 'reopened correction');
+  const correctionSubmission = await rpc(BOB, 'ff_match_submit_lineup', LEAGUE.id, correction.draft_revision_id);
+  const correctionApproval = await rpc(ALICE, 'ff_match_review_submission', LEAGUE.id, correctionSubmission.submission_id, 'approved');
+  const correctedResult = await rpc(BOB, 'ff_match_fork_result', LEAGUE.id, correctionApproval.approval_id, crypto.randomUUID());
+  await rpc(BOB, 'ff_match_set_score', LEAGUE.id, correctedResult.revision_id, 2, 0);
+  await rpc(BOB, 'ff_match_submit_result', LEAGUE.id, correctedResult.revision_id, correctionApproval.approval_id);
+  const afterCorrection = (await rpc(CAROL, 'ff_matches', LEAGUE.id)).find((row) => row.id === match.id);
+  assertFullLineups(lineupOn(afterCorrection, afterCorrection.official_revision_id), [home.map((p) => p.player_id), away.map((p) => p.player_id)], 'corrected full-time revision');
 });
 
 test('matches: Gameweek is optional and old matches retain their Gameweek links', async () => {
