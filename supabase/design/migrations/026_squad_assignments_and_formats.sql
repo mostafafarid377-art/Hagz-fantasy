@@ -586,7 +586,7 @@ begin
   if p_player_ids is null then raise exception 'player assignments are required' using errcode='23514'; end if;
   v:=public.ff_squad_save_assignments(p_league,p_player_ids[1:n],p_player_ids[n+1:],'{}'::uuid[],p_captain,p_vice,p_gameweek,null);
   return jsonb_build_object('lineup_id',v->'lineup'->'lineup_id','version',v->'lineup'->'version',
-    'formation',v->'lineup'->'formation','status',coalesce(v->'lineup'->'status','draft'),
+    'formation',v->'lineup'->'formation','status',coalesce(v->'lineup'->>'status','draft'),
     'squad',v->'squad','assignment_revision',v->'assignment_revision');
 end $$;
 

@@ -20,7 +20,7 @@ import type {
 /** Stable, translatable error codes. `message` is a developer fallback only. */
 export type ApiErrorCode =
   | 'notConfigured' | 'notAuthenticated' | 'forbidden' | 'invalidState'
-  | 'network' | 'unknown';
+  | 'conflict' | 'outcomeUnknown' | 'network' | 'unknown';
 
 export class ApiError extends Error {
   constructor(public code: ApiErrorCode, message: string, public detail?: string) {
@@ -59,51 +59,98 @@ function normalise(error: { code?: string; message?: string } | null): ApiError 
 type RpcOptions = { signal?: AbortSignal };
 type ReadOptions = RpcOptions & { timeoutMs?: number };
 
-/** Bound reads so a stalled mobile/network request cannot leave the app on a spinner forever. */
-const DEFAULT_READ_TIMEOUT_MS = 15_000;
+/** Bound a request even when its underlying transport does not observe the signal. */
+export const REQUEST_DEADLINE_MS = 15_000;
 
-async function read<T>(fn: string, args: Record<string, unknown> = {}, options: ReadOptions = {}): Promise<T> {
+export async function withDeadline<T>(label: string, run: (signal: AbortSignal) => Promise<T>,
+  options: ReadOptions = {}, timeoutCode: 'network' | 'outcomeUnknown' = 'network'): Promise<T> {
   const controller = new AbortController();
-  const timeoutMs = options.timeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
-  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  const timeoutMs = options.timeoutMs ?? REQUEST_DEADLINE_MS;
+  let rejectCancellation!: (error: ApiError) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+  const abortFromCaller = () => {
+    // A cancelled write can still have committed. Never imply rollback.
+    rejectCancellation(new ApiError(timeoutCode, `${label} was cancelled.`, 'cancelled'));
+    controller.abort();
+  };
   if (options.signal?.aborted) abortFromCaller();
   else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
+      // An abort or a missed deadline is not proof that a write rolled back.
+      reject(new ApiError(timeoutCode, `${label} did not respond within ${timeoutMs} ms`, 'timeout'));
       controller.abort();
-      reject(new ApiError('network', `${fn} did not respond within ${timeoutMs} ms`, 'timeout'));
     }, timeoutMs);
   });
   try {
-    // The race is intentional as a final guard even if an underlying fetch
-    // implementation ignores AbortSignal. Supabase receives the signal too, so
-    // supported clients also cancel the stalled network request itself.
-    return await Promise.race([call<T>(fn, args, { signal: controller.signal }), timeout]);
+    // Don't start a new operation if it was cancelled before invocation.
+    const work = options.signal?.aborted ? cancelled : run(controller.signal);
+    return await Promise.race([work, timeout, cancelled]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     options.signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 
-async function call<T>(fn: string, args: Record<string, unknown> = {}, options: RpcOptions = {}): Promise<T> {
+const SQUAD_WRITES = new Set([
+  'ff_lineup_save', 'ff_lineup_confirm', 'ff_squad_substitute', 'ff_squad_set_captains',
+  'ff_squad_buy', 'ff_squad_sell', 'ff_squad_transfer',
+]);
+const LEAGUE_WRITES = new Set([
+  'ff_league_create', 'ff_league_join', 'ff_league_archive', 'ff_league_set_market',
+  'ff_league_set_member', 'ff_league_set_organizer', 'ff_league_transfer_leadership',
+  'ff_operation_for_actor',
+]);
+const isGuardedWrite = (fn: string) => SQUAD_WRITES.has(fn) || LEAGUE_WRITES.has(fn);
+const gatewayFailure = (status?: number) => status === 502 || status === 503 || status === 504;
+
+async function requestRpc<T>(fn: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const supabase = getSupabase();
   if (!supabase) throw new ApiError('notConfigured', 'Supabase is not configured');
-
+  const write = isGuardedWrite(fn);
   const request = supabase.rpc(fn, args);
-  const query = options.signal && typeof request.abortSignal === 'function'
-    ? request.abortSignal(options.signal)
-    : request;
-  const { data, error } = await query;
+  // The locked SDK already doesn't replay RPC POSTs; keep this explicit for
+  // write recovery and for bootstrap, which may initialize a profile.
+  if ((write || fn === 'ff_bootstrap') && typeof request.retry === 'function') request.retry(false);
+  const query = signal && typeof request.abortSignal === 'function' ? request.abortSignal(signal) : request;
+  let response: Awaited<typeof query>;
+  try {
+    response = await query;
+  } catch (error) {
+    // Normally the SDK reports transport failures as status 0, but a fetch or
+    // alternate transport can also reject. Its write outcome is not known.
+    if (write) throw new ApiError('outcomeUnknown', 'The server could not confirm the change.', 'transport');
+    throw error;
+  }
+  const { data, error, status } = response;
+  if (fn === 'ff_bootstrap' && (status === 504 || error?.code === 'PGRST003')) {
+    throw new ApiError('network', 'The server did not respond in time.', error?.code === 'PGRST003' ? error.code : '504');
+  }
+  if (write && (status === 0 || gatewayFailure(status) || error?.code === 'PGRST003')) {
+    throw new ApiError('outcomeUnknown', 'The server could not confirm the change.',
+      error?.code === 'PGRST003' ? error.code : status ? String(status) : 'transport');
+  }
+  if ((SQUAD_WRITES.has(fn) || (fn === 'ff_operation_for_actor' && args.p_action === 'execute')) && error?.code === '40001') {
+    throw new ApiError('conflict', error.message, '40001');
+  }
   if (error) {
     const normalised = normalise(error);
-    if (normalised.code === 'unknown') {
-      console.error(`[fantasy-friends] ${fn} failed:`, error);
-    }
+    if (normalised.code === 'unknown') console.error(`[fantasy-friends] ${fn} failed:`, error);
     throw normalised;
   }
   return data as T;
+}
+
+function read<T>(fn: string, args: Record<string, unknown> = {}, options: ReadOptions = {}): Promise<T> {
+  return withDeadline(fn, (signal) => requestRpc<T>(fn, args, signal), options);
+}
+
+function call<T>(fn: string, args: Record<string, unknown> = {}, options: RpcOptions = {}): Promise<T> {
+  return isGuardedWrite(fn)
+    ? withDeadline(fn, (signal) => requestRpc<T>(fn, args, signal), options, 'outcomeUnknown')
+    : requestRpc<T>(fn, args, options.signal);
 }
 
 /** As `call`, but rewrites SQLSTATEs into the codes the UI translates. */
@@ -122,8 +169,78 @@ export interface Bootstrap {
   }>;
 }
 
-export const bootstrap = (displayName?: string, options: ReadOptions = {}) =>
-  withBootstrapDiagnostics(() => read<Bootstrap>('ff_bootstrap', { p_display_name: displayName ?? null }, options));
+type BootstrapOptions = {
+  /** Set only in response to a user's retry action. */
+  retry?: boolean;
+  /** A membership write just succeeded; an already-running read may predate it. */
+  afterPending?: boolean;
+};
+
+export interface BootstrapSession {
+  load(options?: BootstrapOptions): Promise<Bootstrap>;
+  close(): void;
+}
+
+/** One shared bootstrap flight and retry gate per sign-in, not per access token. */
+export function createBootstrapSession(
+  userId: string, { displayName, timeoutMs }: { displayName?: string; timeoutMs?: number } = {},
+): BootstrapSession {
+  const controller = new AbortController();
+  const { signal } = controller;
+  let initialName = displayName;
+  let inFlight: Promise<Bootstrap> | null = null;
+  let nextFlight: Promise<Bootstrap> | null = null;
+  let retryRequired: ApiError | null = null;
+
+  // `aborted` works throughout the browser target range; `reason` and
+  // `throwIfAborted` are not present on some of those browsers.
+  const superseded = () => new ApiError('notAuthenticated', 'The session changed while loading your profile.');
+  const load = ({ retry = false, afterPending = false }: BootstrapOptions = {}): Promise<Bootstrap> => {
+    if (signal.aborted) return Promise.reject(superseded());
+    if (nextFlight) return nextFlight;
+    if (inFlight) {
+      if (!afterPending) return inFlight;
+      // After a successful write, coalesce on the next read, not on a snapshot
+      // taken before the write. Do not replay at all if the current read fails.
+      nextFlight = inFlight.then(
+        () => { nextFlight = null; return load(); },
+        (error: unknown) => { nextFlight = null; throw error; },
+      );
+      return nextFlight;
+    }
+    if (retryRequired && !retry) return Promise.reject(retryRequired);
+
+    // Publish the flight before calling the SDK or notifying diagnostics. The
+    // auth listener does not wait for Supabase work inside its callback.
+    inFlight = Promise.resolve().then(async () => {
+      if (signal.aborted) throw superseded();
+      try {
+        const data = await withBootstrapDiagnostics(async () => {
+          const result = await read<Bootstrap>(
+            'ff_bootstrap', { p_display_name: initialName ?? null }, { signal, timeoutMs },
+          );
+          if (signal.aborted) throw superseded();
+          if (result?.profile?.id !== userId) {
+            throw superseded();
+          }
+          return result;
+        });
+        initialName = undefined; // Directory refreshes must not reapply signup metadata.
+        retryRequired = null;
+        return data;
+      } catch (error) {
+        if (signal.aborted) throw superseded();
+        if (error instanceof ApiError && ['PGRST003', '504', 'timeout'].includes(error.detail ?? '')) {
+          retryRequired = error;
+        }
+        throw error;
+      }
+    }).finally(() => { inFlight = null; });
+    return inFlight;
+  };
+
+  return { load, close: () => controller.abort() };
+}
 
 export const updateProfile = (displayName: string) =>
   call<{ id: string; display_name: string }>('ff_update_profile', { p_display_name: displayName });

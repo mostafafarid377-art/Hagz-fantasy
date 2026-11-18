@@ -1,3 +1,5 @@
+import { receiptServer } from '../../test/receiptServer';
+import '../../test/indexedDbSetup';
 /**
  * @vitest-environment jsdom
  *
@@ -16,7 +18,7 @@
  *  3. The summary strip clipped its 7th cell on a 360px phone.
  */
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -57,7 +59,12 @@ const FULL_SQUAD = [
   [2, 'GK'], [7, 'DEF'], [11, 'MID'], [12, 'MID'],
 ].map(([n, position], index) => ({ ...squadPlayer(Number(n), String(position)), slot: index + 1 }));
 
-type SquadFixtureOptions = { players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean; market?: unknown[]; captainId?: string | null; viceId?: string | null; gameweek?: boolean; status?: string };
+type RpcOverride = { data: unknown; error: { code: string; message: string } | null; status?: number };
+type SquadFixtureOptions = {
+  players?: unknown[]; formation?: string | null; spent?: number; builder?: boolean; market?: unknown[];
+  captainId?: string | null; viceId?: string | null; gameweek?: boolean; status?: string;
+  override?: (fn: string) => RpcOverride | Promise<RpcOverride> | undefined;
+};
 async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
@@ -73,9 +80,10 @@ async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
   };
   const rpcCalls: Array<{ fn: string; args?: Record<string, unknown> }> = [];
 
+  const handleReceipt = receiptServer((name, args) => client.rpc(name, args));
   const client = {
     auth: {
-      getSession: async () => ({ data: { session: null }, error: null }),
+      getSession: async () => ({ data: { session: { user: { id: 'u1' } } }, error: null }),
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
     },
     // Every remaining read returns an empty result. The points reader tolerates that
@@ -88,7 +96,10 @@ async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
       return chain;
     },
     rpc: async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === 'ff_operation_for_actor') return handleReceipt(args!);
       rpcCalls.push({ fn, args });
+      const override = opts.override?.(fn);
+      if (override) return override;
       if (fn === 'ff_bootstrap') {
         return { data: { profile: { id: 'u1', display_name: 'Me' }, leagues: [league] }, error: null };
       }
@@ -152,6 +163,7 @@ async function mountLiveSquad(opts: SquadFixtureOptions = {}) {
     );
   });
   for (let i = 0; i < 6; i += 1) await act(async () => { await Promise.resolve(); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
   return { serverSquad, rpcCalls };
 }
 
@@ -183,6 +195,36 @@ describe('the formation drives the actual pitch layout', () => {
     expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(4);
   });
 
+  it('does not erase a remembered order when the initial squad read fails', async () => {
+    const order = FULL_SQUAD.map((p) => p.league_player_id);
+    localStorage.setItem('ff_live_squad_order:L1', JSON.stringify(order));
+    await mountLiveSquad({ players: FULL_SQUAD.map((p) => ({ ...p, slot: null })),
+      override: (fn) => fn === 'ff_squad'
+        ? { data: null, error: { code: 'PGRST003', message: 'pool timeout' }, status: 504 } : undefined });
+    expect(JSON.parse(localStorage.getItem('ff_live_squad_order:L1')!)).toEqual(order);
+  });
+
+  it('preserves remembered unslotted keeper and captaincy through conflict recovery', async () => {
+    const order = FULL_SQUAD.map((p) => p.league_player_id);
+    [order[0], order[11]] = [order[11], order[0]];
+    localStorage.setItem('ff_live_squad_order:L1', JSON.stringify(order));
+    const players = FULL_SQUAD.map((p) => ({ ...p, slot: null }));
+    const { rpcCalls } = await mountLiveSquad({ players, builder: true, gameweek: true,
+      captainId: 'lp2', viceId: 'lp3', override: (fn) => fn === 'ff_lineup_save'
+        ? { data: null, error: { code: '40001', message: 'conflict' } } : undefined });
+    expect(document.querySelector('.pitch [aria-label="Player details: P2"]')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save lineup' })); });
+    expect(document.querySelector('.pitch [aria-label="Player details: P2"]')).toBeTruthy();
+    expect(document.querySelector('.bench-strip [aria-label="Player details: P1"]')).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem('ff_live_squad_order:L1')!)).toEqual(order);
+    fireEvent.click(await screen.findByRole('button', { name: 'Choose players again' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save lineup' })); });
+    await waitFor(() => expect(rpcCalls.filter(({ fn }) => fn === 'ff_lineup_save')).toHaveLength(2));
+    const writes = rpcCalls.filter(({ fn }) => fn === 'ff_lineup_save');
+    const write = writes[writes.length - 1];
+    expect(write.args).toMatchObject({ p_player_ids: order, p_captain: 'lp2', p_vice: 'lp3', p_gameweek: 'gw1' });
+  });
+
   it('adding a bench player never reshuffles the starting XI or leaves a position empty', async () => {
     const starters = [
       [1, 'GK'], [3, 'DEF'], [4, 'DEF'], [5, 'DEF'], [6, 'DEF'],
@@ -198,6 +240,7 @@ describe('the formation drives the actual pitch layout', () => {
     await act(async () => { screen.getByRole('button', { name: 'Add bench player: GK' }).click(); });
     await act(async () => { screen.getByRole('button', { name: /Aardvark Keeper/ }).click(); });
 
+    await waitFor(() => expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(1));
     expect(starterButtons()).toEqual(originalStarters);
     expect(document.querySelectorAll('.bench-player:not(.bench-add)')).toHaveLength(1);
     expect(document.querySelector('.bench-player:not(.bench-add)')?.getAttribute('aria-label')).toBe('Player details: Aardvark Keeper');
@@ -479,7 +522,8 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
     await act(async () => { screen.getByRole('button', { name: 'Select replacement' }).click(); });
     await act(async () => { screen.getByRole('button', { name: /New Defender/ }).click(); });
     await act(async () => { screen.getByRole('button', { name: 'Confirm replacement' }).click(); });
-    expect(rpcCalls.some(call => call.fn === 'ff_squad_transfer' && call.args?.p_out === 'lp7' && call.args?.p_in === 'market-def-new')).toBe(true);
+    await waitFor(() => expect(rpcCalls.some(call => call.fn === 'ff_squad_transfer' && call.args?.p_out === 'lp7' && call.args?.p_in === 'market-def-new')).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: /view squad/i }).hasAttribute('disabled')).toBe(false));
     expect(serverSquad.players).toHaveLength(15);
     expect(serverSquad.players.some(player => player.league_player_id === 'market-def-new')).toBe(true);
     expect(document.querySelectorAll('.pitch .pitch-player')).toHaveLength(11);
@@ -519,6 +563,7 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
     await act(async () => { fireEvent.change(select, { target: { value: '4-3-3' } }); });
     expect(document.querySelector('.formation-validation')).toBeNull();
     await act(async () => { screen.getByRole('button', { name: 'Save lineup' }).click(); });
+    await waitFor(() => expect(rpcCalls.some(call => call.fn === 'ff_lineup_save')).toBe(true));
     const saved = rpcCalls.find(call => call.fn === 'ff_lineup_save');
     expect(saved?.args?.p_formation).toBe('4-3-3');
     expect(saved?.args?.p_player_ids).toHaveLength(15);
@@ -555,5 +600,78 @@ describe('the + on a pitch slot opens a position-filtered player list', () => {
     expect(document.querySelector('dialog.player-sheet')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+  });
+});
+
+
+describe('substitution conflict recovery', () => {
+  it.each([false, true])('requires a fresh selection after 40001 (first squad read fails: %s)', async (failRefresh) => {
+    let finishWrite!: (value: RpcOverride) => void;
+    const pending = new Promise<RpcOverride>((resolve) => { finishWrite = resolve; });
+    let writes = 0;
+    let failNextSquadRead = false;
+    const { rpcCalls, serverSquad } = await mountLiveSquad({
+      builder: true, gameweek: true, captainId: 'lp1', viceId: 'lp3',
+      override: (fn) => {
+        if (fn === 'ff_lineup_save' && ++writes === 1) return pending;
+        if (fn === 'ff_squad' && failNextSquadRead) {
+          failNextSquadRead = false;
+          return { data: null, error: { code: 'PGRST003', message: 'pool timeout' }, status: 504 };
+        }
+      },
+    });
+    const startSwap = (name: string) => {
+      fireEvent.click(screen.getByRole('button', { name: `Player details: ${name}` }));
+      fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
+    };
+    startSwap('P2'); // from the bench first
+    const target = screen.getByRole('button', { name: 'Select swap player: P1' });
+    const saveButton = screen.getByRole('button', { name: 'Save lineup' });
+    const start = rpcCalls.length;
+    act(() => {
+      fireEvent.click(target);
+      fireEvent.click(target);
+      fireEvent.click(saveButton);
+    });
+    expect(target.matches(':disabled')).toBe(true);
+    expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(rpcCalls.slice(start).map(({ fn }) => fn)).toEqual(['ff_lineup_save']));
+    expect(screen.getByText('Saving squad change…')).toBeTruthy();
+
+    // Another session has already promoted P2 and made P4 captain. The old clicks
+    // must not revert that swap or send the old captain on the manager's next try.
+    serverSquad.players = serverSquad.players.map((player) => ({ ...player,
+      slot: player.league_player_id === 'lp2' ? 1 : player.league_player_id === 'lp1' ? 12 : player.slot,
+    }));
+    serverSquad.captain_id = 'lp4';
+    failNextSquadRead = failRefresh;
+    await act(async () => { finishWrite({ data: null, error: { code: '40001', message: 'stale squad revision' } }); });
+    await waitFor(() => expect(rpcCalls.slice(start).map(({ fn }) => fn)).toEqual(['ff_lineup_save', 'ff_squad']));
+    expect(screen.queryByText('Choose a player to swap')).toBeNull();
+    expect(screen.queryByText('Players swapped.')).toBeNull();
+    expect(localStorage.getItem('ff_live_squad_order:L1')).toBeNull(); // No remembered order was saved.
+
+    if (failRefresh) {
+      expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryByRole('button', { name: 'Choose players again' })).toBeNull();
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check operation' })); });
+      await waitFor(() => expect(rpcCalls.slice(start).map(({ fn }) => fn)).toEqual(['ff_lineup_save', 'ff_squad', 'ff_squad']));
+    }
+    const review = await screen.findByRole('button', { name: 'Choose players again' });
+    expect(document.querySelector('.pitch [aria-label="Player details: P2"]')).toBeTruthy();
+    expect(document.querySelector('.bench-strip [aria-label="Player details: P1"]')).toBeTruthy();
+    fireEvent.click(review);
+    expect(writes).toBe(1); // Reviewing/clearing the gate is not a submission.
+    expect(screen.queryByText('Choose a player to swap')).toBeNull();
+
+    startSwap('P3'); // new starter-first choice from the refreshed lineup
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P7' })); });
+    await waitFor(() => expect(rpcCalls.filter(({ fn }) => fn === 'ff_lineup_save')).toHaveLength(2));
+    const saves = rpcCalls.filter(({ fn }) => fn === 'ff_lineup_save');
+    expect(saves).toHaveLength(2);
+    expect(saves[1].args).toMatchObject({ p_formation: '4-3-3', p_captain: 'lp4', p_vice: 'lp3', p_gameweek: 'gw1' });
+    expect((saves[1].args?.p_player_ids as string[]).slice(0, 2)).toEqual(['lp2', 'lp7']);
+    expect(await screen.findByText('Players swapped.')).toBeTruthy();
+    expect(rpcCalls.slice(start).some(({ fn }) => fn === 'ff_bootstrap' || fn === 'ff_squad_substitute')).toBe(false);
   });
 });

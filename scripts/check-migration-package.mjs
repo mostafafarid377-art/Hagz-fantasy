@@ -109,6 +109,7 @@ const PACKAGE = [
   ['20261116230000_match_cancellation_and_atomic_lineup_save.sql', 'design/migrations/023_match_cancellation_and_atomic_lineup_save.sql'],
   ['20261116235900_idempotent_match_lineup_submission.sql', 'design/migrations/024_idempotent_match_lineup_submission.sql'],
   ['20261117000000_match_result_lineup_source_read_model.sql', 'design/migrations/025_match_result_lineup_source_read_model.sql'],
+  ['20261118000000_operation_receipts.sql', 'design/migrations/027_operation_receipts.sql'],
 ];
 
 /**
@@ -140,6 +141,7 @@ const POST_VERIFICATION_REPAIRS = [
   '20261116230000_match_cancellation_and_atomic_lineup_save.sql',
   '20261116235900_idempotent_match_lineup_submission.sql',
   '20261117000000_match_result_lineup_source_read_model.sql',
+  '20261118000000_operation_receipts.sql',
 ];
 
 /** Manual-only scripts that must NEVER appear as a CLI migration. */
@@ -385,6 +387,13 @@ if (!(await exists(execDir))) {
       const noSurfaceChanges = !/^\s*(drop\s+|alter\s+table|create\s+policy|grant\s+|revoke\s+|insert\s+into|update\s+|delete\s+from)/im.test(stripped);
       if (!replacesOnlyReadRpc || !memberCheck || !exposesExistingLineage || !noSurfaceChanges) fail(`post-verification migration ${repair}`, 'must replace only the existing member-scoped ff_matches read-model body and expose result-lineup source lineage without privilege/schema changes');
       else ok(`post-verification migration ${repair} is scoped`, 'adds existing result-lineup source ID to the ff_matches JSON read model; owner and ACL preserved');
+    } else if (repair === '20261118000000_operation_receipts.sql') {
+      const bounded = /create\s+table\s+ff_private\.operation_receipts/i.test(stripped)
+        && /revoke\s+all\s+on\s+ff_private\.operation_receipts\s+from\s+public,\s*anon,\s*authenticated/i.test(stripped)
+        && /primary\s+key\s*\(actor_id,\s*operation_id\)/i.test(stripped)
+        && /grant\s+execute\s+on\s+function\s+public\.ff_operation_register/i.test(stripped);
+      if (!bounded) fail(`post-verification migration ${repair}`, 'missing receipt isolation or bounded RPC grants');
+      else ok(`post-verification migration ${repair} is scoped`, 'adds actor-scoped operation receipts');
     } else {
       const surfaceDdl = /^\s*(drop\s+function|drop\s+policy|create\s+policy|drop\s+table|alter\s+table|grant\s+.*\bon\s+(table|schema)|revoke\s+.*\bon\s+(table|schema))/im.exec(stripped);
       if (surfaceDdl) {

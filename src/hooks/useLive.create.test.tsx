@@ -1,3 +1,5 @@
+import { receiptServer } from '../test/receiptServer';
+import '../test/indexedDbSetup';
 /**
  * @vitest-environment jsdom
  *
@@ -25,7 +27,7 @@ const league = (id: string, name: string) => ({
 
 /**
  * Mount LiveProvider with a fake client.
- * `bootstrapLists` decides what `ff_bootstrap` reports AFTER `ff_league_create`,
+ * `bootstrapAfterCreate` decides what `ff_bootstrap` reports AFTER `ff_league_create`,
  * i.e. whether the new league ever becomes visible.
  */
 async function mountLive(opts: {
@@ -33,23 +35,33 @@ async function mountLive(opts: {
   /** Leagues bootstrap reports on the SECOND (post-create) load. */
   bootstrapAfterCreate: ReturnType<typeof league>[];
   initialLeagues?: ReturnType<typeof league>[];
+  storedLeagueId?: string;
+  beforeCreate?: () => Promise<void>;
+  bootstrapHandler?: (readNumber: number) => Promise<ReturnType<typeof league>[]> | undefined;
   matchReadHandler?: (readNumber: number) => Promise<unknown>;
   readHandler?: (fn: string, args?: Record<string, unknown>) => Promise<unknown>;
 }) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
-  try { localStorage.removeItem('ff-live-league'); } catch { /* no storage in test env */ }
+  localStorage.removeItem('ff-live-league');
+  sessionStorage.clear();
+  if (opts.storedLeagueId) localStorage.setItem('ff-live-league', opts.storedLeagueId);
 
   let created = false;
+  let createCalls = 0;
   let bootstrapCalls = 0;
   let failNextBootstrap = false;
   let matchRead = 0;
   const loadingSnapshots: boolean[] = [];
+  const handleReceipt = receiptServer((name, args) => client.rpc(name, args));
   const client = {
-    auth: { getSession: async () => ({ data: { session: null }, error: null }) },
+    auth: { getSession: async () => ({ data: { session: { user: { id: 'u1' } } }, error: null }) },
     rpc: async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === 'ff_operation_for_actor') return handleReceipt(args!);
       if (fn === 'ff_league_create') {
+        createCalls += 1;
+        await opts.beforeCreate?.();
         created = true;
         return { data: { id: opts.createdId, name: 'New League', budget: 100, market_open: true, code: 'ABC123' }, error: null };
       }
@@ -59,7 +71,8 @@ async function mountLive(opts: {
         return {
           data: {
             profile: { id: 'u1', display_name: 'Me' },
-            leagues: created ? opts.bootstrapAfterCreate : (opts.initialLeagues ?? []),
+            leagues: (await opts.bootstrapHandler?.(bootstrapCalls))
+              ?? (created ? opts.bootstrapAfterCreate : (opts.initialLeagues ?? [])),
           },
           error: null,
         };
@@ -99,12 +112,13 @@ async function mountLive(opts: {
       </MemoryRouter>,
     );
   });
-  await act(async () => { await Promise.resolve(); });
+  await act(async () => { if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0); else await new Promise((resolve) => setTimeout(resolve, 10)); });
 
   return {
     get: () => ctx,
     loadingSnapshots: () => [...loadingSnapshots],
     getBootstrapCalls: () => bootstrapCalls,
+    getCreateCalls: () => createCalls,
     failNextBootstrap: () => { failNextBootstrap = true; },
     reload: async () => { await act(async () => { await ctx.reload(); }); },
     switchLeague: async (id: string) => {
@@ -115,18 +129,27 @@ async function mountLive(opts: {
       await act(async () => { await ctx.refreshMatches(); });
     },
     /** Call createLeague and report whether it rejected, and with what message. */
-    create: async (): Promise<{ rejected: boolean; message?: string }> => {
-      let rejected = false; let message: string | undefined;
+    create: async (): Promise<{ rejected: boolean; message?: string; value?: boolean }> => {
+      let rejected = false; let message: string | undefined; let value: boolean | undefined;
       await act(async () => {
-        try { await ctx.createLeague('New League'); }
+        try { value = await ctx.createLeague('New League'); }
         catch (e) { rejected = true; message = (e as Error).message; }
       });
-      return { rejected, message };
+      return { rejected, message, value };
     },
   };
 }
 
 describe('league switching reuses the authenticated league directory', () => {
+  it('does not bootstrap again on startup for a stale saved league', async () => {
+    const app = await mountLive({
+      createdId: 'unused', bootstrapAfterCreate: [], storedLeagueId: 'old-account-league',
+      initialLeagues: [league('L-one', 'First League')],
+    });
+    expect(app.get().leagueId).toBe('L-one');
+    expect(app.getBootstrapCalls()).toBe(0);
+  });
+
   it('does not issue another ff_bootstrap for a known league switch', async () => {
     const app = await mountLive({
       createdId: 'L-new',
@@ -142,6 +165,48 @@ describe('league switching reuses the authenticated league directory', () => {
     expect(app.get().leagueId).toBe('L-two');
     expect(app.getBootstrapCalls()).toBe(callsBeforeSwitch);
     expect(app.get().loading).toBe(false);
+  });
+});
+
+describe('league creation does not amplify requests', () => {
+  it('accepts only one in-flight league-create submission', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const app = await mountLive({
+      createdId: 'L-new', initialLeagues: [], bootstrapAfterCreate: [league('L-new', 'New League')],
+      beforeCreate: () => pending,
+    });
+    await act(async () => {
+      const first = app.get().createLeague('New League');
+      await expect(app.get().createLeague('New League')).rejects.toThrow(/already being created/i);
+      await waitFor(() => expect(app.getCreateCalls()).toBe(1));
+      finish();
+      await first;
+    });
+    expect(app.get().leagueId).toBe('L-new');
+    expect(app.getBootstrapCalls()).toBe(1);
+  });
+
+  it('verifies a successful write with one fresh read, not a pre-write snapshot', async () => {
+    const oldLeague = league('L-old', 'Old League');
+    let finishRead!: (leagues: typeof oldLeague[]) => void;
+    const pending = new Promise<typeof oldLeague[]>((resolve) => { finishRead = resolve; });
+    const app = await mountLive({
+      createdId: 'L-new', initialLeagues: [oldLeague], bootstrapAfterCreate: [oldLeague, league('L-new', 'New League')],
+      bootstrapHandler: (readNumber) => readNumber === 1 ? pending : undefined,
+    });
+    let reload: Promise<void>;
+    await act(async () => { reload = app.get().reload(); });
+    expect(app.getBootstrapCalls()).toBe(1);
+
+    let create: Promise<void>;
+    await act(async () => { create = app.get().createLeague('New League'); });
+    await waitFor(() => expect(app.getCreateCalls()).toBe(1));
+    expect(app.getBootstrapCalls()).toBe(1); // Never overlap the pre-write request.
+
+    await act(async () => { finishRead([oldLeague]); await Promise.all([reload, create]); });
+    expect(app.get().leagueId).toBe('L-new');
+    expect(app.getBootstrapCalls()).toBe(2);
   });
 });
 
@@ -322,12 +387,51 @@ describe('createLeague reports failure instead of failing silently', () => {
     expect(app.get().leagues.map((l: any) => l.league_id)).toContain('L-new');
   });
 
-  it('throws a clear error when the league is created but never becomes visible', async () => {
+  it('returns false and requires verification when the league never becomes visible', async () => {
     // The RPC succeeds, but bootstrap never lists the new league - the state that
-    // produced "no error, just doesn't load".
+    // produced "no error, just doesn't load". The new contract preserves the
+    // acknowledged write and requires read-only verification instead of throwing
+    // or allowing a duplicate create.
     const app = await mountLive({ createdId: 'L-new', bootstrapAfterCreate: [] });
     const result = await app.create();
-    expect(result.rejected).toBe(true);
-    expect(result.message).toMatch(/could not be loaded/i);
+    expect(result.rejected).toBe(false);
+    expect(result.value).toBe(false);
+    expect(app.get().leagueChange).toMatchObject({
+      kind: 'create', phase: 'verificationRequired', acknowledged: true,
+    });
+    expect(app.getCreateCalls()).toBe(1);
+    // A second submission is refused without another create RPC.
+    await expect(app.get().createLeague('New League')).rejects.toThrow(/verify/i);
+    expect(app.getCreateCalls()).toBe(1);
+    // Read-only verification retries without repeating the create.
+    let verified: boolean | undefined;
+    await act(async () => { verified = await app.get().verifyLeagueChange(); });
+    expect(verified).toBe(false);
+    expect(app.getCreateCalls()).toBe(1);
+    expect(app.get().leagueChange).toMatchObject({ phase: 'verificationRequired' });
+  });
+
+  it('preserves an acknowledged create across a verification timeout and recovers without a second RPC', async () => {
+    const app = await mountLive({
+      createdId: 'L-new', bootstrapAfterCreate: [league('L-new', 'New League')],
+      bootstrapHandler: (readNumber) => {
+        if (readNumber === 2) throw new TypeError('Load failed');
+        return undefined;
+      },
+    });
+    const result = await app.create();
+    expect(result.rejected).toBe(false);
+    expect(result.value).toBe(false);
+    expect(app.get().leagueChange).toMatchObject({
+      kind: 'create', phase: 'verificationRequired', acknowledged: true,
+    });
+    expect(app.getCreateCalls()).toBe(1);
+    // Recovery is a directory read only.
+    let verified: boolean | undefined;
+    await act(async () => { verified = await app.get().verifyLeagueChange(); });
+    expect(verified).toBe(true);
+    expect(app.getCreateCalls()).toBe(1);
+    expect(app.get().leagueChange).toBeNull();
+    expect(app.get().leagueId).toBe('L-new');
   });
 });

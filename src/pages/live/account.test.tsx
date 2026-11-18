@@ -14,7 +14,7 @@
  * the live profile starts showing demo data again.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, screen, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -65,8 +65,11 @@ async function mountAccount(opts: {
         return { error: null };
       },
     },
-    rpc: async (fn: string) => {
+    rpc: async (fn: string, args?: Record<string, unknown>) => {
       rpcCalls.push(fn);
+      if (fn === 'ff_update_profile') {
+        return { data: { id: 'live-user', display_name: args?.p_display_name }, error: null };
+      }
       if (opts.bootstrapError) return { data: null, error: opts.bootstrapError };
       return { data: boot, error: null };
     },
@@ -143,6 +146,15 @@ describe('a signed-in user gets the live account screens', () => {
     const app = await mountAccount({ initialSession: session('live-user') });
     await screen.findByText('Live Person');
     expect(app.rpcCalls).toContain('ff_bootstrap');
+  });
+
+  it('saves the display name without starting another bootstrap', async () => {
+    const app = await mountAccount({ initialSession: session('live-user') });
+    await screen.findByText('Live Person');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'New Name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByRole('heading', { name: 'New Name' })).toBeTruthy();
+    expect(app.rpcCalls).toEqual(['ff_bootstrap', 'ff_update_profile']);
   });
 
   it('falls back to the email local-part before the profile arrives, still not demo', async () => {

@@ -1,0 +1,33 @@
+# Receipt transition — local preparation, not ready for cutover
+
+## Inventory
+
+The current Live provider routes these operations through the actor-bound receipt endpoint rather than calling these legacy endpoints directly: `ff_league_create`, `ff_squad_buy`, `ff_squad_sell`, `ff_squad_transfer`, `ff_squad_set_captains`, `ff_lineup_save`, and `ff_lineup_confirm`. Squad writes originate from `LiveSquad`, the live market and their sheets through `useLive`; create originates from `LiveLeagueForm`. Demo uses local state, not these RPCs. Design 026 additionally exposes `ff_league_create(text,numeric,text)`, `ff_squad_substitute` and `ff_squad_save_assignments`; they are not called by the current frontend but are legacy authenticated write entry points to cover at cutover. The legacy RPCs remain callable throughout the additive transition.
+
+Other authenticated write paths outside this receipt's scope include profile update; league join, archive, market, member, organizer and leadership settings; market-player edits; suggestions and review; seasons, fixtures and tournaments; match creation, revisions, lineups, cancellation, events, submission, result and review; notification read. Authentication uses Supabase Auth APIs. Bootstrap may create/update the caller profile. These are not made idempotent by this migration. Client table reads and storage are separate from the definer RPC write model. This inventory is based on local source, not current remote database inspection.
+
+## Stages and exact gate
+
+1. Review and test the additive migration and all security/retention details. Apply only in an isolated nonproduction environment; retain all old RPC permissions. Existing clients still work, but are **not protected** by receipts.
+2. Finish and test receipt-aware clients. They must generate a stable, cryptographically random operation UUID before registration; safely persist identity, intent and scope across reload/account changes; register the exact immutable payload; execute once; and use status/cancellation to settle ambiguous outcomes. Missing status is `unknown`, not failure. A cancellation tombstone may prevent delayed registration/execution, whereas cancellation waiting on an executing transaction may return the committed result. Never automatically replay an uncertain squad action. Securely handle loss of local storage, sign-out and re-authentication. The Live callers now use the local receipt integration. Retries are explicit, and reuse the persisted actor, ID, kind, and payload; an unknown receipt is never treated as final.
+3. Release and observe the new client only after confirming backend readiness; establish a clear legacy client upgrade/refresh and support plan. Observe endpoint traffic and scheduled jobs, coordinate a maintenance/drain window, and account for queued or delayed legacy HTTP requests as well as active database transactions. A simple database activity snapshot or time delay does not prove no old request can still arrive. Approve a mechanism that excludes old clients or accepts this cutover boundary explicitly.
+4. Only after the previous gates and authorization, review an independently versioned cutover migration derived from `supabase/design/proposed/20261118010000_operation_receipts_cutover.sql`. It is intentionally **not** in the executable migration directory. It revokes client execution of legacy entry points while retaining the receipt executor's access; it will break outdated clients. Verify effective grants, exposed alternative write paths, deployed RPC definitions, nested owner privileges and schema compatibility first. The draft does not handle unlisted custom or administrative writers.
+5. Test receipt-backed create and each squad action with synthetic accounts and an approved recovery plan; monitor pending/unknown receipts, pool errors and compatibility failures. Do not delete or purge receipts until a reviewed retention and delayed-request policy exists. Recovery and rollback must not reopen an unsafe legacy write while unresolved requests can arrive. Regranting old RPCs restores old clients but forfeits the new guarantee.
+
+Same operation ID, actor and payload can be safely deduplicated by the new endpoints; different IDs, legacy RPCs and other write APIs are not semantically deduplicated. A league name is not a uniqueness key. Receipt result access checks current membership; this may prevent recovery after a user loses membership. Privacy, quota, long-term retention, operation discovery across devices and outage support remain open. A missing or invisible row is not proof that a request cannot arrive later.
+
+## Current readiness
+
+The local migration is a transition prototype, not a release recommendation. The Live write paths are migrated locally and have local component, browser-fixture, and both-schema receipt tests. Staged feature detection is not implemented, no mandatory cutover is active, and hosted-backend validation is still required. It does not fix PostgREST pool exhaustion. No production SQL has been executed.
+
+
+## Account-switch safeguard added locally
+
+`ff_operation_for_actor` verifies that the request JWT actor equals the originally intended actor before delegating to the existing receipt protocol. This closes the race in which the shared SDK session changes after a browser check but before the database receives the request. It does not replace database authorization and does not bind or protect the legacy endpoints. The frontend transport and IndexedDB coordinator are wired into LiveProvider for the listed operations; legacy RPCs remain callable by older clients. Do not enable the proposed cutover.
+
+
+## Legacy ambiguity and local storage
+
+The old create marker remains handled separately and cannot be converted to a receipt. Old squad leases lived only in memory, so after a reload there is no reliable way to discover an already-delayed legacy write from this browser. Neither a fresh squad read nor a newly generated receipt ID proves that such a request cannot later arrive. A real release must arrange a coordinated legacy request drain and upgrade boundary; this local implementation does not solve it. IndexedDB may be cleared or evicted, and operations cannot currently be discovered on another device. Receipt payloads and actor IDs are stored locally, and receipt retention, browser storage privacy and quota require review. An incomplete older IndexedDB envelope cannot be retried but can be cancelled with the same ID.
+
+The local design-026 `ff_lineup_save` wrapper uses a text status fallback; the prior JSON fallback raised 22P02 when executed. This is a correction to the unpromoted design draft, not a production migration.

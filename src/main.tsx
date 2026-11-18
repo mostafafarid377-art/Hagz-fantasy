@@ -48,11 +48,13 @@ function LanguageDirection(){
  */
 function LiveData({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
-  if (!isSupabaseConfigured || !auth.session) return <>{children}</>;
+  if (!isSupabaseConfigured || !auth.session || !auth.bootstrapSession) return <>{children}</>;
   return (
     <LiveProvider
       key={auth.session.user.id}
       userId={auth.session.user.id}
+      bootstrapSession={auth.bootstrapSession}
+      retryInitialBootstrap={auth.retryBootstrap}
       initialLeagues={auth.leagues}
       directoryReady={Boolean(auth.profile || auth.error)}
       initialDirectoryLoaded={Boolean(auth.profile)}

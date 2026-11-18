@@ -4,7 +4,7 @@
 // states are explicit: a leader with no league must see "create one", not a
 // blank panel, and a refused action must say why.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -73,13 +73,37 @@ export function Success({ message }: { message: string }) {
   );
 }
 
+function LeagueChangeNotice({ onVerified }: { onVerified?: () => void }) {
+  const { t } = useTranslation();
+  const { leagueChange, verifyLeagueChange, hasLeagueReceipt, retryLeagueReceipt, cancelLeagueReceipt } = useLive();
+  if (!leagueChange) return null;
+  if (leagueChange.phase !== 'verificationRequired') {
+    return <p className="notice" role="status">{t(leagueChange.phase === 'saving' ? 'Saving league change…' : 'Checking your leagues…')}</p>;
+  }
+  return <div className="panel error-panel" role="alert">
+    <AlertCircle size={16} />
+    <p>{t(leagueChange.acknowledged
+      ? 'The server accepted your league change, but it could not be verified. Check your leagues without submitting again.'
+      : 'Your league change may have been applied. Check your leagues and do not submit it again until confirmed.')}</p>
+    <button type="button" className="button button-small" onClick={async () => {
+      if (await verifyLeagueChange()) onVerified?.();
+    }}>{t('Check leagues')}</button>
+    {hasLeagueReceipt && <>
+      <p>{t('The operation is unresolved. Checking does not submit it again. You may retry the same operation or cancel it safely.')}</p>
+      <button type="button" className="button button-small" onClick={async () => { if (await retryLeagueReceipt()) onVerified?.(); }}>{t('Retry same operation')}</button>
+      <button type="button" className="button button-small" onClick={() => void cancelLeagueReceipt()}>{t('Cancel operation')}</button>
+    </>}
+  </div>;
+}
+
 export function LiveDashboard() {
   const { t } = useTranslation();
   const live = useLive();
   const auth = useAuth();
 
-  if (live.loading) return <Loading />;
+  if (live.loading) return <><LeagueChangeNotice /><Loading /></>;
   if (live.error && !live.league) return <>
+    <LeagueChangeNotice />
     <ErrorNote message={live.error} onRetry={() => void live.reload()} />
     <BootstrapDiagnosticsPanel />
   </>;
@@ -90,6 +114,7 @@ export function LiveDashboard() {
   if (live.leagues.length > 0 && !live.league) {
     return (
       <>
+        <LeagueChangeNotice />
         <PageTitle eyebrow="DASHBOARD" title="Could not open your league"
           description="Your league exists, but its data could not be loaded." />
         <ErrorNote
@@ -111,6 +136,7 @@ export function LiveDashboard() {
   if (!live.league) {
     return (
       <>
+        <LeagueChangeNotice />
         <PageTitle eyebrow="WELCOME" title="Fantasy Friends" description="Create a league or join one with an invite code." />
         <Empty title="No league yet" description="A league is where your friends, your market and your fixtures live."
           to="/create-league" action="Create League" />
@@ -197,6 +223,7 @@ export function LiveDashboard() {
    */
   return (
     <>
+      <LeagueChangeNotice />
       {live.error && <>
         <ErrorNote message={live.error} onRetry={() => void live.reload()} />
         <BootstrapDiagnosticsPanel />
@@ -544,8 +571,8 @@ export function LiveLeagueOverview() {
     } finally { setDeleting(false); }
   }
 
-  if (live.loading) return <Loading />;
-  if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
+  if (live.loading) return <><LeagueChangeNotice /><Loading /></>;
+  if (!live.league) return <><LeagueChangeNotice /><Empty title="Join or create a league" to="/create-league" action="Create League" /></>;
 
   const act = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
@@ -559,7 +586,8 @@ export function LiveLeagueOverview() {
         <Link className="button" to="/join-league">{t('Join League')}</Link>
       </PageTitle>
 
-      {live.error && <ErrorNote message={live.error} />}
+      <LeagueChangeNotice />
+      {live.error && !deleteError && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
 
       <div className="league-hero panel">
         <div className="league-logo large">{live.league.name.slice(0, 2).toUpperCase()}</div>
@@ -607,19 +635,19 @@ export function LiveLeagueOverview() {
                           {m.user_id === live.myUserId ? <small>{t('You')}</small> : (
                             <div className="row-actions">
                               <button className="button button-small button-outline"
-                                disabled={busy === m.user_id}
+                                disabled={Boolean(live.leagueChange) || busy === m.user_id}
                                 onClick={() => void act(m.user_id, () =>
                                   live.setOrganizer(m.user_id, !m.is_organizer))}>
                                 {t(m.is_organizer ? 'Remove organizer' : 'Make organizer')}
                               </button>
                               <button className="button button-small button-outline"
-                                disabled={busy === `${m.user_id}-s`}
+                                disabled={Boolean(live.leagueChange) || busy === `${m.user_id}-s`}
                                 onClick={() => void act(`${m.user_id}-s`, () =>
                                   live.setMember(m.user_id, undefined, m.status === 'active' ? 'inactive' : 'active'))}>
                                 {t(m.status === 'active' ? 'Deactivate' : 'Reactivate')}
                               </button>
                               <button className="button button-small"
-                                disabled={busy === `${m.user_id}-l` || m.status !== 'active'}
+                                disabled={Boolean(live.leagueChange) || busy === `${m.user_id}-l` || m.status !== 'active'}
                                 onClick={() => {
                                   if (confirm(t('Make this member the league leader? You will become a manager.'))) {
                                     void act(`${m.user_id}-l`, () => live.transferLeadership(m.user_id));
@@ -644,7 +672,7 @@ export function LiveLeagueOverview() {
           <SectionHead eyebrow="LEADER TOOLS" title="League settings" />
           <div className="settings-row">
             <span>{t('Transfer market')} · {t(live.league.market_open ? 'Open' : 'Closed')}</span>
-            <button className="button button-outline" disabled={busy === 'market'}
+            <button className="button button-outline" disabled={Boolean(live.leagueChange) || busy === 'market'}
               onClick={() => void act('market', () => live.setMarketOpen(!live.league!.market_open))}>
               {t(live.league.market_open ? 'Close market' : 'Open market')}
             </button>
@@ -667,10 +695,10 @@ export function LiveLeagueOverview() {
           </p>
           {confirmingDelete ? (
             <div className="button-row">
-              <button className="button danger" disabled={deleting} onClick={() => void deleteLeague()}>
+              <button className="button danger" disabled={Boolean(live.leagueChange) || deleting} onClick={() => void deleteLeague()}>
                 {deleting ? t('Deleting…') : t('Yes, delete this league')}
               </button>
-              <button className="button button-outline" disabled={deleting}
+              <button className="button button-outline" disabled={Boolean(live.leagueChange) || deleting}
                 onClick={() => { setConfirmingDelete(false); setDeleteError(''); }}>
                 {t('Cancel')}
               </button>
@@ -696,27 +724,37 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const submitting = useRef(false);
+  const formScope = useRef(0);
+  useLayoutEffect(() => () => { formScope.current += 1; }, [join]);
+  const scope = formScope.current;
+  const openVerifiedLeague = () => {
+    if (scope === formScope.current) navigate('/league', { replace: true });
+  };
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    // These RPCs require a profile. Don't race the initial bootstrap or accept
+    // another submit before React has had a chance to disable the button.
+    if (!auth.profile || live.leagueChange || submitting.current) return;
+    submitting.current = true;
     setError(''); setBusy(true);
     try {
-      if (join) await live.joinLeague(code.trim());
-      else await live.createLeague(name.trim());
-      await auth.refresh();
-      // Confirm the action by going to the league. Before this the form stayed put
-      // after a successful create, so "nothing happened" was indistinguishable from
-      // a failure - the user's report was that it "just doesn't load".
-      navigate('/league', { replace: true });
+      const verified = await (join ? live.joinLeague(code.trim()) : live.createLeague(name.trim()));
+      if (verified) openVerifiedLeague();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t('Could not complete that request.'));
-    } finally { setBusy(false); }
+    } finally { submitting.current = false; setBusy(false); }
   }
 
   return (
     <>
       <PageTitle eyebrow="YOUR COMMUNITY" title={join ? 'Join a league' : 'Create your league'}
         description={join ? 'Enter an invite code from your league leader.' : 'Make a home for your football community.'} />
+      {!auth.profile && (auth.error
+        ? <ErrorNote message={auth.error} onRetry={() => void auth.retryBootstrap()} />
+        : <Loading />)}
+      <LeagueChangeNotice onVerified={live.leagueChange?.kind === (join ? 'join' : 'create') ? openVerifiedLeague : undefined} />
       <form className="panel form-panel narrow" onSubmit={submit}>
         {join ? (
           <label>{t('League code')}
@@ -730,7 +768,7 @@ export function LiveLeagueForm({ join = false }: { join?: boolean }) {
           </label>
         )}
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
-        <button className="button" disabled={busy || (join ? !code : !name)}>
+        <button className="button" disabled={busy || Boolean(live.leagueChange) || !auth.profile || (join ? !code : !name)}>
           {busy ? t('Please wait…') : t(join ? 'Join league' : 'Create league')}
         </button>
         <Link className="text-link" to={join ? '/create-league' : '/join-league'}>

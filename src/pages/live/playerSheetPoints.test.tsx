@@ -25,7 +25,7 @@ const points = (lastGame: Record<string, number>, season: Record<string, number>
 });
 function mount(snapshot: PointsSnapshot) {
   live.current = {
-    loading: false, leagueId: 'league', league: { market_open: true }, players: [], points: snapshot,
+    loading: false, leagueId: 'league', league: { market_open: true }, players: [], points: snapshot, partialFailures: [],
     squad: { players: [player('a', 'Alice', 1), player('b', 'Bob', 2)], formation: '4-3-3', captain_id: null, vice_captain_id: null, budget: 100, spent: 10 },
   };
   render(<MemoryRouter><LiveSquad /></MemoryRouter>);

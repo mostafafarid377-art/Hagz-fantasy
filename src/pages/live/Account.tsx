@@ -46,7 +46,7 @@ export function LiveProfile() {
   async function save(event: React.FormEvent) {
     event.preventDefault();
     const next = name.trim();
-    if (!next || next === current) return;
+    if (busy || !auth.profile || !next || next === current) return;
     setBusy(true); setError(''); setSaved(false);
     try {
       await auth.setDisplayName(next);
@@ -75,7 +75,7 @@ export function LiveProfile() {
         <Link to="/settings" className="button button-outline">{t('Settings')}</Link>
       </div>
 
-      {auth.error && <ErrorNote message={auth.error} onRetry={() => void auth.refresh()} />}
+      {auth.error && <ErrorNote message={auth.error} onRetry={() => void auth.retryBootstrap()} />}
 
       <div className="panel narrow form-panel section-spacer">
         <SectionHead eyebrow="YOUR DETAILS" title="Display name" />
@@ -91,7 +91,7 @@ export function LiveProfile() {
           </label>
           {saved && <p className="notice" role="status"><Check size={14} /> {t('Saved')}</p>}
           {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
-          <button className="button" disabled={busy || !name.trim() || name.trim() === current}>
+          <button className="button" disabled={busy || !auth.profile || !name.trim() || name.trim() === current}>
             {busy ? t('Please wait…') : t('Save changes')}
           </button>
         </form>

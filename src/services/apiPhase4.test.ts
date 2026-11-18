@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
 vi.mock('../lib/supabase', () => ({ getSupabase: () => ({ rpc }) }));
 
-import { bootstrap, matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
+import { createBootstrapSession, matches, saveMatchLineups, submitSuggestionBatch, transfers } from './api';
 import {
   createBootstrapDiagnosticFetch, getBootstrapDiagnostics, getBootstrapFetchDiagnostics,
   makeSanitizedBootstrapReport,
 } from './bootstrapDiagnostics';
+
+const boot = { profile: { id: 'u1', display_name: 'Player' }, leagues: [] };
 
 describe('Phase 4 Live RPC adapters', () => {
   beforeEach(() => { rpc.mockReset(); });
@@ -64,7 +66,49 @@ describe('Phase 4 Live RPC adapters', () => {
     expect(requestSignal).not.toBe(caller.signal);
     caller.abort();
     expect(requestSignal?.aborted).toBe(true);
-    await expect(pending).rejects.toThrow('aborted');
+    await expect(pending).rejects.toMatchObject({ code: 'network', detail: 'cancelled' });
+  });
+
+  it('shares a single bootstrap promise, POST, deadline, and diagnostic record', async () => {
+    let resolve!: (response: { data: typeof boot; error: null }) => void;
+    const pending = new Promise<{ data: typeof boot; error: null }>(
+      (done) => { resolve = done; },
+    );
+    const retry = vi.fn();
+    const abortSignal = vi.fn().mockReturnValue(pending);
+    rpc.mockReturnValueOnce({ retry, abortSignal }).mockResolvedValue({ data: boot, error: null });
+    const bootstrap = createBootstrapSession('u1', { displayName: 'Player' });
+    const first = bootstrap.load();
+    expect(bootstrap.load()).toBe(first);
+    expect(bootstrap.load({ retry: true })).toBe(first);
+
+    await Promise.resolve();
+    expect(rpc.mock.calls).toEqual([['ff_bootstrap', { p_display_name: 'Player' }]]);
+    expect(retry.mock.calls).toEqual([[false]]);
+    expect(abortSignal).toHaveBeenCalledTimes(1);
+    resolve({ data: boot, error: null });
+    await expect(first).resolves.toBe(boot);
+    expect(getBootstrapDiagnostics().slice(-1)[0]).toMatchObject({
+      maxConcurrentBootstrapAttempts: 1, outcome: 'success',
+    });
+
+    await expect(bootstrap.load()).resolves.toBe(boot);
+    expect(rpc).toHaveBeenLastCalledWith('ff_bootstrap', { p_display_name: null });
+  });
+
+  it('requires user recovery after PGRST003 and does not replay a queued directory refresh', async () => {
+    rpc.mockResolvedValueOnce({ data: null, status: 504, error: { code: 'PGRST003', message: 'pool timeout' } });
+    rpc.mockResolvedValueOnce({ data: boot, error: null });
+    const bootstrap = createBootstrapSession('u1');
+
+    const failed = expect(bootstrap.load()).rejects.toMatchObject({ detail: 'PGRST003' });
+    const queued = expect(bootstrap.load({ afterPending: true })).rejects.toMatchObject({ detail: 'PGRST003' });
+    await Promise.all([failed, queued]);
+    await expect(bootstrap.load()).rejects.toMatchObject({ detail: 'PGRST003' });
+    expect(rpc).toHaveBeenCalledTimes(1);
+
+    await expect(bootstrap.load({ retry: true })).resolves.toBe(boot);
+    expect(rpc).toHaveBeenCalledTimes(2);
   });
 
   it('times out a read that never settles and aborts its request', async () => {
@@ -74,7 +118,7 @@ describe('Phase 4 Live RPC adapters', () => {
       requestSignal = signal;
       return new Promise(() => {});
     } });
-    const pending = expect(bootstrap(undefined, { timeoutMs: 25 })).rejects.toMatchObject({
+    const pending = expect(createBootstrapSession('u1', { timeoutMs: 25 }).load()).rejects.toMatchObject({
       code: 'network', detail: 'timeout',
     });
 
@@ -97,7 +141,7 @@ describe('Phase 4 Live RPC adapters', () => {
       )),
     });
 
-    const pendingBootstrap = bootstrap();
+    const pendingBootstrap = createBootstrapSession('u1').load();
     const bootstrapFailure = expect(pendingBootstrap).rejects.toMatchObject({ code: 'network', detail: 'timeout' });
     await vi.advanceTimersByTimeAsync(15_000);
     await bootstrapFailure;
@@ -111,9 +155,9 @@ describe('Phase 4 Live RPC adapters', () => {
   });
 
   it('records a successful bootstrap attempt with UTC timestamps and elapsed time', async () => {
-    rpc.mockResolvedValue({ data: { profile: { id: 'u1', display_name: 'Player' }, leagues: [] }, error: null });
+    rpc.mockResolvedValue({ data: boot, error: null });
 
-    await bootstrap();
+    await createBootstrapSession('u1').load();
 
     const attempt = getBootstrapDiagnostics()[getBootstrapDiagnostics().length - 1]!;
     expect(attempt.diagnosticId).toMatch(/^[0-9a-f-]{32,36}$/i);
@@ -128,13 +172,18 @@ describe('Phase 4 Live RPC adapters', () => {
   it('records timeout and successful retry as distinct attempts', async () => {
     vi.useFakeTimers();
     rpc.mockReturnValueOnce({ abortSignal: () => new Promise(() => {}) });
-    rpc.mockResolvedValueOnce({ data: { profile: { id: 'u1', display_name: 'Player' }, leagues: [] }, error: null });
+    rpc.mockResolvedValueOnce({ data: boot, error: null });
 
-    const first = bootstrap(undefined, { timeoutMs: 25 });
+    const bootstrap = createBootstrapSession('u1', { timeoutMs: 25 });
+    const first = bootstrap.load();
     const firstFailure = expect(first).rejects.toMatchObject({ code: 'network', detail: 'timeout' });
     await vi.advanceTimersByTimeAsync(25);
     await firstFailure;
-    await bootstrap();
+    await expect(bootstrap.load()).rejects.toMatchObject({ detail: 'timeout' });
+    expect(rpc).toHaveBeenCalledTimes(1);
+
+    await expect(bootstrap.load({ retry: true })).resolves.toBe(boot);
+    expect(rpc).toHaveBeenCalledTimes(2);
 
     const [timedOut, retried] = getBootstrapDiagnostics().slice(-2);
     expect(timedOut.diagnosticId).not.toBe(retried.diagnosticId);
@@ -147,11 +196,12 @@ describe('Phase 4 Live RPC adapters', () => {
 
   it('distinguishes authentication failures and keeps raw error text out of reports', async () => {
     rpc.mockResolvedValueOnce({ data: null, error: { code: 'PGRST301', message: 'JWT expired for private@example.test' } });
-    await expect(bootstrap()).rejects.toMatchObject({ code: 'notAuthenticated' });
+    const bootstrap = createBootstrapSession('u1');
+    await expect(bootstrap.load()).rejects.toMatchObject({ code: 'notAuthenticated' });
     expect(getBootstrapDiagnostics()[getBootstrapDiagnostics().length - 1]?.errorCategory).toBe('authentication');
 
     rpc.mockRejectedValueOnce(new TypeError('Bearer private-token-value user@example.test'));
-    await expect(bootstrap()).rejects.toThrow();
+    await expect(bootstrap.load()).rejects.toThrow();
     const report = makeSanitizedBootstrapReport();
     expect(report).not.toContain('private-token-value');
     expect(report).not.toContain('user@example.test');

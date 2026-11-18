@@ -19,20 +19,12 @@
  * No network, no real project: the client is mocked at `lib/supabase`.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, screen, act, cleanup, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
 afterEach(() => { cleanup(); vi.resetModules(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-
-/**
- * Holds the `useAuth` hook for the nested <LiveProviderGate> below. Declared at
- * module scope because the gate is rendered inside the tree, after the dynamic
- * import of the provider module.
- */
-const useAuthRef: { current: (() => {
-  session: { user: { id: string } } | null; profile?: { id?: string } | null; leagues?: any[]; error?: string | null;
-}) | null } = { current: null };
 
 type Listener = (event: string, session: unknown) => void;
 
@@ -162,21 +154,25 @@ async function mountApp(opts: {
 async function mountDashboardDecision(opts: {
   initialSession?: unknown; bootstrapDelayMs?: number; bootstrapError?: { code: string; message: string } | null;
   emitInitialSession?: boolean;
-  bootstrapHandler?: (call: number) => Promise<{ data: unknown; error: unknown }>;
+  bootstrapHandler?: (call: number) => Promise<{ data: unknown; error: unknown; status?: number }>;
+  getSessionHandler?: () => Promise<unknown>;
+  realDashboard?: boolean;
   path?: string;
 } = {}) {
   vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
   vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_abcdefghijklmnop');
   vi.resetModules();
 
-  let bootstrapCalls = 0;
+  const bootstrapArgs: Array<Record<string, unknown> | undefined> = [];
   let nextGetSession: unknown = opts.initialSession ?? null;
   let nextSignIn: { session?: unknown; error?: unknown } = { session: session('live-user') };
   const subs: Listener[] = [];
 
   const client = {
     auth: {
-      getSession: async () => ({ data: { session: nextGetSession }, error: null }),
+      getSession: async () => ({
+        data: { session: opts.getSessionHandler ? await opts.getSessionHandler() : nextGetSession }, error: null,
+      }),
       onAuthStateChange: (cb: Listener) => {
         subs.push(cb);
         if (opts.emitInitialSession) cb('INITIAL_SESSION', nextGetSession);
@@ -196,13 +192,12 @@ async function mountDashboardDecision(opts: {
         return { error: null };
       },
     },
-    rpc: async (fn: string) => {
-      if (fn === 'ff_bootstrap') {
-        bootstrapCalls += 1;
-        if (opts.bootstrapHandler) return opts.bootstrapHandler(bootstrapCalls);
-      }
+    rpc: async (fn: string, args?: Record<string, unknown>) => {
+      if (fn !== 'ff_bootstrap') return { data: [], error: null };
+      bootstrapArgs.push(args);
+      if (opts.bootstrapHandler) return opts.bootstrapHandler(bootstrapArgs.length);
       if (opts.bootstrapDelayMs) await new Promise((r) => setTimeout(r, opts.bootstrapDelayMs));
-      if (opts.bootstrapError && fn === 'ff_bootstrap') return { data: null, error: opts.bootstrapError };
+      if (opts.bootstrapError) return { data: null, error: opts.bootstrapError };
       return { data: demoLeagues, error: null };
     },
   };
@@ -214,10 +209,10 @@ async function mountDashboardDecision(opts: {
     PLAYER_IMAGES_BUCKET: 'player-images',
   }));
 
-  // Stub the live dashboard BEFORE Routes is imported: rendering the real one needs
-  // the full live dataset, and the decision under test is which branch of
-  // DashboardRoute is taken, not what the live screen paints.
-  vi.doMock('./League', async () => {
+  // Most tests only check the mode decision. The recovery test clicks the
+  // real dashboard's Try again button rather than calling the service directly.
+  if (opts.realDashboard) vi.doUnmock('./League');
+  else vi.doMock('./League', async () => {
     const actual = await vi.importActual<Record<string, unknown>>('./League');
     return { ...actual, LiveDashboard: () => <div data-testid="live-dashboard">LIVE</div> };
   });
@@ -228,32 +223,34 @@ async function mountDashboardDecision(opts: {
   const { LiveProvider } = await import('../../hooks/useLive');
   const { DashboardRoute } = await import('./Routes');
 
-  let currentAuthState: ReturnType<NonNullable<typeof useAuthRef.current>> | null = null;
+  let currentAuthState: ReturnType<typeof useAuth> | null = null;
   /** Mirrors main.tsx's <LiveData>: the live screens require a LiveProvider. */
   function LiveProviderGate({ children }: { children: React.ReactNode }) {
-    const auth = useAuthRef.current!();
+    const auth = useAuth();
     currentAuthState = auth;
-    if (!auth.session) return <>{children}</>;
-    return <LiveProvider userId={auth.session.user.id} initialLeagues={auth.leagues ?? []}
+    if (!auth.session || !auth.bootstrapSession) return <>{children}</>;
+    return <LiveProvider key={auth.session.user.id} userId={auth.session.user.id} initialLeagues={auth.leagues}
+      bootstrapSession={auth.bootstrapSession} retryInitialBootstrap={auth.retryBootstrap}
       directoryReady={Boolean(auth.profile || auth.error)} initialDirectoryLoaded={Boolean(auth.profile)}
-      directoryError={auth.profile ? null : auth.error ?? null}>
+      directoryError={auth.profile ? null : auth.error}>
       {children}
     </LiveProvider>;
   }
-  useAuthRef.current = useAuth;
 
   render(
-    <MemoryRouter initialEntries={[opts.path ?? '/dashboard']}>
-      <AuthProvider>
-        <AppModeProvider>
-          <DemoProvider>
-            <LiveProviderGate>
-              <DashboardRoute demo={() => <div data-testid="demo-dashboard">DEMO ACCOUNT</div>} />
-            </LiveProviderGate>
-          </DemoProvider>
-        </AppModeProvider>
-      </AuthProvider>
-    </MemoryRouter>,
+    <StrictMode>
+      <MemoryRouter initialEntries={[opts.path ?? '/dashboard']}>
+        <AuthProvider>
+          <AppModeProvider>
+            <DemoProvider>
+              <LiveProviderGate>
+                <DashboardRoute demo={() => <div data-testid="demo-dashboard">DEMO ACCOUNT</div>} />
+              </LiveProviderGate>
+            </DemoProvider>
+          </AppModeProvider>
+        </AuthProvider>
+      </MemoryRouter>
+    </StrictMode>,
   );
 
   return {
@@ -274,7 +271,8 @@ async function mountDashboardDecision(opts: {
       await act(async () => { for (const cb of [...subs]) await cb(event, s); });
     },
     listenerCount: () => subs.length,
-    bootstrapCalls: () => bootstrapCalls,
+    bootstrapCalls: () => bootstrapArgs.length,
+    bootstrapArgs,
     authState: () => currentAuthState!,
   };
 }
@@ -311,21 +309,78 @@ describe('successful login enters Live mode', () => {
 });
 
 describe('bootstrap failures and duplicate session events', () => {
-  it('shares the in-flight bootstrap for INITIAL_SESSION and the session restore', async () => {
+  it('makes one request across Strict Mode, session restore, and overlapping auth events', async () => {
+    let finish!: (result: { data: unknown; error: null }) => void;
+    const pending = new Promise<{ data: unknown; error: null }>((resolve) => { finish = resolve; });
     const app = await mountDashboardDecision({
       initialSession: session('live-user'),
       emitInitialSession: true,
-      bootstrapHandler: async (call) => {
-        if (call > 1) throw new TypeError('Load failed');
-        return { data: demoLeagues, error: null };
-      },
+      bootstrapHandler: () => pending,
     });
-
-    await waitFor(() => expect(app.authState().profile?.id).toBe('live-user'));
+    await waitFor(() => expect(app.bootstrapCalls()).toBe(1));
+    await app.emit('SIGNED_IN', session('live-user'));
+    await app.emit('TOKEN_REFRESHED', { ...session('live-user'), access_token: 'new-token' });
     expect(app.bootstrapCalls()).toBe(1);
+
+    await act(async () => { finish({ data: demoLeagues, error: null }); });
+    expect(app.bootstrapCalls()).toBe(1);
+    expect(app.authState().session?.access_token).toBe('new-token');
+    expect(app.authState().profile?.id).toBe('live-user');
     expect(app.authState().error).toBeNull();
     expect(screen.getByTestId('live-dashboard')).toBeTruthy();
     expect(screen.queryByTestId('demo-dashboard')).toBeNull();
+  });
+
+  it('does not restart after 504 auth events, and recovers from the dashboard Try again button', async () => {
+    const app = await mountDashboardDecision({
+      initialSession: session('live-user'),
+      realDashboard: true,
+      bootstrapHandler: async (call) => call === 1
+        ? { data: null, status: 504, error: { code: 'PGRST003', message: 'pool timeout' } }
+        : { data: demoLeagues, error: null },
+    });
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    await app.emit('TOKEN_REFRESHED', session('live-user'));
+    await app.emit('SIGNED_IN', session('live-user'));
+    await act(async () => { await app.authState().refresh(); });
+    expect(app.bootstrapCalls()).toBe(1);
+    expect(app.authState().session?.user.id).toBe('live-user');
+    expect(app.authState().profile).toBeNull();
+
+    fireEvent.click(retry);
+    expect(await screen.findByRole('heading', { name: /welcome back/i })).toBeTruthy();
+    expect(app.bootstrapCalls()).toBe(2);
+    expect(app.authState().profile?.id).toBe('live-user');
+    expect(app.authState().error).toBeNull();
+    expect(screen.queryByTestId('demo-dashboard')).toBeNull();
+  });
+
+  it("does not carry the previous user's retry gate into a new user's session", async () => {
+    const app = await mountDashboardDecision({
+      initialSession: session('live-user'),
+      bootstrapHandler: async (call) => call === 1
+        ? { data: null, status: 504, error: { code: 'PGRST003' } }
+        : { data: { profile: { id: 'new-user', display_name: 'New Player' }, leagues: [] }, error: null },
+    });
+    await waitFor(() => expect(app.authState().error).toBeTruthy());
+    const newSession = session('new-user');
+    await app.emit('SIGNED_IN', { ...newSession, user: { ...newSession.user, user_metadata: { display_name: 'New Player' } } });
+
+    expect(app.authState().session?.user.id).toBe('new-user');
+    expect(app.authState().profile?.id).toBe('new-user');
+    expect(app.authState().error).toBeNull();
+    expect(app.bootstrapArgs).toEqual([{ p_display_name: null }, { p_display_name: 'New Player' }]);
+  });
+
+  it('ignores a delayed session restore for a different user', async () => {
+    let finish!: (session: unknown) => void;
+    const stale = new Promise((resolve) => { finish = resolve; });
+    const app = await mountDashboardDecision({ getSessionHandler: () => stale });
+    await app.emit('SIGNED_IN', session('live-user'));
+    await act(async () => { finish(session('stale-user')); });
+    expect(app.bootstrapCalls()).toBe(1);
+    expect(app.authState().session?.user.id).toBe('live-user');
+    expect(app.authState().profile?.id).toBe('live-user');
   });
 
   it('retries an initial transport failure on the next auth refresh', async () => {
