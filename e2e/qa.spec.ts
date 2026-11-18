@@ -4,6 +4,9 @@ async function fresh(page: Page) {
   await page.goto('/dashboard');
   await page.evaluate(() => localStorage.clear());
   await page.reload();
+  // Wait for DemoProvider's initial persistence effect before tests edit the
+  // saved fixture; otherwise a late effect can overwrite the test's changes.
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('fantasy-friends-demo-v1'))).not.toBeNull();
 }
 async function role(page: Page, value: 'manager' | 'leader') {
   await page.goto('/settings'); await page.getByLabel('Demo role').selectOption(value);
@@ -219,28 +222,29 @@ test('responsive English and Arabic pages have no page overflow or critical brow
   const sizes=[{width:390,height:844},{width:768,height:1024},{width:1440,height:900}];
   const routes=['/','/login','/signup','/dashboard','/league','/create-league','/join-league','/market','/players/p1','/squad','/squad-builder','/transfers','/suggest','/fixtures','/match-center','/match-center/gw09','/head-to-head','/standings','/statistics','/points','/profile','/settings','/notifications'];
   for(const language of ['en','ar']){
-    await page.goto('/settings',{waitUntil:'networkidle'});
+    await page.goto('/settings',{waitUntil:'domcontentloaded'});
     if(language==='ar') await page.getByLabel('Language',{exact:true}).selectOption('ar');
     await expect(page.locator('html')).toHaveAttribute('dir',language==='ar'?'rtl':'ltr');
     for(const size of sizes){
       await page.setViewportSize(size);
       for(const route of routes){
-        await page.goto(route,{waitUntil:'networkidle'});
+        await page.goto(route,{waitUntil:'domcontentloaded'});
+        await expect(page.locator('#root')).not.toBeEmpty();
+        await page.evaluate(() => document.fonts.ready);
         const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,inner:window.innerWidth}));
         expect(dimensions.scroll,`${language} ${size.width}x${size.height} ${route}`).toBeLessThanOrEqual(dimensions.inner);
-        await expect(page.locator('#root')).not.toBeEmpty();
       }
-      await page.goto('/settings',{waitUntil:'networkidle'});
+      await page.goto('/settings',{waitUntil:'domcontentloaded'});
       await page.getByLabel(language==='ar'?'الدور التجريبي':'Demo role',{exact:true}).selectOption('leader');
-      await page.goto('/management',{waitUntil:'networkidle'});
+      await page.goto('/management',{waitUntil:'domcontentloaded'});
       await page.getByRole('button',{name:language==='ar'?'إنشاء لاعب':'Create player'}).click();
       await expect(page.locator('.form-panel')).toBeVisible();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth),`leader form ${language} ${size.width}`).toBeLessThanOrEqual(size.width);
-      await page.goto('/approvals',{waitUntil:'networkidle'});
+      await page.goto('/approvals',{waitUntil:'domcontentloaded'});
       await page.locator('.manage-row').filter({hasText:'Hady Wael'}).getByRole('button',{name:language==='ar'?'رفض':'Reject'}).click();
       await expect(page.locator('textarea')).toBeVisible();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth),`review form ${language} ${size.width}`).toBeLessThanOrEqual(size.width);
-      await page.goto('/settings',{waitUntil:'networkidle'});
+      await page.goto('/settings',{waitUntil:'domcontentloaded'});
       await page.getByLabel(language==='ar'?'الدور التجريبي':'Demo role',{exact:true}).selectOption('manager');
     }
   }
