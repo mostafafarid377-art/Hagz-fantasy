@@ -17,16 +17,16 @@ const league = {
   budget: 100, market_open: true, archived: false, is_leader: false, is_organizer: false,
 };
 
-const squadPlayer = (n: number, position: string, slot = n) => ({
+const squadPlayer = (n: number, position: string) => ({
   league_player_id: `lp${n}`, name: `P${n}`, position, price: 5, rating: 70,
-  image_path: null, image_url: null, active: true, slot, captain: false,
+  image_path: null, image_url: null, active: true, slot: n, captain: false,
 });
 
 const FULL_SQUAD = [
-  squadPlayer(1, 'GK', 1), squadPlayer(2, 'GK', 12),
-  squadPlayer(3, 'DEF', 2), squadPlayer(4, 'DEF', 3), squadPlayer(5, 'DEF', 4), squadPlayer(6, 'DEF', 5), squadPlayer(7, 'DEF', 13),
-  squadPlayer(8, 'MID', 6), squadPlayer(9, 'MID', 7), squadPlayer(10, 'MID', 8), squadPlayer(11, 'MID', 14), squadPlayer(12, 'MID', 15),
-  squadPlayer(13, 'FWD', 9), squadPlayer(14, 'FWD', 10), squadPlayer(15, 'FWD', 11),
+  squadPlayer(1, 'GK'), squadPlayer(2, 'GK'),
+  ...Array.from({ length: 5 }, (_, i) => squadPlayer(3 + i, 'DEF')),
+  ...Array.from({ length: 5 }, (_, i) => squadPlayer(8 + i, 'MID')),
+  ...Array.from({ length: 3 }, (_, i) => squadPlayer(13 + i, 'FWD')),
 ];
 
 async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
@@ -39,8 +39,6 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
   let captaincyArgs: Record<string, unknown> | undefined;
   let captainId: string | null = null;
   let viceId: string | null = null;
-  let substitutionArgs: Record<string, unknown> | undefined;
-  const serverPlayers = players.map((player) => ({ ...player }));
   const client = {
     auth: {
       getSession: async () => ({ data: { session: null }, error: null }),
@@ -55,19 +53,10 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
       }
       if (fn === 'ff_squad') {
         return { data: { team: { id: 't1', name: 'Real League FC' }, formation, status: 'draft',
-          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, assignment_revision: 1, players: serverPlayers }, error: null };
+          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, players }, error: null };
       }
       if (fn === 'ff_lineup_save') return { data: { lineup_id: 'lineup1', version: 1, formation: '4-3-3', status: 'draft' }, error: null };
       if (fn === 'ff_squad_set_captains') return { data: { captain_id: captainId, vice_captain_id: viceId }, error: null };
-      if (fn === 'ff_squad_substitute') {
-        substitutionArgs = args;
-        const outgoing = serverPlayers.find((player) => player.league_player_id === args?.p_out);
-        const incoming = serverPlayers.find((player) => player.league_player_id === args?.p_in);
-        if (outgoing && incoming) [outgoing.slot, incoming.slot] = [incoming.slot, outgoing.slot];
-        return { data: { squad: { team: { id: 't1', name: 'Real League FC' }, formation: '4-3-3', status: 'draft',
-          captain_id: captainId, vice_captain_id: viceId, budget: 100, spent: 10, assignment_revision: 2, players: serverPlayers },
-          assignment_revision: 2, replayed: false }, error: null };
-      }
       return { data: [], error: null };
     },
   };
@@ -90,8 +79,7 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
     );
   });
   for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
-  return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs,
-    getSubstitutionArgs: () => substitutionArgs, getServerPlayers: () => serverPlayers };
+  return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs };
 }
 
 describe('the live squad tab is laid out like the demo one', () => {
@@ -162,22 +150,21 @@ describe('there is no squad list under the pitch', () => {
   });
 });
 
-describe('View Squad is read-only; Edit Squad owns all mutations', () => {
-  it('shows saved players and profile links without captaincy, transfer, removal, or substitution actions', async () => {
+describe('View Squad keeps captaincy and substitution while hiding roster changes', () => {
+  it('shows player actions in View Squad but keeps replacement and removal in Edit Squad', async () => {
     await mountLiveSquad();
     expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     expect(screen.getByRole('link', { name: 'Full profile' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByRole('button', { name: 'Vice captain' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.queryByRole('button', { name: 'Make substitution' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Vice captain' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Select replacement' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
-  it('swaps bench-to-starter with starter-first RPC arguments and persists both slots', async () => {
-    const { calls, getCaptaincyArgs, getSubstitutionArgs, getServerPlayers } = await mountLiveSquad(FULL_SQUAD, '4-3-3');
-    fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
+  it('can set captain and vice and complete a substitution from View Squad', async () => {
+    const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '5-4-1');
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -187,22 +174,18 @@ describe('View Squad is read-only; Edit Squad owns all mutations', () => {
     expect(getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp3' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Player details: P7' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P3' })); });
-    expect(calls).toContain('ff_squad_substitute');
-    expect(getSubstitutionArgs()).toMatchObject({ p_out: 'lp3', p_in: 'lp7' });
-    expect(getServerPlayers().find((player) => player.league_player_id === 'lp3')?.slot).toBe(13);
-    expect(getServerPlayers().find((player) => player.league_player_id === 'lp7')?.slot).toBe(2);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P13' })); });
+    expect(calls).toContain('ff_lineup_save');
   });
 
-  it('exposes captaincy, replacement, and substitution controls but no manual formation selector in Edit Squad', async () => {
+  it('exposes formation, captaincy, replacement, and substitution controls in Edit Squad', async () => {
     await mountLiveSquad();
     fireEvent.click(screen.getByRole('button', { name: 'Edit squad' }));
-    expect(document.querySelector('select[aria-label="Formation"]')).toBeNull();
-    expect(screen.getByText('Derived formation')).toBeTruthy();
+    expect(document.querySelector('select[aria-label="Formation"]')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
-    expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Captain' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Select replacement' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Make substitution' })).toBeTruthy();

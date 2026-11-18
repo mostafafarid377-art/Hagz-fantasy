@@ -1,8 +1,12 @@
 // Live squad builder and transfer market.
 //
-// Roster limits, exact slot assignments, format rules, budget and authorization are
-// enforced server-side. This screen reads the durable slot field, keeps null-slot
-// players explicitly unassigned, and never reconstructs a lineup from response order.
+// The position distribution (2 GK / 5 DEF / 5 MID / 3 FWD), the 15-player cap,
+// the budget and the formation rules are all enforced by the database. This screen
+// shows the same checks *before* the user acts, but it never assumes they passed:
+// a refused save is displayed with the server's own message.
+//
+// Starters are the first 11 entries of the lineup array and the bench is the last
+// 4 - the same convention ff_lineup_save() validates server-side.
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,11 +17,33 @@ import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
-import { formatRules, deriveFormation, lineupIssues, type MatchFormat } from '../../services/squadFormats';
+import { formations, limits, substitutionTargets } from '../../services/rules';
 import { lastGamePointsForPlayer } from '../../services/points';
 import { LivePlayerSheet } from './LivePlayerSheet';
 import { AddLivePlayerSheet } from './AddLivePlayerSheet';
 import type { Formation, Player, Position } from '../../types';
+
+const SQUAD_ORDER_STORAGE_PREFIX = 'ff_live_squad_order:';
+
+function readSavedSquadOrder(leagueId: string): string[] | null {
+  try {
+    const stored = window.localStorage.getItem(`${SQUAD_ORDER_STORAGE_PREFIX}${leagueId}`);
+    if (!stored) return null;
+    const parsed: unknown = JSON.parse(stored);
+    return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string')
+      ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSquadOrder(leagueId: string, ids: string[]) {
+  try {
+    window.localStorage.setItem(`${SQUAD_ORDER_STORAGE_PREFIX}${leagueId}`, JSON.stringify(ids));
+  } catch {
+    // Keep the in-memory order working when browser storage is unavailable.
+  }
+}
 
 export function LiveSquad({ builder = false, transfers = false }: { builder?: boolean; transfers?: boolean }) {
   const { t } = useTranslation();
@@ -25,11 +51,23 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [formation, setFormation] = useState<Formation>((live.squad?.formation as Formation) ?? '4-3-3');
   // Captaincy is managed from each player's detail sheet and stored independently
   // from full-lineup saves, so it also works while the squad is being assembled.
   const [captain, setCaptain] = useState<string | null>(live.squad?.captain_id ?? null);
   const [vice, setVice] = useState<string | null>(live.squad?.vice_captain_id ?? null);
 
+  /**
+   * useState only reads its initial value on the FIRST render, and on that render
+   * `live.squad` is still null because the RPC has not resolved. Without this the
+   * saved formation was ignored: the pitch always opened as 4-3-3 and the database's
+   * formation only appeared after a reload. Keyed on the league so switching leagues
+   * re-syncs instead of carrying the previous league's shape over.
+   */
+  useEffect(() => {
+    const saved = live.squad?.formation as Formation | undefined;
+    setFormation(saved ?? '4-3-3');
+  }, [live.leagueId, live.squad?.formation]);
   useEffect(() => {
     setCaptain(live.squad?.captain_id ?? null);
     setVice(live.squad?.vice_captain_id ?? null);
@@ -44,6 +82,16 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const [editing, setEditing] = useState(builder);
   const initializedLeague = useRef<string | null>(null);
   const previousBuilder = useRef(builder);
+  // Buying a bench player invalidates an unsaved server draft. Until the next
+  // lineup save, keep the current client-side order so a newly purchased player
+  // cannot sort ahead of a starter and push that starter onto the bench.
+  const [orderHint, setOrderHint] = useState<{ leagueId: string; ids: string[] } | null>(null);
+  const rememberOrder = (ids: string[]) => {
+    if (!live.leagueId) return;
+    const hint = { leagueId: live.leagueId, ids };
+    setOrderHint(hint);
+    saveSquadOrder(hint.leagueId, ids);
+  };
   useEffect(() => {
     if (live.loading || !live.leagueId) return;
     const leagueChanged = initializedLeague.current !== live.leagueId;
@@ -51,6 +99,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     if (!leagueChanged && !builderChanged) return;
     initializedLeague.current = live.leagueId;
     previousBuilder.current = builder;
+    if (leagueChanged) setOrderHint(null);
     setEditing(builder || (live.squad?.players.length ?? 0) === 0);
     setSelectedId(''); setSwapSource(''); setAddPosition(undefined); setBusy('');
   }, [builder, live.leagueId, live.loading, live.squad?.players.length]);
@@ -71,16 +120,33 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   if (live.loading) return <Loading />;
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
-  // Saved slot numbers are authoritative. Players without an explicitly saved slot
-  // remain unassigned; stable IDs only make their display order repeatable and never
-  // decide whether they are starters or substitutes.
-  const matchFormat = (live.league.match_format ?? squad?.match_format ?? '11-a-side') as MatchFormat;
-  const format = formatRules(matchFormat);
+  /** Saved slots, remembered order, then a formation-balanced fallback. */
+  const preferredOrder = orderHint?.leagueId === live.leagueId
+    ? orderHint.ids
+    : live.leagueId ? readSavedSquadOrder(live.leagueId) ?? [] : [];
+  const orderIndex = new Map(preferredOrder.map((id, index) => [id, index]));
+  const fallbackFormation = formations[formation] ?? formations['4-3-3'];
+  const fallbackPositions: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
+  const byPosition = fallbackPositions.map((position) =>
+    players.filter((player) => player.position === position)
+      .sort((a, b) => a.name.localeCompare(b.name)));
+  // With no saved slots or locally remembered order, allocate the required number
+  // at each position to the XI first; only surplus players go to the bench. This
+  // also repairs existing rosters whose old draft was invalidated before ordering
+  // could be persisted, instead of sorting two keepers/five defenders onto the XI.
+  const fallbackIds = [
+    ...byPosition.flatMap((group, index) => group.slice(0, fallbackFormation[fallbackPositions[index]])),
+    ...byPosition.flatMap((group, index) => group.slice(fallbackFormation[fallbackPositions[index]])),
+  ].map((player) => player.league_player_id);
+  const fallbackIndex = new Map(fallbackIds.map((id, index) => [id, index]));
   const ordered = [...players].sort((a, b) => {
-    if (a.slot == null && b.slot != null) return 1;
-    if (a.slot != null && b.slot == null) return -1;
-    return (a.slot ?? Number.MAX_SAFE_INTEGER) - (b.slot ?? Number.MAX_SAFE_INTEGER)
-      || a.league_player_id.localeCompare(b.league_player_id);
+    // Persisted lineup slots are authoritative. If buying a player invalidates an
+    // unsaved draft, use remembered order until the next save rather than letting
+    // a new name sort ahead of a starter and push that starter onto the bench.
+    if (a.slot != null || b.slot != null) return (a.slot ?? 100) - (b.slot ?? 100);
+    const aIndex = orderIndex.get(a.league_player_id), bIndex = orderIndex.get(b.league_player_id);
+    if (aIndex != null || bIndex != null) return (aIndex ?? 100) - (bIndex ?? 100);
+    return (fallbackIndex.get(a.league_player_id) ?? 100) - (fallbackIndex.get(b.league_player_id) ?? 100);
   });
 
   async function run(key: string, action: () => Promise<void>, success?: string) {
@@ -189,122 +255,84 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     points: 0,
     color: '#a9b9a5',
   }));
-  const starterEntries = ordered.filter((player) => player.slot !== null && player.slot <= format.starters);
-  const benchPlayers = ordered.filter((player) => player.slot !== null && player.slot > format.starters);
-  const unassignedPlayers = ordered.filter((player) => player.slot === null);
-  const starterIds = starterEntries.map((player) => player.league_player_id);
-  const benchIds = benchPlayers.map((player) => player.league_player_id);
-  const unassignedIds = unassignedPlayers.map((player) => player.league_player_id);
-  const pitchPlayers = allPlayers.filter((player) => starterIds.includes(player.id));
-  const formation = deriveFormation(starterEntries, matchFormat) as Formation | null;
-  const captainId = starterIds.includes(captain ?? '') ? (captain ?? undefined) : undefined;
+  // The pitch is always the Starting XI, including in Edit Squad. Bench entries
+  // remain in their own strip so toggling editor state can never move them onto the
+  // pitch or hide the controls needed to replace them.
+  const pitchPlayers = allPlayers.slice(0, 11);
+  const captainId = ordered.find((p) => p.league_player_id === captain) ? (captain ?? undefined) : undefined;
   /** Last-game points for a squad entry, or undefined when there is no valid score. */
   const lastGamePointsFor = (p: { league_player_id: string }) =>
     lastGamePointsForPlayer(live.points, p.league_player_id);
-  const viceId = starterIds.includes(vice ?? '') ? (vice ?? undefined) : undefined;
-  const ids = ordered.map((p) => p.league_player_id);
-  const targets = starterIds.includes(swapSource)
-    ? benchIds
-    : benchIds.includes(swapSource) ? starterIds : [];
+  const viceId = ordered.find((p) => p.league_player_id === vice) ? (vice ?? undefined) : undefined;
+  const benchPlayers = ordered.slice(11);
+  const ids = ordered.map(p => p.league_player_id);
+  const ruleSquad = { leagueId: '', managerId: '', playerIds: ids, formation };
+  const targets = swapSource ? substitutionTargets(ruleSquad, allPlayers, swapSource) : [];
   const selected = allPlayers.find(p => p.id === selectedId);
   const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
-  const saveAssignments = async (
-    starters: string[], bench: string[], unassigned: string[], captainId: string | null,
-    viceCaptainId: string | null, saveGameweek = false,
-  ) => {
-    const gameweekId = saveGameweek ? squad?.gameweek_id ?? live.gameweeks[0]?.id ?? null : null;
-    await live.saveSquadAssignments({
-      starters, bench, unassigned, captainId, viceCaptainId, gameweekId,
-      expectedRevision: squad?.assignment_revision ?? null,
-    });
+  const save = async (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => {
+    await live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
+    rememberOrder(playerIds);
   };
-  const pitchFormation = formation ?? ([...format.formations][0] as Formation);
-  const rawPositionalIssues = lineupIssues(starterEntries, ordered, matchFormat);
-  const formatValidationMessage = rawPositionalIssues.find((issue) => issue.startsWith('Formation '));
-  const formationIssue = starterEntries.length === format.starters && formatValidationMessage
-    ? formatValidationMessage
-    : '';
-  const positionalIssues = rawPositionalIssues.map((issue) => {
-    let match = /^Squad needs (\d+) players; currently (\d+)\.$/.exec(issue);
-    if (match) return t('Squad needs {{required}} players; currently {{actual}}.', { required: match[1], actual: match[2] });
-    match = /^Starting lineup needs (\d+) players; currently (\d+)\.$/.exec(issue);
-    if (match) return t('Starting lineup needs {{required}} players; currently {{actual}}.', { required: match[1], actual: match[2] });
-    match = /^Squad needs (\d+) (GK|DEF|MID|FWD); currently (\d+)\.$/.exec(issue);
-    if (match) return t('Squad needs {{required}} {{position}}; currently {{actual}}.', { required: match[1], position: match[2], actual: match[3] });
-    match = /^Starting lineup needs at least (\d+) (GK|DEF|MID|FWD); currently (\d+)\.$/.exec(issue);
-    if (match) return t('Starting lineup needs at least {{required}} {{position}}; currently {{actual}}.', { required: match[1], position: match[2], actual: match[3] });
-    match = /^Starting lineup needs exactly 1 GK; currently (\d+)\.$/.exec(issue);
-    if (match) return t('Starting lineup needs exactly 1 GK; currently {{actual}}.', { actual: match[1] });
-    match = /^Formation (.+) is not legal for (.+)\.$/.exec(issue);
-    if (match) return t('Formation {{shape}} is not legal for {{format}}.', { shape: match[1], format: match[2] });
-    return issue;
+  const formationCounts = (selected: typeof ordered) => ({
+    GK: selected.filter(p => p.position === 'GK').length,
+    DEF: selected.filter(p => p.position === 'DEF').length,
+    MID: selected.filter(p => p.position === 'MID').length,
+    FWD: selected.filter(p => p.position === 'FWD').length,
   });
-  const visibleFormationIssue = formationIssue
-    ? positionalIssues[rawPositionalIssues.indexOf(formationIssue)]
+  const actualStarters = formationCounts(ordered.slice(0, 11));
+  const requiredStarters = formations[formation] ?? formations['4-3-3'];
+  const formationMatches = (['GK', 'DEF', 'MID', 'FWD'] as Position[]).every(pos => actualStarters[pos] === requiredStarters[pos]);
+  const formationCountsText = (counts: Record<Position, number>) => `GK ${counts.GK}, DEF ${counts.DEF}, MID ${counts.MID}, FWD ${counts.FWD}`;
+  const formationIssue = !formationMatches
+    ? t('Formation requires: {{required}}. Starting XI currently has: {{current}}.', {
+      required: formationCountsText(requiredStarters), current: formationCountsText(actualStarters),
+    })
     : '';
   const lineupSaveBlockers = [
-    ...positionalIssues,
-    ...(benchPlayers.length !== format.bench ? [t('Bench needs {{required}} assigned players; currently {{actual}}.', { required: format.bench, actual: benchPlayers.length })] : []),
-    ...(unassignedPlayers.length ? [t('Assign all {{count}} remaining squad players to a starter or ordered bench slot.', { count: unassignedPlayers.length })] : []),
+    ...(ordered.length !== 15 ? [t('Select exactly 15 players to save a lineup.')] : []),
+    ...(!formationMatches ? [formationIssue] : []),
+    ...(!captain ? [t('Select a captain from your squad.')] : []),
+    ...(!vice ? [t('Select a vice captain from your squad.')] : []),
+    ...(!squad?.gameweek_id && (live.gameweeks?.length ?? 0) === 0 ? [t('A season with a gameweek is required to save a lineup.')] : []),
   ];
   function selectPlayer(p: Player) {
     if (!swapSource) { setError(''); setSelectedId(p.id); return; }
     if (!targets.includes(p.id)) return;
-    // The RPC contract is role-based, not click-order-based: p_out must always be
-    // the current starter and p_in the current bench player. The editor allows a
-    // manager to begin from either side, so normalize the selected IDs before the
-    // request. Sending bench->starter looked like an already-applied retry to the
-    // server's idempotency guard and therefore returned without swapping anything.
-    const starterId = starterIds.includes(swapSource) ? swapSource : p.id;
-    const benchId = benchIds.includes(swapSource) ? swapSource : p.id;
-    void run('substitute', async () => {
-      await live.substituteSquadPlayer(starterId, benchId, squad?.assignment_revision);
-      setSwapSource('');
-    }, 'Players swapped.');
-  }
-  function moveUnassigned(playerId: string, destination: 'starter' | 'bench') {
-    if (!unassignedIds.includes(playerId)) return;
-    if (destination === 'starter' && starterIds.length >= format.starters) return;
-    if (destination === 'bench' && benchIds.length >= format.bench) return;
-    const nextUnassigned = unassignedIds.filter((id) => id !== playerId);
-    const nextStarters = destination === 'starter' ? [...starterIds, playerId] : starterIds;
-    const nextBench = destination === 'bench' ? [...benchIds, playerId] : benchIds;
-    void run('assign', () => saveAssignments(nextStarters, nextBench, nextUnassigned, captain, vice), 'Squad assignment saved.');
-  }
-  function moveBenchPlayer(playerId: string, direction: -1 | 1) {
-    const index = benchIds.indexOf(playerId);
-    const nextIndex = index + direction;
-    if (index < 0 || nextIndex < 0 || nextIndex >= benchIds.length) return;
-    const next = [...benchIds];
-    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
-    void run('assign', () => saveAssignments(starterIds, next, unassignedIds, captain, vice), 'Bench order saved.');
+    const next = [...ids]; const a = next.indexOf(swapSource), b = next.indexOf(p.id);
+    if (a < 0 || b < 0) return;
+    [next[a], next[b]] = [next[b], next[a]];
+    // Captaincy belongs to the squad; the server validates that both selected IDs
+    // remain in the submitted 15-player lineup.
+    void run('lineup', async () => { await save(next, captain, vice); setSwapSource(''); }, 'Players swapped.');
   }
   function buyIntoSquad(playerId: string) {
+    const ids = ordered.map((player) => player.league_player_id);
+    rememberOrder([...ids.filter((id) => id !== playerId), playerId]);
     return run('add', () => live.buy(playerId), 'Player added to your squad.');
   }
 
   return (
     <>
       <PageTitle eyebrow="YOUR TEAM" title={editing ? 'Squad Builder' : 'My Squad'}
-        description={t('{{format}} squad · {{total}} players · {{starters}} starters · {{bench}} bench · {{budget}} budget.', {
-          format: matchFormat, total: format.total, starters: format.starters, bench: format.bench,
-          budget: formatCompactMoney(budget),
-        })} />
+        description={t('Maximum 15 players, with a 100M budget.')} />
 
       {/* Same 7-cell strip as the demo squad screen: size, value, budget, then the
           four position counts. */}
       <div className="squad-summary">
-        <div><small>{t('Squad')}</small><strong>{ordered.length}<span>/{format.total}</span></strong></div>
+        <div><small>{t('Squad')}</small><strong>{ordered.length}<span>/15</span></strong></div>
         <div><small>{t('Squad value')}</small><strong>{formatCompactMoney(spent)}</strong></div>
         <div><small>{t('Budget remaining')}</small><strong className="lime">{formatCompactMoney(remaining)}</strong></div>
         {(['GK', 'DEF', 'MID', 'FWD'] as Position[]).map((pos) => (
           <div key={pos}>
             <small>{pos}</small>
-            {/* Format-specific roster cap. Formation is never used to reorder or
-                assign players; it is derived from the exact saved starters. */}
+            {/* The denominator is the FORMATION's requirement for that band plus
+                the bench allowance, i.e. the squad's real capacity: 2/5/5/3. When a
+                formation asks for more in one band than the capacity allows (never
+                happens with the supported shapes) the larger number wins. */}
             <strong>
               {ordered.filter((p) => p.position === pos).length}
-              <span>/{format.positionLimits[pos]}</span>
+              <span>/{Math.max(limits[pos], (formations[formation] ?? formations['4-3-3'])[pos])}</span>
             </strong>
           </div>
         ))}
@@ -316,7 +344,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
       {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
-      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={starterIds.includes(selected.id)} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={editing && ((starterIds.includes(selected.id) && benchIds.length > 0) || (benchIds.includes(selected.id) && starterIds.length > 0))} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
         const nextCaptain = type === 'captain'
           ? (captain === selected.id ? null : selected.id)
           : (captain === selected.id ? null : captain);
@@ -338,26 +366,30 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !editing ? 'Starting XI' : 'Your squad'} />
           {(!hasSquad || editing) && (
             <p className="section-description">
-              {t('Players enter the squad unassigned. Place each one explicitly in a Starting XI slot or on the ordered bench.')}
+              {t('Tap an empty position to add a player. The first 11 players are starters.')}
             </p>
           )}
-          <p className="section-description">
-            {t('{{format}} · {{starters}} starters · {{bench}} ordered substitutes', {
-              format: matchFormat, starters: format.starters, bench: format.bench,
-            })}
-          </p>
-          <div className="panel-subline"><span>{t('Derived formation')}</span><strong>{formation ?? t('Not a legal formation')}</strong></div>
-          {visibleFormationIssue && <p className="notice formation-validation" role="status"><AlertCircle size={15} aria-hidden="true"/><span>{visibleFormationIssue}</span></p>}
+          {/* View mode reflects the saved formation; the editor lets a manager preview
+              every supported shape before explicitly saving the lineup. */}
+          {editing && (
+            <label className="formation-select">{t('Formation')}
+              <select aria-label={t('Formation')} value={formation}
+                onChange={(e) => setFormation(e.target.value as Formation)}>
+                {(Object.keys(formations) as Formation[]).map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </label>
+          )}
+          {!formationMatches && <p className="notice formation-validation" role="status"><AlertCircle size={15} aria-hidden="true"/><span>{formationIssue}</span></p>}
 
-          {/* The pitch only receives players whose saved slot is a starter. A
-              legal formation is derived from that group; the editor never moves a
-              player just to satisfy the layout. */}
-          <Pitch players={pitchPlayers} formation={pitchFormation}
+          {/* An empty squad (or edit mode) shows all 15 capacity places, so every
+              position can be filled; otherwise the pitch is the starting XI in the
+              saved formation, which still drives the shape server-side. */}
+          <Pitch players={pitchPlayers} formation={formation}
             captainId={captainId} viceCaptainId={viceId}
             onPlayerClick={selectPlayer} swapSource={swapSource} swapTargets={targets}
-            onAddPosition={editing && ordered.length < format.total ? setAddPosition : undefined}
+            onAddPosition={editing && ordered.length < 15 ? setAddPosition : undefined}
             squadSlots={!hasSquad}
-            canAddStarting={editing && ordered.length < format.total}
+            canAddStarting={editing && ordered.length < 15}
             pointsFor={(p) => lastGamePointsFor({ league_player_id: p.id })}
             pointsLabel={t('Last game points')} />
 
@@ -365,42 +397,22 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             <div className="bench-head"><h3>{t('Bench')}</h3></div>
             <div className="bench-players">
               {benchPlayers.length === 0 && <small>{t('No substitutes yet.')}</small>}
-              {benchPlayers.map((p, index) => (
-                <div className="bench-player-item" key={p.league_player_id}>
-                  <button type="button" className={`bench-player ${targets.includes(p.league_player_id) ? 'swap-target' : ''} ${swapSource && !targets.includes(p.league_player_id) ? 'swap-dim' : ''}`} disabled={!!swapSource && !targets.includes(p.league_player_id)} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}`} onClick={() => { const player = allPlayers.find(x => x.id === p.league_player_id); if (player) selectPlayer(player); }}>
-                    <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
-                    <strong>{p.name}</strong>
-                    <small>{p.position} · {lastGamePointsFor(p) != null ? `${lastGamePointsFor(p)} ${t('pts')}` : '—'}</small>
-                  </button>
-                  {editing && !swapSource && <div className="bench-order-controls">
-                    <button type="button" aria-label={`${t('Move up')}: ${p.name}`} disabled={index===0 || busy==='assign'} onClick={() => moveBenchPlayer(p.league_player_id,-1)}>↑</button>
-                    <button type="button" aria-label={`${t('Move down')}: ${p.name}`} disabled={index===benchPlayers.length-1 || busy==='assign'} onClick={() => moveBenchPlayer(p.league_player_id,1)}>↓</button>
-                  </div>}
-                </div>
+              {benchPlayers.map((p) => (
+                <button type="button" className={`bench-player ${targets.includes(p.league_player_id) ? 'swap-target' : ''} ${swapSource && !targets.includes(p.league_player_id) ? 'swap-dim' : ''}`} key={p.league_player_id} disabled={!!swapSource && !targets.includes(p.league_player_id)} aria-label={`${t(swapSource ? 'Select swap player' : 'Player details')}: ${p.name}`} onClick={() => { const player = allPlayers.find(x => x.id === p.league_player_id); if (player) selectPlayer(player); }}>
+                  <Avatar name={p.name} image={p.image_url ?? undefined} size="sm" />
+                  <strong>{p.name}</strong>
+                  <small>{p.position} · {lastGamePointsFor(p) != null ? `${lastGamePointsFor(p)} ${t('pts')}` : '—'}</small>
+                </button>
               ))}
-              {editing && ordered.length >= format.starters && ordered.length < format.total && (['GK', 'DEF', 'MID', 'FWD'] as Position[]).flatMap(pos => {
-                const remainingAtPosition = Math.max(0, format.positionLimits[pos] - ordered.filter(p => p.position === pos).length);
-                const slots = Math.min(remainingAtPosition, format.total - ordered.length, format.bench - benchPlayers.length);
+              {editing && ordered.length >= 11 && ordered.length < 15 && (['GK', 'DEF', 'MID', 'FWD'] as Position[]).flatMap(pos => {
+                const remainingAtPosition = Math.max(0, limits[pos] - ordered.filter(p => p.position === pos).length);
+                const slots = Math.min(remainingAtPosition, 15 - ordered.length, 4 - benchPlayers.length);
                 return Array.from({ length: slots }, (_, index) => (
                   <button type="button" className="bench-player bench-add" key={`${pos}-${index}`} aria-label={`${t('Add bench player')}: ${pos}`} disabled={!!swapSource || !live.league?.market_open} onClick={() => setAddPosition(pos)}>
                     <span>+</span><strong>{pos}</strong>
                   </button>
                 ));
               })}
-            </div>
-          </div>}
-          {editing && unassignedPlayers.length > 0 && <div className="bench-strip unassigned-strip">
-            <div className="bench-head"><h3>{t('Unassigned players')}</h3></div>
-            <p className="section-description">{t('These players have no saved slot yet. Assign them explicitly; opening or refreshing this page will not move them.')}</p>
-            <div className="unassigned-players">
-              {unassignedPlayers.map((player) => <div className="unassigned-player" key={player.league_player_id}>
-                <Avatar name={player.name} image={player.image_url ?? undefined} size="sm" />
-                <div><strong>{player.name}</strong><small>{player.position} · {formatCompactMoney(player.price)}</small></div>
-                <button type="button" className="button button-outline" disabled={busy==='assign' || starterIds.length>=format.starters}
-                  onClick={() => moveUnassigned(player.league_player_id,'starter')}>{t('Add to starters')}</button>
-                <button type="button" className="button button-outline" disabled={busy==='assign' || benchIds.length>=format.bench}
-                  onClick={() => moveUnassigned(player.league_player_id,'bench')}>{t('Add to bench')}</button>
-              </div>)}
             </div>
           </div>}
         </div>
@@ -414,6 +426,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           setEditing(next);
           if (!next) {
             setSelectedId(''); setSwapSource(''); setAddPosition(undefined);
+            setFormation((squad?.formation as Formation) ?? '4-3-3');
           }
         }}>
           {t(editing ? 'View squad' : 'Edit squad')}
@@ -422,23 +435,19 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       </div>
       {editing && (
         <section className="panel section-spacer lineup-save-panel">
-          <SectionHead eyebrow="THE LINEUP" title="Squad assignments" />
+          <SectionHead eyebrow="THE LINEUP" title="Save lineup changes" />
           {lineupSaveBlockers.length > 0 && <ul className="lineup-save-blockers" role="status">{lineupSaveBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
-          <div className="button-row">
-            <button type="button" className="button button-outline" disabled={busy === 'assign'}
-              onClick={() => void run('assign', () => saveAssignments(starterIds, benchIds, unassignedIds, captain, vice), 'Squad assignments saved.')}>
-              {busy === 'assign' ? t('Saving…') : t('Save assignments')}
-            </button>
-            {(squad?.gameweek_id || live.gameweeks.length > 0) && <button type="button" className="button" disabled={busy === 'lineup-save' || lineupSaveBlockers.length > 0}
-              onClick={() => void run('lineup-save', () => saveAssignments(starterIds, benchIds, unassignedIds, captain, vice, true), 'Lineup saved.')}>
-              {busy === 'lineup-save' ? t('Saving…') : t('Save gameweek lineup')}
-            </button>}
-          </div>
+          <button type="button" className="button" disabled={busy === 'lineup-save' || lineupSaveBlockers.length > 0}
+            onClick={() => void run('lineup-save', async () => { await save(ids, captain, vice); }, 'Lineup saved.')}>
+            {busy === 'lineup-save' ? t('Saving…') : t('Save lineup')}
+          </button>
         </section>
       )}
 
-      {/* Formation is derived from the exact saved Starting XI. The remaining
-          panel carries squad status and transfer controls. */}
+      {/* The standalone formation selector and extra captaincy panel are not on this
+          screen. Formation is still stored server-side; captaincy is available from
+          each player's detail sheet and can be saved before the squad is complete.
+          The remaining panel carries status and selling controls. */}
       {hasSquad && editing && (
         <div className="panel section-spacer">
           <SectionHead eyebrow="THE LINEUP" title="Squad status" />
@@ -521,8 +530,7 @@ export function LiveStandings() {
     <>
       <PageTitle eyebrow="THE TABLE" title="League Standings"
         description="The race is on" />
-      {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
-      <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
+      {live.error && <ErrorNote message={live.error} />}
 
       {ranked.length === 0 ? (
         <Empty title="No standings yet"

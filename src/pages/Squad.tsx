@@ -59,7 +59,7 @@ function SquadEditor({builder}:{builder:boolean}) {
   const summary = squadSummary(squad.playerIds, players, league.budget);
   const formation = squad.formation || defaultFormation;
   const starters = squadSummary(squad.playerIds.slice(0, 11), players, league.budget);
-  const requiredShape = formations[formation] ?? formations[defaultFormation]!;
+  const requiredShape = formations[formation] ?? formations[defaultFormation];
   const formationMatches = (Object.keys(limits) as Position[]).every(position => starters.counts[position] === requiredShape[position]);
   const positionCountsText = (counts: Record<Position, number>) => `GK ${counts.GK}, DEF ${counts.DEF}, MID ${counts.MID}, FWD ${counts.FWD}`;
   const formationIssue = t('Formation requires: {{required}}. Starting XI currently has: {{current}}.', {

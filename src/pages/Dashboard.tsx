@@ -56,11 +56,7 @@ export function Pitch({
   //
   // Before this, the formation was ignored in BOTH modes: every band rendered the
   // capacity, so a 4-3-3 pitch showed 2/5/5/3 and the selector changed no pixel.
-  const selectedFormation = formation ?? defaultFormation;
-  const parts = selectedFormation.split('-').map(Number);
-  const shape = formations[selectedFormation] ?? {
-    GK: 1, DEF: parts[0] ?? 4, MID: parts[1] ?? 3, FWD: parts[2] ?? 3,
-  };
+  const shape = formations[formation ?? defaultFormation] ?? formations[defaultFormation];
   const slotCount = (pos: Position) => (squadSlots ? limits[pos] : shape[pos]);
 
   return (

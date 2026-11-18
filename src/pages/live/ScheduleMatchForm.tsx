@@ -1,19 +1,16 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as api from '../../services/api';
-import type { ApiMember, MatchFormat } from '../../types/api';
-import { formatRules } from '../../services/squadFormats';
+import type { ApiMember } from '../../types/api';
 
-export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gameweeks, members, onCreated, onCancel }: {
+export function ScheduleMatchForm({ leagueId, gameweeks, members, onCreated, onCancel }: {
   leagueId: string;
-  matchFormat?: MatchFormat;
   gameweeks: Array<{ id: string; number: number; season_name: string }>;
   members: ApiMember[];
   onCreated: (matchId: string) => Promise<void> | void;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
-  const format = formatRules(matchFormat);
   const [teams, setTeams] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
   const [teamError, setTeamError] = useState('');
   const [teamName, setTeamName] = useState('');
@@ -27,14 +24,9 @@ export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gamewee
   const [organizerId, setOrganizerId] = useState('');
   const [startsAt, setStartsAt] = useState('');
   const [venue, setVenue] = useState('');
-  const [starters, setStarters] = useState(String(format.starters));
-  const [substitutes, setSubstitutes] = useState(String(format.bench));
+  const [starters, setStarters] = useState('7');
+  const [substitutes, setSubstitutes] = useState('5');
   const organizers = members.filter(m => m.is_organizer && m.status === 'active');
-
-  useEffect(() => {
-    setStarters(String(format.starters));
-    setSubstitutes(String(format.bench));
-  }, [matchFormat, format.bench, format.starters]);
 
   useEffect(() => {
     let active = true;
@@ -62,8 +54,8 @@ export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gamewee
         gameweekId: gameweekId || null, teamA, teamB, organizerId,
         startsAt: new Date(startsAt).toISOString(), venue, startersPerSide: Number(starters), maxSubstitutes: Number(substitutes),
       });
-      // The parent performs one authoritative refresh, verifies the new id, and
-      // updates the shared match list from that same response.
+      // PR #56: the parent performs one authoritative refresh, verifies the new
+      // id against that same response, and updates the shared list from it.
       await onCreated(created.id);
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not create match'); }
     finally { setBusy(false); }
@@ -81,9 +73,8 @@ export function ScheduleMatchForm({ leagueId, matchFormat = '11-a-side', gamewee
       <label>{t('Assigned Organizer')}<select required value={organizerId} onChange={e => setOrganizerId(e.target.value)}><option value="">{t('Choose appointed organizer')}</option>{organizers.map(x => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}</select></label>
       <label>{t('Date & kick-off')}<input required type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)} /></label>
       <label>{t('Venue')}<input required minLength={1} maxLength={200} value={venue} onChange={e => setVenue(e.target.value)} /></label>
-      <p className="notice">{t('Match format')}: {t(matchFormat)} · {format.starters} {t('Starters').toLowerCase()} · {format.bench} {t('substitutes')}</p>
-      <label>{t('Starters per side')}<input required type="number" min={format.starters} max={format.starters} value={starters} readOnly aria-readonly="true" /></label>
-      <label>{t('Maximum substitutes')}<input required type="number" min={0} max={format.bench} value={substitutes} onChange={e => setSubstitutes(e.target.value)} /></label>
+      <label>{t('Starters per side')}<input required type="number" min={1} max={11} value={starters} onChange={e => setStarters(e.target.value)} /></label>
+      <label>{t('Maximum substitutes')}<input required type="number" min={0} max={30} value={substitutes} onChange={e => setSubstitutes(e.target.value)} /></label>
       {error && <p className="error-text" role="alert">{error}</p>}
       <div className="form-actions"><button className="button button-primary" disabled={busy || teams.length < 2 || organizers.length === 0}>{busy ? t('Saving…') : t('Create match')}</button><button type="button" className="button button-outline" onClick={onCancel}>{t('Cancel')}</button></div>
       {teams.length < 2 && !teamError && <p className="notice">{t('At least two active real teams are required.')}</p>}
