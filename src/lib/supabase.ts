@@ -40,6 +40,64 @@ export const looksLikeServiceRoleKey = (value: string | undefined): boolean => {
   return false;
 };
 
+/**
+ * The one Supabase project a production build is allowed to talk to.
+ *
+ * The build-time guard (scripts/check-pages-env.mjs) refuses to produce a Pages
+ * bundle for any other project, but a bundle that was built elsewhere, or with a
+ * stale variable, could still be served. This is the runtime half: the constant
+ * is committed, so the check does not derive its expectation from the same
+ * variable it is checking.
+ *
+ * The ref is a project's public subdomain, never a secret.
+ */
+export const APPROVED_PROJECT_REF = 'ddeojemjbhnxtrgsuicv';
+
+/** `https://<ref>.supabase.co` → `<ref>`; anything else → null. */
+export function projectRefOf(rawUrl: string | undefined | null): string | null {
+  if (!rawUrl) return null;
+  try {
+    const host = new URL(rawUrl.trim()).hostname.toLowerCase();
+    const match = /^([a-z0-9]{20})\.supabase\.(?:co|in)$/.exec(host);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ProjectRefMismatch = { configured: string | null; expected: string };
+
+/**
+ * Pure decision function, so the rule is testable without a build.
+ *
+ * Returns null when there is nothing to complain about:
+ *   * a development/test build — `.env.local` legitimately points at a scratch
+ *     project there, and blocking it would break local work;
+ *   * Demo mode (no backend configured) — nothing can be written anywhere;
+ *   * the configured ref is the approved one.
+ */
+export function evaluateProjectRef(input: {
+  url?: string | null;
+  prod: boolean;
+  configured?: boolean;
+  expected?: string;
+}): ProjectRefMismatch | null {
+  const expected = input.expected ?? APPROVED_PROJECT_REF;
+  if (!input.prod) return null;
+  if (input.configured === false) return null;
+  const configuredUrl = input.url?.trim();
+  if (!configuredUrl) return null;
+  const configured = projectRefOf(configuredUrl);
+  return configured === expected ? null : { configured, expected };
+}
+
+/** Non-null in a production build that is wired to the wrong project. */
+export const projectRefMismatch: ProjectRefMismatch | null = evaluateProjectRef({
+  url,
+  prod: Boolean(import.meta.env.PROD),
+  configured: isSupabaseConfigured,
+});
+
 let client: SupabaseClient | null = null;
 
 /**
@@ -57,6 +115,18 @@ export function getSupabase(): SupabaseClient | null {
       '[fantasy-friends] VITE_SUPABASE_ANON_KEY looks like a service_role key. ' +
       'Refusing to create a client. Use the anon/publishable key: the service_role ' +
       'key must never reach the browser.',
+    );
+    return null;
+  }
+  if (projectRefMismatch) {
+    // Fail closed, exactly like the service_role refusal above: refuse to create a
+    // client, so nothing is written into a project nobody is watching. The visible
+    // banner (src/components/ProjectRefNotice.tsx) explains it to a human.
+    console.error(
+      '[fantasy-friends] This build is wired to Supabase project ' +
+        `"${projectRefMismatch.configured ?? 'unrecognised'}" but is only approved to talk to ` +
+        `"${projectRefMismatch.expected}". Refusing to create a client; live data is disabled. ` +
+        'Fix VITE_SUPABASE_URL in the deployment, not in the browser.',
     );
     return null;
   }

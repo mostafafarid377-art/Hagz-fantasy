@@ -20,7 +20,8 @@
     "check:migrations": "node scripts/check-migration-package.mjs",
     "migrations:promote": "node scripts/promote-migrations.mjs",
     "test:api": "node --test supabase/design/tests/phase3-api.test.mjs",
-    "verify:all": "npm run typecheck && npm test && npm run check:migrations && npm run test:db:design && npm run build"
+    "verify:all": "npm run typecheck && npm test && npm run check:migrations && npm run test:db:design && npm run build && npm run test:pages:env",
+    "test:pages:env": "node scripts/check-pages-env.mjs --self-test"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

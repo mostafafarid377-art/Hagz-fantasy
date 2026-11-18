@@ -14,7 +14,7 @@
 import { getSupabase } from '../lib/supabase';
 import { withBootstrapDiagnostics } from './bootstrapDiagnostics';
 import type {
-  ApiLeague, ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer, MatchFormat,
+  ApiLeague, ApiMatch, ApiMember, ApiNotification, ApiPlayer, ApiSquad, ApiStanding, ApiSuggestion, ApiTransfer,
 } from '../types/api';
 
 /** Stable, translatable error codes. `message` is a developer fallback only. */
@@ -117,7 +117,7 @@ export interface Bootstrap {
   profile: { id: string; display_name: string };
   leagues: Array<{
     league_id: string; name: string; role: 'leader' | 'manager'; status: string;
-    budget: number; market_open: boolean; archived: boolean; match_format?: MatchFormat;
+    budget: number; market_open: boolean; archived: boolean;
     is_leader: boolean; is_organizer: boolean;
   }>;
 }
@@ -132,9 +132,9 @@ export const updateProfile = (displayName: string) =>
 // Leagues
 // ---------------------------------------------------------------------------
 
-export const createLeague = (name: string, budget = 100000000, format: MatchFormat = '11-a-side') =>
-  call<{ id: string; name: string; budget: number; market_open: boolean; code: string; match_format: MatchFormat }>(
-    'ff_league_create', { p_name: name, p_budget: budget, p_format: format });
+export const createLeague = (name: string, budget = 100000000) =>
+  call<{ id: string; name: string; budget: number; market_open: boolean; code: string }>(
+    'ff_league_create', { p_name: name, p_budget: budget });
 
 export const leagueCode = (leagueId: string) =>
   call<string>('ff_league_code', { p_league: leagueId });
@@ -255,35 +255,6 @@ export const reviewSuggestion = (leagueId: string, suggestionId: string, decisio
 // ---------------------------------------------------------------------------
 
 export const squad = (leagueId: string, options: ReadOptions = {}) => read<ApiSquad>('ff_squad', { p_league: leagueId }, options);
-
-export interface SquadAssignmentsInput {
-  starters: string[];
-  bench: string[];
-  unassigned: string[];
-  captainId: string | null;
-  viceCaptainId: string | null;
-  gameweekId?: string | null;
-  expectedRevision?: number | null;
-}
-
-export const saveSquadAssignments = (leagueId: string, input: SquadAssignmentsInput) =>
-  call<{ squad: ApiSquad; lineup: Record<string, unknown> | null; assignment_revision: number }>(
-    'ff_squad_save_assignments', {
-      p_league: leagueId,
-      p_starters: input.starters,
-      p_bench: input.bench,
-      p_unassigned: input.unassigned,
-      p_captain: input.captainId,
-      p_vice: input.viceCaptainId,
-      p_gameweek: input.gameweekId ?? null,
-      p_expected_revision: input.expectedRevision ?? null,
-    });
-
-export const substituteSquadPlayer = (leagueId: string, outId: string, inId: string, expectedRevision?: number | null) =>
-  call<{ squad: ApiSquad; assignment_revision: number; replayed?: boolean }>(
-    'ff_squad_substitute', {
-      p_league: leagueId, p_out: outId, p_in: inId, p_expected_revision: expectedRevision ?? null,
-    });
 
 export const buyPlayer = (leagueId: string, marketPlayerId: string) =>
   call<{ league_player_id: string; price: number; squad_size: number; spent: number }>(

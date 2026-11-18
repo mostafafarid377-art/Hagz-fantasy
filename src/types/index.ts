@@ -1,6 +1,6 @@
 export type Position = 'GK' | 'DEF' | 'MID' | 'FWD';
 export type Role = 'leader' | 'manager';
-export type Formation = '4-3-3' | '4-4-2' | '3-5-2' | '3-4-3' | '4-5-1' | '5-3-2' | '5-4-1' | '3-2-1' | '2-3-1' | '2-2-2' | '2-1-1' | '1-2-1';
+export type Formation = '4-3-3' | '4-4-2' | '3-5-2' | '3-4-3' | '4-5-1' | '5-3-2' | '5-4-1';
 export type SuggestionStatus = 'pending' | 'approved' | 'rejected';
 export interface Attributes { pace:number; shooting:number; passing:number; defending:number; physical:number }
 export interface Player { id:string; leagueId:string; name:string; position:Position; price:number; rating:number; attributes:Attributes; image?:string; active:boolean; points:number; color:string }

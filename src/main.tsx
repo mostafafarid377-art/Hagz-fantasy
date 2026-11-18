@@ -13,6 +13,7 @@ import { AppModeProvider } from './hooks/useApp';
 import { LiveProvider } from './hooks/useLive';
 import { useAuth } from './hooks/useAuth';
 import { isSupabaseConfigured } from './lib/supabase';
+import { ProjectRefNotice } from './components/ProjectRefNotice';
 import AppLayout from './layouts/AppLayout';
 import Dashboard from './pages/Dashboard';
 import { Approvals, AuthPage, Management, Market, PlayerProfile, SuggestPlayer } from './pages/Players';
@@ -64,6 +65,8 @@ function LiveData({ children }: { children: React.ReactNode }) {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
+    {/* Loud, unfixable-by-the-browser signal that this deployment is misdirected. */}
+    <ProjectRefNotice/>
     <AuthProvider>
       <AppModeProvider>
         <DemoProvider>
