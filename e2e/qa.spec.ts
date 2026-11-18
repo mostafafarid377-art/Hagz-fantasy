@@ -143,8 +143,8 @@ test('existing base64 player photos migrate into IndexedDB without being lost', 
 });
 
 test('an unavailable URL falls back to player initials', async ({page})=>{
-  await fresh(page);await page.route('https://example.com/broken.png',route=>route.abort());
-  await page.evaluate(()=>{const state=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);state.players.find((p:{id:string})=>p.id==='p1').image='https://example.com/broken.png';localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(state))});
+  await fresh(page);await page.route('**/broken-image.png',route=>route.fulfill({status:404, contentType:'text/plain', body:'Not found'}));
+  await page.evaluate(()=>{const state=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);state.players.find((p:{id:string})=>p.id==='p1').image=location.origin+'/broken-image.png';localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(state))});
   await page.goto('/players/p1');await expect(page.locator('.profile-hero .avatar span')).toHaveText('OK');await expect(page.locator('.profile-hero .avatar img')).toHaveCount(0);
 });
 
