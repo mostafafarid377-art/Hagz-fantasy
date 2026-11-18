@@ -26,8 +26,62 @@
  * Run: node scripts/check-pages-env.mjs
  */
 
+// ---------------------------------------------------------------------------
+// --self-test: prove the guard itself, so it cannot silently stop guarding.
+//
+// The check only ever runs in the Pages workflow, where the real values are
+// injected; that makes it exactly the kind of code that rots unnoticed. This mode
+// re-runs the script as a child process with synthetic inputs and asserts the exit
+// code for each case. It never reads or prints the real configuration.
+//
+// Wired into `npm run verify:all`, so `pull_request` CI exercises it on every PR.
+// ---------------------------------------------------------------------------
+if (process.argv.includes('--self-test')) {
+  const { spawnSync } = await import('node:child_process');
+  const FAKE_PUBLISHABLE = 'sb_publishable_' + 'x'.repeat(30);
+  const FAKE_SERVICE_ROLE = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJl';
+  const cases = [
+    ['approved project ref', 'https://ddeojemjbhnxtrgsuicv.supabase.co', FAKE_PUBLISHABLE, 0],
+    ['approved project ref with trailing slash', 'https://ddeojemjbhnxtrgsuicv.supabase.co/', FAKE_PUBLISHABLE, 0],
+    ['a different (staging/clone) project', 'https://zkrfgdiujpagaddsxbcb.supabase.co', FAKE_PUBLISHABLE, 1],
+    ['a non-Supabase host', 'https://example.com', FAKE_PUBLISHABLE, 1],
+    ['an empty URL', '', FAKE_PUBLISHABLE, 1],
+    ['a missing key', 'https://ddeojemjbhnxtrgsuicv.supabase.co', '', 1],
+    ['a too-short key', 'https://ddeojemjbhnxtrgsuicv.supabase.co', 'short', 1],
+    ['a service_role key', 'https://ddeojemjbhnxtrgsuicv.supabase.co', FAKE_SERVICE_ROLE, 1],
+  ];
+  let failed = 0;
+  for (const [name, url, key, expected] of cases) {
+    const run = spawnSync(process.execPath, [process.argv[1]], {
+      env: { ...process.env, VITE_SUPABASE_URL: url, VITE_SUPABASE_ANON_KEY: key },
+      encoding: 'utf8',
+    });
+    const actual = run.status;
+    const ok = actual === expected;
+    if (!ok) failed += 1;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name} -> exit ${actual} (expected ${expected})`);
+  }
+  console.log(`\n[pages-env:self-test] ${cases.length - failed}/${cases.length} cases behaved as expected.`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
 const url = (process.env.VITE_SUPABASE_URL ?? '').trim();
 const anonKey = (process.env.VITE_SUPABASE_ANON_KEY ?? '').trim();
+
+/**
+ * G5: the one project this bundle is allowed to talk to.
+ *
+ * The project ref is not a secret (it is the public subdomain of the API URL, and
+ * it already appears in the deployed bundle), so failing loudly with the ref in the
+ * message is safe *and* is the whole point: a build that points at a different
+ * project - a staging clone, a fork's own project, or a typo - publishes a site that
+ * looks healthy while every write lands somewhere nobody is watching. That is the
+ * same class of silent misconfiguration this script already guards against.
+ *
+ * Add a ref here deliberately, in a reviewed commit, if the deployment ever
+ * legitimately moves.
+ */
+const APPROVED_PROJECT_REFS = ['ddeojemjbhnxtrgsuicv'];
 
 const problems = [];
 
@@ -36,6 +90,13 @@ if (!url) {
 } else if (!/^https?:\/\//.test(url)) {
   // Deliberately does not echo the value.
   problems.push('VITE_SUPABASE_URL is not an http(s) URL');
+} else if (projectRefOf(url) === null) {
+  problems.push('VITE_SUPABASE_URL is not a https://<project-ref>.supabase.co URL');
+} else if (!APPROVED_PROJECT_REFS.includes(projectRefOf(url))) {
+  problems.push(
+    `VITE_SUPABASE_URL points at project "${projectRefOf(url)}", which is not the approved project. ` +
+      `Approved: ${APPROVED_PROJECT_REFS.join(', ')}. Refusing to publish a bundle that would write to another project.`,
+  );
 }
 
 if (!anonKey) {
@@ -71,6 +132,26 @@ console.log('[pages-env] Supabase configuration present and shape-valid; proceed
  * precedent. The app still refuses to create a client if this check is ever
  * bypassed, so the two are belt-and-braces rather than the only defence.
  */
+/**
+ * Extracts the project ref from a hosted Supabase API URL.
+ * Returns null for anything that is not one (custom domains included: those need a
+ * deliberate change to this check, not a silent pass).
+ */
+function projectRefOf(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    for (const suffix of ['.supabase.co', '.supabase.in']) {
+      if (host.endsWith(suffix)) {
+        const ref = host.slice(0, -suffix.length);
+        return /^[a-z0-9]{20}$/.test(ref) ? ref : null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function looksLikeServiceRoleKey(value) {
   if (!value) return false;
   if (value.startsWith('sb_secret_')) return true;
