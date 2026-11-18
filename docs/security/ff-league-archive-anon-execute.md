@@ -1,6 +1,6 @@
 # Residual risk: `public.ff_league_archive(uuid)` is executable by the `anon` role
 
-**Status: open · rating: LOW (fail-closed) with a MEDIUM systemic tail · no change applied**
+**Status: open · rating: LOW (fail-closed) with a MEDIUM systemic tail · fix prepared and rehearsed, not applied**
 Reviewed 2026-11-18 against the live project (`ddeojemjbhnxtrgsuicv`, PostgreSQL 17.11)
 and reproduced on the disposable rehearsal clone (`zkrfgdiujpagaddsxbcb`).
 **Production permissions were not modified.** This document is a review, not a change.
@@ -124,60 +124,59 @@ leader", so it cannot be used to enumerate leagues or leaders.
    verification step, the next migration can miss it too — and the next function
    might not check identity first.
 
-## 5. Recommended remediation (prepared, **not applied**)
+## 5. Remediation — prepared, rehearsed on the clone, **not applied to production**
 
-**a. One-line fix, safe with the current frontend and the current RPC contract**
-(nothing in the app calls this RPC as `anon`; the client is always signed in):
+Artefact: **`docs/security/027_anon_execute_hardening.sql`** (revoke + invariant
+assertion). It is deliberately kept out of `supabase/migrations/` until the rollback
+window closes: that directory is a pinned, hashed package
+(`scripts/check-migration-package.mjs`), and promoting a file into it is a reviewed step
+with its own hash.
 
-```sql
-revoke execute on function public.ff_league_archive(uuid) from anon;
-```
+### 5.1 What the rehearsal proved (disposable clone, 2026-11-18)
 
-Verify afterwards:
+| Step | Result |
+| --- | --- |
+| before | `anon` EXECUTE on `ff_league_archive` = **true**, 1 of 50 public functions, default acl includes `anon=X` |
+| after step 1 (`revoke … from anon`) | anon = **false**, **0** anon-executable public functions, `authenticated`/`service_role` unchanged, owner still `ff_migration_owner` |
+| re-run (idempotency) | applied twice without error |
+| leader path still works | leader `30a0b57f…` archived league `f0ec0fa4…` → `{"id": …, "archived": true}` (clone state restored afterwards) |
+| anon path afterwards | `42501 permission denied for function ff_league_archive` — refused at the grant, before the function body |
+| assertion (step 2) | passes: 0 anon-executable, 50 authenticated-executable |
 
-```sql
-select p.proname, has_function_privilege('anon', p.oid, 'execute') as anon_can_execute
-  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
- where n.nspname = 'public' and has_function_privilege('anon', p.oid, 'execute');
--- expected: 0 rows
-```
+### 5.2 A finding that changes the fix: default privileges are not a defence
 
-**b. Make it structural, in a reviewed migration** (e.g. `027_anon_execute_hardening`),
-rather than a one-off dashboard edit:
+The obvious hardening — `alter default privileges for role postgres in schema public
+revoke execute on functions from anon` — **does not work here**, and it fails in a way
+that looks like success:
 
-```sql
--- 1. close the known grant (idempotent)
-revoke execute on function public.ff_league_archive(uuid) from anon;
+* the revoke does take effect: the `pg_default_acl` row for `postgres`/`public`/`f` loses
+  `anon=X`, and a grant added the same way *does* appear on the next function created;
+* but a function created immediately afterwards still came out as
+  `{=X/postgres, postgres=X/postgres, authenticated=X/postgres, service_role=X/postgres}`
+  — PostgreSQL re-adds the built-in **PUBLIC** EXECUTE on functions — and `anon` inherits
+  PUBLIC. Adding `revoke … from public` to the default privileges changed nothing, because
+  the row never contained the PUBLIC grant to remove.
 
--- 2. stop the default from re-opening it for every future function
-alter default privileges for role postgres in schema public
-  revoke execute on functions from anon;
+So the durable guard has to be the **assertion**, not the default. That is what step 2 is:
+any migration that creates a function without an explicit `revoke … from anon` now fails
+loudly instead of quietly widening the API surface. The check has to run against a real
+Supabase database (PGlite has no `anon` role and no Supabase default privileges, which is
+exactly why the existing PGlite suite could not catch this class of defect).
 
--- 3. assert the invariant: nothing in public/ff_private is anon-executable
-do $$
-declare v_bad text;
-begin
-  select string_agg(p.proname, ', ') into v_bad
-    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname in ('public','ff_private')
-     and has_function_privilege('anon', p.oid, 'execute');
-  if v_bad is not null then
-    raise exception 'anon can execute: %', v_bad;
-  end if;
-end $$;
-```
+### 5.3 Application procedure (after the rollback window, as a normal reviewed change)
 
-**c. Extend the repository guard** so the invariant is checked by `npm run verify:all`
-rather than by memory — a PGlite/catalog assertion alongside the existing
-`supabase/design/tests/*` suite, run against the migration chain. (The current 013
-check is a migration-time assertion about `PUBLIC`; it needs a companion assertion
-about named grantees, otherwise a re-run of the same mistake passes silently.)
+1. promote the SQL into the pinned package (`supabase/design/migrations/` → hash pin →
+   `npm run migrations:promote`), in one reviewed commit with the hash update;
+2. `npm run verify:all` and CI;
+3. apply in a quiet window (it is a `REVOKE` plus a `DO` block: no table access, no lock
+   beyond the catalog);
+4. verify afterwards with the same assertion — it is re-runnable.
 
-**Sequencing.** (a) is safe at any time and is the minimum. (b) and (c) belong to the
-next schema change, not to a live incident. **None of them is part of the 026
-rollback**, and none of them should be smuggled into it: the reverse migration
-deliberately neither creates nor removes this grant, so a rollback leaves the posture
-exactly as it is today.
+### 5.4 Clone hygiene
+
+The clone now carries the 027 grants change (0 anon-executable functions) but its default
+privileges were **restored to their original values** afterwards, so it stays a faithful
+rehearsal target. Production was not touched.
 
 ## 6. Why this does not block the rollback
 
