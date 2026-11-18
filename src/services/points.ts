@@ -127,18 +127,20 @@ function aggregate(
  * receives no rows. Failures throw, so a permission or network problem surfaces as
  * an error on screen instead of looking like "no points".
  */
-export async function leaguePoints(leagueId: string, seasonId?: string | null): Promise<PointsSnapshot> {
+export async function leaguePoints(leagueId: string, seasonId?: string | null, signal?: AbortSignal): Promise<PointsSnapshot> {
   const supabase = getSupabase();
   if (!supabase) return { ...EMPTY_POINTS, error: 'Supabase is not configured' };
 
   const fail = (message: string): PointsSnapshot => ({ ...EMPTY_POINTS, error: message });
+  const cancellable = <T extends { abortSignal(signal: AbortSignal): T }>(query: T) => signal
+    ? query.abortSignal(signal) : query;
 
   // --- 1. Officially approved, current results ------------------------------
-  const officials = await supabase
+  const officials = await cancellable(supabase
     .from('official_match_results')
     .select('id,match_id,revision_id')
     .eq('league_id', leagueId)
-    .eq('is_current', true);
+    .eq('is_current', true));
   if (officials.error) return fail(officials.error.message);
   const officialRows = (officials.data ?? []) as OfficialRow[];
   if (officialRows.length === 0) {
@@ -147,11 +149,11 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
 
   // --- 2. Their matches (for the real kick-off time) and gameweeks ----------
   const matchIds = [...new Set(officialRows.map((row) => row.match_id))];
-  const matches = await supabase
+  const matches = await cancellable(supabase
     .from('real_matches')
     .select('id,gameweek_id,starts_at')
     .eq('league_id', leagueId)
-    .in('id', matchIds);
+    .in('id', matchIds));
   if (matches.error) return fail(matches.error.message);
   const matchRows = (matches.data ?? []) as MatchRow[];
   if (matchRows.length === 0) {
@@ -159,11 +161,11 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
   }
 
   const gameweekIds = [...new Set(matchRows.map((row) => row.gameweek_id))];
-  const gameweeks = await supabase
+  const gameweeks = await cancellable(supabase
     .from('gameweeks')
     .select('id,season_id,number')
     .eq('league_id', leagueId)
-    .in('id', gameweekIds);
+    .in('id', gameweekIds));
   if (gameweeks.error) return fail(gameweeks.error.message);
   const gameweekRows = (gameweeks.data ?? []) as GameweekRow[];
   const gameweekById = new Map(gameweekRows.map((row) => [row.id, row]));
@@ -198,20 +200,20 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
   const loadItems = async (resultIds: string[]): Promise<ItemBatch> => {
     if (resultIds.length === 0) return { items: [], perfs: [], error: null };
 
-    const { data: perfs, error: perfError } = await supabase
+    const { data: perfs, error: perfError } = await cancellable(supabase
       .from('match_player_performances')
       .select('id,player_id,played')
       .eq('league_id', leagueId)
-      .in('official_result_id', resultIds);
+      .in('official_result_id', resultIds));
     if (perfError) return { items: [], perfs: [], error: perfError.message };
     const perfRows = (perfs ?? []) as PerformanceRow[];
     if (perfRows.length === 0) return { items: [], perfs: [], error: null };
 
-    const { data: items, error: itemError } = await supabase
+    const { data: items, error: itemError } = await cancellable(supabase
       .from('fantasy_score_items')
       .select('performance_id,points,fantasy_lineup_id')
       .eq('league_id', leagueId)
-      .in('performance_id', perfRows.map((row) => row.id));
+      .in('performance_id', perfRows.map((row) => row.id)));
     if (itemError) return { items: [], perfs: [], error: itemError.message };
     return { items: (items ?? []) as ScoreItemRow[], perfs: perfRows, error: null };
   };
@@ -233,11 +235,11 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
   const lineupIds = [...new Set(allItems.map((row) => row.fantasy_lineup_id))];
   let lineupRows: LineupRow[] = [];
   if (lineupIds.length > 0) {
-    const { data, error } = await supabase
+    const { data, error } = await cancellable(supabase
       .from('fantasy_lineups')
       .select('id,fantasy_team_id')
       .eq('league_id', leagueId)
-      .in('id', lineupIds);
+      .in('id', lineupIds));
     if (error) return fail(error.message);
     lineupRows = (data ?? []) as LineupRow[];
   }
@@ -248,11 +250,11 @@ export async function leaguePoints(leagueId: string, seasonId?: string | null): 
   ])];
   let leaguePlayerRows: LeaguePlayerRow[] = [];
   if (playerIds.length > 0) {
-    const { data, error } = await supabase
+    const { data, error } = await cancellable(supabase
       .from('league_players')
       .select('id,player_id')
       .eq('league_id', leagueId)
-      .in('player_id', playerIds);
+      .in('player_id', playerIds));
     if (error) return fail(error.message);
     leaguePlayerRows = (data ?? []) as LeaguePlayerRow[];
   }

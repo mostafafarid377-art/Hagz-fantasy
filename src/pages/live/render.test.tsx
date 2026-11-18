@@ -1,3 +1,4 @@
+import '../../test/indexedDbSetup';
 /**
  * @vitest-environment jsdom
  *
@@ -241,12 +242,16 @@ describe('live mode never presents refused data as emptiness', () => {
     };
     vi.doMock('../../services/api', () => ({
       ApiError: class extends Error {},
-      bootstrap: async () => ({
-        profile: { id: 'u1', display_name: 'Me' },
-        leagues: [{
-          league_id: 'L1', name: 'L', role: 'leader', status: 'active', budget: 100,
-          market_open: true, archived: false, is_leader: true, is_organizer: false,
-        }],
+      withDeadline: (_label: string, run: (signal: AbortSignal) => Promise<unknown>) => run(new AbortController().signal),
+      createBootstrapSession: () => ({
+        close: () => {},
+        load: async () => ({
+          profile: { id: 'u1', display_name: 'Me' },
+          leagues: [{
+            league_id: 'L1', name: 'L', role: 'leader', status: 'active', budget: 100,
+            market_open: true, archived: false, is_leader: true, is_organizer: false,
+          }],
+        }),
       }),
       leagueMembers: denied, marketPlayers: denied, squad: denied, suggestions: denied,
       gameweeks: denied, matches: denied, transfers: denied, standings: denied, notifications: denied,

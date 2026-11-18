@@ -14,6 +14,7 @@ import { BackLink } from '../../components/Navigation';
 import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
+import { SquadChangeNotice } from './Squad';
 import type { Position } from '../../types/api';
 
 const positions: readonly Position[] = ['GK', 'DEF', 'MID', 'FWD'];
@@ -49,11 +50,12 @@ export function LiveMarket() {
   const owned = new Set((live.squad?.players ?? []).map((p) => p.league_player_id));
 
   async function add(player: ApiPlayer) {
+    if (busy || live.squadChange) return;
     setBusy(player.id); setNotice('');
     try {
       await live.buy(player.id);
       setNotice(t('Player added to your squad.'));
-    } catch { /* live.error shows the reason */ } finally { setBusy(''); }
+    } catch { /* The squad recovery notice or live.error shows the reason. */ } finally { setBusy(''); }
   }
 
   if (live.loading) return <Loading />;
@@ -69,6 +71,7 @@ export function LiveMarket() {
       {live.error && <ErrorNote message={live.error} onRetry={() => void live.reload()} />}
       <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
       <Success message={notice} />
+      <SquadChangeNotice />
       {!live.league.market_open && (
         <p className="notice">{t('The market is closed. You cannot add players until your leader opens it.')}</p>
       )}
@@ -121,7 +124,7 @@ export function LiveMarket() {
                   <div><small>{t('PRICE')}</small><strong>{formatCompactMoney(player.price)}</strong></div>
                   <button
                     className={mine ? 'button button-muted' : 'button button-small'}
-                    disabled={mine || !live.league!.market_open || busy === player.id
+                    disabled={mine || !live.league!.market_open || !!busy || !!live.squadChange
                       || (live.squad?.players?.length ?? 0) >= 15}
                     onClick={() => void add(player)}
                   >

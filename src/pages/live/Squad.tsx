@@ -8,13 +8,14 @@
 // Starters are the first 11 entries of the lineup array and the bench is the last
 // 4 - the same convention ff_lineup_save() validates server-side.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Shield, UserMinus, UserPlus } from 'lucide-react';
 import { Avatar, Badge, Empty, PageTitle, SectionHead } from '../../components/UI';
 import { formatCompactMoney } from '../../utils/format';
 import { useLive } from '../../hooks/useLive';
+import { ApiError } from '../../services/api';
 import { ErrorNote, Loading, PartialDataNote, Success } from './League';
 import { Pitch } from '../Dashboard';
 import { formations, limits, substitutionTargets } from '../../services/rules';
@@ -45,10 +46,79 @@ function saveSquadOrder(leagueId: string, ids: string[]) {
   }
 }
 
+function clearSavedSquadOrder(leagueId: string) {
+  try {
+    window.localStorage.removeItem(`${SQUAD_ORDER_STORAGE_PREFIX}${leagueId}`);
+  } catch {
+    // In-memory order still applies for this session.
+  }
+}
+
+/**
+ * Reconcile a remembered order against the authoritative roster.
+ * - Unchanged roster: returns the exact saved order (preserves GK slot,
+ *   captain/vice positions that depend on order).
+ * - Changed roster: keeps survivors in saved order, drops departed IDs,
+ *   appends new IDs in server order (new bench players stay benched).
+ * - No saved order: returns [] so the formation fallback applies.
+ */
+function reconcileSquadOrder(ids: string[] | null | undefined, players: Array<{ league_player_id: string }>): string[] {
+  if (!ids?.length) return [];
+  const current = new Set(players.map((player) => player.league_player_id));
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const id of ids) {
+    if (current.has(id) && !seen.has(id)) { seen.add(id); kept.push(id); }
+  }
+  for (const player of players) {
+    if (!seen.has(player.league_player_id)) kept.push(player.league_player_id);
+  }
+  return kept;
+}
+
+export function SquadChangeNotice({ onReview }: { onReview?: () => void }) {
+  const { t } = useTranslation();
+  const { squadChange, refreshSquad, hasSquadReceipt, retrySquadReceipt, cancelSquadReceipt } = useLive();
+  if (!squadChange) return null;
+  if (squadChange === 'saving' || squadChange === 'refreshing' || squadChange === 'verifying') {
+    return <p className="swap-banner notice" role="status">
+      {t(squadChange === 'saving' ? 'Saving squad change…' : 'Refreshing squad…')}
+    </p>;
+  }
+  return (
+    <div className="swap-banner">
+      {squadChange === 'refreshRequired' ? <>
+        <span role="alert">{t('Your squad operation is unresolved. Checking does not submit it again.')}</span>
+        <button type="button" className="button button-outline" onClick={() => void refreshSquad()}>{t('Check operation')}</button>
+        {hasSquadReceipt && <>
+          <button type="button" className="button button-outline" onClick={() => void retrySquadReceipt()}>{t('Retry same operation')}</button>
+          <button type="button" className="button button-outline" onClick={() => void cancelSquadReceipt()}>{t('Cancel operation')}</button>
+        </>}
+      </> : <>
+        <span role="status">{t('Your squad was refreshed. Review it and select players again to retry.')}</span>
+        {onReview
+          ? <button type="button" className="button button-outline" onClick={onReview}>{t('Choose players again')}</button>
+          : <Link className="button button-outline" to="/squad">{t('Review squad')}</Link>}
+      </>}
+    </div>
+  );
+}
+
 export function LiveSquad({ builder = false, transfers = false }: { builder?: boolean; transfers?: boolean }) {
   const { t } = useTranslation();
   const live = useLive();
   const [busy, setBusy] = useState('');
+  const pending = useRef<symbol | null>(null);
+  const locked = Boolean(busy || live.squadChange);
+  // A successful write is briefly 'verifying' too; do not discard the user's
+  // selection unless recovery is actually required.
+  const recovering = live.squadChange === 'refreshRequired' || live.squadChange === 'refreshing' || live.squadChange === 'reviewRequired';
+  // Completion of an old route/league action must not edit the new screen or
+  // persist its captured lineup order. The provider owns the underlying write.
+  useLayoutEffect(() => {
+    setBusy('');
+    return () => { pending.current = null; };
+  }, [live.leagueId, live.loading, builder, transfers]);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [formation, setFormation] = useState<Formation>((live.squad?.formation as Formation) ?? '4-3-3');
@@ -67,11 +137,11 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   useEffect(() => {
     const saved = live.squad?.formation as Formation | undefined;
     setFormation(saved ?? '4-3-3');
-  }, [live.leagueId, live.squad?.formation]);
+  }, [live.leagueId, live.squad?.formation, recovering]);
   useEffect(() => {
     setCaptain(live.squad?.captain_id ?? null);
     setVice(live.squad?.vice_captain_id ?? null);
-  }, [live.leagueId, live.squad?.captain_id, live.squad?.vice_captain_id]);
+  }, [live.leagueId, live.squad?.captain_id, live.squad?.vice_captain_id, recovering]);
   const [selectedId, setSelectedId] = useState('');
   const [swapSource, setSwapSource] = useState('');
   const [outPlayer, setOutPlayer] = useState('');
@@ -101,8 +171,50 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     previousBuilder.current = builder;
     if (leagueChanged) setOrderHint(null);
     setEditing(builder || (live.squad?.players.length ?? 0) === 0);
-    setSelectedId(''); setSwapSource(''); setAddPosition(undefined); setBusy('');
+    setSelectedId(''); setSwapSource(''); setAddPosition(undefined);
+    setOutPlayer(''); setInPlayer(''); setError(''); setNotice('');
   }, [builder, live.leagueId, live.loading, live.squad?.players.length]);
+  useEffect(() => {
+    if (!recovering || !live.leagueId) return;
+    setSelectedId(''); setSwapSource(''); setAddPosition(undefined);
+    setOutPlayer(''); setInPlayer(''); setError(''); setNotice('');
+    // Preserve the exact remembered order when the roster is unchanged so the
+    // starting keeper, captain and vice-captain stay put. Only reconcile
+    // (drop departed, append new) when the authoritative roster changed, and
+    // persist that reconciliation so stale IDs do not linger in storage.
+    if (!live.squad || live.partialFailures.some((failure) => failure.startsWith('squad:'))) return;
+    const currentPlayers = live.squad.players;
+    const saved = orderHint?.leagueId === live.leagueId
+      ? orderHint.ids : readSavedSquadOrder(live.leagueId);
+    if (saved?.length) {
+      const reconciled = reconcileSquadOrder(saved, currentPlayers);
+      if (reconciled.length) {
+        setOrderHint({ leagueId: live.leagueId, ids: reconciled });
+        saveSquadOrder(live.leagueId, reconciled);
+      } else {
+        setOrderHint({ leagueId: live.leagueId, ids: [] });
+        clearSavedSquadOrder(live.leagueId);
+      }
+    }
+    // No remembered order: leave the hint alone so the formation fallback
+    // (and any server slots) drive the layout.
+  }, [recovering, live.leagueId, live.squad, live.partialFailures]);
+  // Outside recovery, drop departed IDs from persisted order so stale state
+  // from a previous roster does not linger. New IDs are not appended here:
+  // server slots (or the next explicit save/buy) own their placement.
+  useEffect(() => {
+    // A failed read is not an authoritative empty roster. Never delete a
+    // remembered order based on a missing or stale squad snapshot.
+    if (!live.leagueId || live.loading || recovering || !live.squad
+        || live.partialFailures.some((failure) => failure.startsWith('squad:'))) return;
+    const saved = readSavedSquadOrder(live.leagueId);
+    if (!saved?.length) return;
+    const current = new Set((live.squad?.players ?? []).map((player) => player.league_player_id));
+    const cleaned = saved.filter((id) => current.has(id));
+    if (cleaned.length === saved.length) return;
+    if (cleaned.length) saveSquadOrder(live.leagueId, cleaned);
+    else clearSavedSquadOrder(live.leagueId);
+  }, [live.leagueId, live.loading, live.squad, live.partialFailures, recovering]);
 
   const squad = live.squad;
   const players = squad?.players ?? [];
@@ -121,9 +233,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   if (!live.league) return <Empty title="Join or create a league" to="/create-league" action="Create League" />;
 
   /** Saved slots, remembered order, then a formation-balanced fallback. */
-  const preferredOrder = orderHint?.leagueId === live.leagueId
+  const rawOrder = orderHint?.leagueId === live.leagueId
     ? orderHint.ids
     : live.leagueId ? readSavedSquadOrder(live.leagueId) ?? [] : [];
+  const preferredOrder = reconcileSquadOrder(rawOrder, players);
   const orderIndex = new Map(preferredOrder.map((id, index) => [id, index]));
   const fallbackFormation = formations[formation] ?? formations['4-3-3'];
   const fallbackPositions: Position[] = ['GK', 'DEF', 'MID', 'FWD'];
@@ -149,11 +262,26 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     return (fallbackIndex.get(a.league_player_id) ?? 100) - (fallbackIndex.get(b.league_player_id) ?? 100);
   });
 
-  async function run(key: string, action: () => Promise<void>, success?: string) {
+  async function run(key: string, action: () => Promise<void>, success: string, onSuccess?: () => void) {
+    if (locked || pending.current) return;
+    const token = Symbol();
+    pending.current = token;
     setBusy(key); setError(''); setNotice('');
-    try { await action(); if (success) setNotice(t(success)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t('That did not work')); }
-    finally { setBusy(''); }
+    try {
+      await action();
+      if (pending.current !== token) return;
+      onSuccess?.();
+      setNotice(t(success));
+    } catch (caught) {
+      // Recoverable failures use the shared panel, not the obsolete selection.
+      if (pending.current !== token || (caught instanceof ApiError && ['conflict', 'network'].includes(caught.code))) return;
+      setError(caught instanceof Error ? caught.message : t('That did not work'));
+    } finally {
+      if (pending.current === token) {
+        pending.current = null;
+        setBusy('');
+      }
+    }
   }
 
   // ---- transfers -----------------------------------------------------------
@@ -172,12 +300,13 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
         <PartialDataNote failures={live.partialFailures} onRetry={() => void live.reload()} />
         {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
         <Success message={notice} />
+        <SquadChangeNotice onReview={live.acknowledgeSquadRefresh} />
 
         {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
         <div className="panel form-panel">
           <label>{t('Player to transfer out')}
-            <select value={outPlayer} onChange={(e) => { setOutPlayer(e.target.value); setInPlayer(''); }}>
+            <select value={outPlayer} disabled={locked} onChange={(e) => { setOutPlayer(e.target.value); setInPlayer(''); }}>
               <option value="">{t('Select a player')}</option>
               {outOptions.map((p) => (
                 <option key={p.league_player_id} value={p.league_player_id}>
@@ -187,7 +316,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             </select>
           </label>
           <label>{t('Replacement player')}
-            <select value={inPlayer} onChange={(e) => setInPlayer(e.target.value)} disabled={!outgoing}>
+            <select value={inPlayer} onChange={(e) => setInPlayer(e.target.value)} disabled={!outgoing || locked}>
               <option value="">{t('Select a player')}</option>
               {inOptions.map((p) => (
                 <option key={p.id} value={p.id}>{p.name} · {formatCompactMoney(p.price)}{identityHint(p.id)}</option>
@@ -199,11 +328,10 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
               <span>{t('After transfer')}: {formatCompactMoney(remaining + outgoing.price - (inOptions.find((p) => p.id === inPlayer)?.price ?? 0))}</span>
             </div>
           )}
-          <button className="button" disabled={!outPlayer || !inPlayer || !live.league.market_open || busy === 'transfer'}
-            onClick={() => void run('transfer', async () => {
-              await live.transfer(outPlayer, inPlayer);
+          <button className="button" disabled={locked || !outPlayer || !inPlayer || !live.league.market_open}
+            onClick={() => void run('transfer', () => live.transfer(outPlayer, inPlayer), 'Transfer confirmed.', () => {
               setOutPlayer(''); setInPlayer('');
-            }, 'Transfer confirmed.')}>
+            })}>
             {busy === 'transfer' ? t('Transferring…') : t('Confirm transfer')}
           </button>
           <Link className="text-link" to="/market">{t('Explore the player market')} →</Link>
@@ -270,10 +398,9 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
   const targets = swapSource ? substitutionTargets(ruleSquad, allPlayers, swapSource) : [];
   const selected = allPlayers.find(p => p.id === selectedId);
   const marketPlayers: Player[] = live.players.map(p => ({ id: p.id, leagueId: '', name: p.name, position: p.position, price: p.price, rating: p.rating, image: p.image_url ?? undefined, active: p.active, points: 0, color: '#a9b9a5', attributes: { pace: 0, shooting: 0, passing: 0, defending: 0, physical: 0 } }));
-  const save = async (playerIds: string[], captainId: string | null, viceCaptainId: string | null) => {
-    await live.saveLineup({ gameweekId: squad?.gameweek_id, formation, playerIds, captainId, viceCaptainId });
-    rememberOrder(playerIds);
-  };
+  const save = (playerIds: string[]) => live.saveLineup({
+    gameweekId: squad?.gameweek_id, formation, playerIds, captainId: captain, viceCaptainId: vice,
+  });
   const formationCounts = (selected: typeof ordered) => ({
     GK: selected.filter(p => p.position === 'GK').length,
     DEF: selected.filter(p => p.position === 'DEF').length,
@@ -297,6 +424,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     ...(!squad?.gameweek_id && (live.gameweeks?.length ?? 0) === 0 ? [t('A season with a gameweek is required to save a lineup.')] : []),
   ];
   function selectPlayer(p: Player) {
+    if (locked || pending.current) return;
     if (!swapSource) { setError(''); setSelectedId(p.id); return; }
     if (!targets.includes(p.id)) return;
     const next = [...ids]; const a = next.indexOf(swapSource), b = next.indexOf(p.id);
@@ -304,12 +432,15 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
     [next[a], next[b]] = [next[b], next[a]];
     // Captaincy belongs to the squad; the server validates that both selected IDs
     // remain in the submitted 15-player lineup.
-    void run('lineup', async () => { await save(next, captain, vice); setSwapSource(''); }, 'Players swapped.');
+    void run('lineup', () => save(next), 'Players swapped.', () => {
+      rememberOrder(next); setSwapSource('');
+    });
   }
   function buyIntoSquad(playerId: string) {
-    const ids = ordered.map((player) => player.league_player_id);
-    rememberOrder([...ids.filter((id) => id !== playerId), playerId]);
-    return run('add', () => live.buy(playerId), 'Player added to your squad.');
+    return run('add', () => {
+      rememberOrder([...ids.filter((id) => id !== playerId), playerId]);
+      return live.buy(playerId);
+    }, 'Player added to your squad.');
   }
 
   return (
@@ -341,10 +472,11 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
       {live.error && <ErrorNote message={live.error} />}
       {error && <p className="error" role="alert"><AlertCircle size={14} /> {error}</p>}
       <Success message={notice} />
+      <SquadChangeNotice onReview={live.acknowledgeSquadRefresh} />
       {!live.league.market_open && <p className="notice">{t('The market is closed.')}</p>}
 
-      {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
-      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={!!busy} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
+      {swapSource && <div className="swap-banner" role="status"><strong>{t('Choose a player to swap')}</strong><button type="button" className="button button-outline" disabled={locked} onClick={() => setSwapSource('')}>{t('Cancel swap')}</button></div>}
+      {selected && <LivePlayerSheet key={selected.id} player={selected} players={marketPlayers} ownedIds={ids} starter={ids.indexOf(selected.id) < 11} captainId={captain} viceId={vice} editing={editing} remaining={remaining} marketOpen={live.league.market_open} canSwap={substitutionTargets(ruleSquad, allPlayers, selected.id).length > 0} busy={locked} points={lastGamePointsForPlayer(live.points, selected.id)} error={error} close={() => { setSelectedId(''); setError(''); }} startSwap={() => { setSwapSource(selected.id); setSelectedId(''); }} setCaptain={type => {
         const nextCaptain = type === 'captain'
           ? (captain === selected.id ? null : selected.id)
           : (captain === selected.id ? null : captain);
@@ -355,13 +487,12 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           setError(t('Captain and vice captain must be different players.'));
           return;
         }
-        void run('captaincy', async () => {
-          await live.setSquadCaptains(nextCaptain, nextVice);
+        void run('captaincy', () => live.setSquadCaptains(nextCaptain, nextVice), 'Captaincy updated.', () => {
           setCaptain(nextCaptain);
           setVice(nextVice);
-        }, 'Captaincy updated.');
-      }} transfer={id => void run('transfer', async () => { await live.transfer(selected.id, id); setSelectedId(''); }, 'Transfer confirmed.')} remove={() => void run('sell', async () => { await live.sell(selected.id); setSelectedId(''); }, 'Player removed from your squad.')} />}
-      <div className="squad-layout">
+        });
+      }} transfer={id => void run('transfer', () => live.transfer(selected.id, id), 'Transfer confirmed.', () => setSelectedId(''))} remove={() => void run('sell', () => live.sell(selected.id), 'Player removed from your squad.', () => setSelectedId(''))} />}
+      <fieldset className="squad-layout min-w-0" disabled={locked}>
         <div className="panel">
           <SectionHead eyebrow="YOUR TEAM" title={hasSquad && !editing ? 'Starting XI' : 'Your squad'} />
           {(!hasSquad || editing) && (
@@ -416,12 +547,12 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
             </div>
           </div>}
         </div>
-      </div>
+      </fieldset>
 
       {/* Mode switches never change the saved order: they only enable or hide edit
           controls. The market action is therefore unavailable in read-only View mode. */}
       <div className="squad-actions">
-        <button type="button" className="button button-outline" onClick={() => {
+        <button type="button" className="button button-outline" disabled={locked} onClick={() => {
           const next = !editing;
           setEditing(next);
           if (!next) {
@@ -437,8 +568,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
         <section className="panel section-spacer lineup-save-panel">
           <SectionHead eyebrow="THE LINEUP" title="Save lineup changes" />
           {lineupSaveBlockers.length > 0 && <ul className="lineup-save-blockers" role="status">{lineupSaveBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
-          <button type="button" className="button" disabled={busy === 'lineup-save' || lineupSaveBlockers.length > 0}
-            onClick={() => void run('lineup-save', async () => { await save(ids, captain, vice); }, 'Lineup saved.')}>
+          <button type="button" className="button" disabled={locked || lineupSaveBlockers.length > 0}
+            onClick={() => void run('lineup-save', () => save(ids), 'Lineup saved.', () => rememberOrder(ids))}>
             {busy === 'lineup-save' ? t('Saving…') : t('Save lineup')}
           </button>
         </section>
@@ -457,7 +588,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
 
           <div className="formation-select">
             <label>{t('Sell a player')}
-              <select aria-label={t('Sell a player')} value={outPlayer}
+              <select aria-label={t('Sell a player')} value={outPlayer} disabled={locked}
                 onChange={(e) => setOutPlayer(e.target.value)}>
                 <option value="">{t('Select a player')}</option>
                 {ordered.map((p) => (
@@ -471,11 +602,8 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
 
           {outPlayer && (
             <div className="confirm-lineup">
-              <button className="button button-outline" disabled={busy === 'sell'}
-                onClick={() => void run('sell', async () => {
-                  await live.sell(outPlayer);
-                  setOutPlayer('');
-                }, 'Player sold.')}>
+              <button className="button button-outline" disabled={locked}
+                onClick={() => void run('sell', () => live.sell(outPlayer), 'Player sold.', () => setOutPlayer(''))}>
                 <UserMinus size={15} /> {busy === 'sell' ? t('Selling…') : t('Sell selected player')}
               </button>
             </div>
@@ -490,7 +618,7 @@ export function LiveSquad({ builder = false, transfers = false }: { builder?: bo
           ownedIds={ordered.map((p) => p.league_player_id)}
           remaining={remaining}
           marketOpen={live.league.market_open}
-          busy={busy === 'add'}
+          busy={locked}
           onPick={(player) => buyIntoSquad(player.id)}
           close={() => setAddPosition(undefined)}
         />

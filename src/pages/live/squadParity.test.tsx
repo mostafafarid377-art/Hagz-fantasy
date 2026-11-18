@@ -1,3 +1,5 @@
+import { receiptServer } from '../../test/receiptServer';
+import '../../test/indexedDbSetup';
 /**
  * @vitest-environment jsdom
  *
@@ -6,7 +8,7 @@
  * the server-authoritative lineup or routing the manager into a dead-end screen.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import '../../translations';
 
@@ -39,12 +41,14 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
   let captaincyArgs: Record<string, unknown> | undefined;
   let captainId: string | null = null;
   let viceId: string | null = null;
+  const handleReceipt = receiptServer((name, args) => client.rpc(name, args));
   const client = {
     auth: {
-      getSession: async () => ({ data: { session: null }, error: null }),
+      getSession: async () => ({ data: { session: { user: { id: 'u1' } } }, error: null }),
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
     },
     rpc: async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === 'ff_operation_for_actor') return handleReceipt(args!);
       calls.push(fn);
       if (fn === 'ff_lineup_save') lineupArgs = args;
       if (fn === 'ff_squad_set_captains') { captaincyArgs = args; captainId = (args?.p_captain as string | null) ?? null; viceId = (args?.p_vice as string | null) ?? null; }
@@ -79,6 +83,7 @@ async function mountLiveSquad(players = FULL_SQUAD, formation = '4-3-3') {
     );
   });
   for (let i = 0; i < 4; i += 1) await act(async () => { await Promise.resolve(); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
   return { calls, getLineupArgs: () => lineupArgs, getCaptaincyArgs: () => captaincyArgs };
 }
 
@@ -167,17 +172,20 @@ describe('View Squad keeps captaincy and substitution while hiding roster change
     const { calls, getCaptaincyArgs } = await mountLiveSquad(FULL_SQUAD, '5-4-1');
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
+    await waitFor(() => expect(calls.filter(call => call === 'ff_squad_set_captains')).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P3' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Vice captain' })); });
-    expect(calls.filter(call => call === 'ff_squad_set_captains')).toHaveLength(2);
+    await waitFor(() => expect(calls.filter(call => call === 'ff_squad_set_captains')).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Vice captain' }).hasAttribute('disabled')).toBe(false));
     expect(getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp3' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     fireEvent.click(screen.getByRole('button', { name: 'Make substitution' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select swap player: P13' })); });
-    expect(calls).toContain('ff_lineup_save');
+    await waitFor(() => expect(calls).toContain('ff_lineup_save'));
   });
 
   it('exposes formation, captaincy, replacement, and substitution controls in Edit Squad', async () => {
@@ -224,7 +232,7 @@ describe('captaincy can be set before the squad is complete', () => {
     expect(captainButton.hasAttribute('disabled')).toBe(false);
     await act(async () => { fireEvent.click(captainButton); });
 
-    expect(app.calls).toContain('ff_squad_set_captains');
+    await waitFor(() => expect(app.calls).toContain('ff_squad_set_captains'));
     expect(app.calls).not.toContain('ff_lineup_save');
     expect(app.getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: null });
   });
@@ -237,11 +245,13 @@ describe('captaincy can be set before the squad is complete', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P1' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Captain' })); });
 
+    await waitFor(() => expect(app.calls.filter(call => call === 'ff_squad_set_captains')).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Captain' }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     fireEvent.click(screen.getByRole('button', { name: 'Player details: P2' }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Vice captain' })); });
 
-    expect(app.calls.filter((call) => call === 'ff_squad_set_captains')).toHaveLength(2);
+    await waitFor(() => expect(app.calls.filter((call) => call === 'ff_squad_set_captains')).toHaveLength(2));
     expect(app.calls).not.toContain('ff_lineup_save');
     expect(app.getCaptaincyArgs()).toMatchObject({ p_captain: 'lp1', p_vice: 'lp2' });
   });

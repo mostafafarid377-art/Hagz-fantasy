@@ -1,3 +1,4 @@
+import '../../test/indexedDbSetup';
 /**
  * @vitest-environment jsdom
  *

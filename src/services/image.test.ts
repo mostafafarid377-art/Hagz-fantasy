@@ -29,6 +29,55 @@ describe('image service',()=>{
     await expect(validateImage(new File([png],'corrupt.png',{type:'image/png'}))).rejects.toMatchObject({code:'invalid'});
     expect(revoke).toHaveBeenCalled(); revoke.mockRestore();
   });
+  it('stores byte buffers rather than Blob values and preserves image bytes and MIME type', async () => {
+    const file = new File([png], 'photo.png', { type: 'image/png' });
+    const ref = await saveLocalImage(file);
+    const raw = await new Promise<unknown>((resolve, reject) => {
+      const open = indexedDB.open('fantasy-friends-images', 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result; const tx = db.transaction('images', 'readonly');
+        const get = tx.objectStore('images').get(ref);
+        get.onerror = () => reject(get.error);
+        tx.oncomplete = () => { db.close(); resolve(get.result); };
+      };
+    });
+    expect(raw).toMatchObject({ bytes: expect.any(ArrayBuffer), type: 'image/png' });
+    const loaded = await loadLocalImage(ref);
+    expect(loaded?.type).toBe('image/png');
+    expect(new Uint8Array(await loaded!.arrayBuffer())).toEqual(png);
+    await discardDraftImage(ref);
+  });
+  it('reads Blob records saved by older versions without migrating or deleting them', async () => {
+    const ref = 'local-image:00000000-0000-4000-8000-000000000001';
+    const old = new Blob([png], { type: 'image/png' });
+    await new Promise<void>((resolve, reject) => {
+      const open = indexedDB.open('fantasy-friends-images', 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result; const tx = db.transaction('images', 'readwrite');
+        tx.objectStore('images').put(old, ref);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+    });
+    const loaded = await loadLocalImage(ref);
+    expect(loaded?.type).toBe('image/png');
+    expect(new Uint8Array(await loaded!.arrayBuffer())).toEqual(png);
+  });
+  it('falls back to FileReader when Blob.arrayBuffer is unavailable', async () => {
+    class Reader {
+      result: ArrayBuffer | null = null; error = null;
+      onload?: () => void; onerror?: () => void; onabort?: () => void;
+      readAsArrayBuffer() { this.result = png.slice().buffer; queueMicrotask(() => this.onload?.()); }
+    }
+    vi.stubGlobal('FileReader', Reader);
+    const file = new File([png], 'photo.png', { type: 'image/png' });
+    Object.defineProperty(file, 'arrayBuffer', { value: undefined });
+    const ref = await saveLocalImage(file);
+    expect(new Uint8Array(await (await loadLocalImage(ref))!.arrayBuffer())).toEqual(png);
+    await discardDraftImage(ref);
+  });
   it('persists opaque references and deletes abandoned drafts without deleting committed images',async()=>{
     const file=new File([png],'photo.png',{type:'image/png'}); const ref=await saveLocalImage(file);
     expect(validImageValue(ref)).toBe(true); expect((await loadLocalImage(ref))?.size).toBe(file.size);

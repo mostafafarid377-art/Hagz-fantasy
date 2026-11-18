@@ -4,6 +4,9 @@ async function fresh(page: Page) {
   await page.goto('/dashboard');
   await page.evaluate(() => localStorage.clear());
   await page.reload();
+  // Wait for DemoProvider's initial persistence effect before tests edit the
+  // saved fixture; otherwise a late effect can overwrite the test's changes.
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('fantasy-friends-demo-v1'))).not.toBeNull();
 }
 async function role(page: Page, value: 'manager' | 'leader') {
   await page.goto('/settings'); await page.getByLabel('Demo role').selectOption(value);
@@ -140,9 +143,20 @@ test('existing base64 player photos migrate into IndexedDB without being lost', 
 });
 
 test('an unavailable URL falls back to player initials', async ({page})=>{
-  await fresh(page);await page.route('https://example.com/broken.png',route=>route.abort());
-  await page.evaluate(()=>{const state=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);state.players.find((p:{id:string})=>p.id==='p1').image='https://example.com/broken.png';localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(state))});
-  await page.goto('/players/p1');await expect(page.locator('.profile-hero .avatar span')).toHaveText('OK');await expect(page.locator('.profile-hero .avatar img')).toHaveCount(0);
+  await fresh(page);await page.route('**/broken-image.png',route=>route.fulfill({status:404, contentType:'text/plain', body:'Not found'}));
+  await page.evaluate(()=>{const state=JSON.parse(localStorage.getItem('fantasy-friends-demo-v1')!);state.players.find((p:{id:string})=>p.id==='p1').image=location.origin+'/broken-image.png';localStorage.setItem('fantasy-friends-demo-v1',JSON.stringify(state))});
+  await page.goto('/players/p1');
+  try {
+    await expect(page.locator('.profile-hero .avatar span')).toHaveText('OK');
+    await expect(page.locator('.profile-hero .avatar img')).toHaveCount(0);
+  } catch (error) {
+    const diagnostics = await page.evaluate(() => {
+      const image = document.querySelector<HTMLImageElement>('.profile-hero .avatar img');
+      const player = JSON.parse(localStorage.getItem('fantasy-friends-demo-v1') || '{}').players?.find((p:{id:string})=>p.id==='p1');
+      return { url: location.href, profile: !!document.querySelector('.profile-hero'), avatar: document.querySelector('.profile-hero .avatar')?.outerHTML, image: image && {src:image.src, complete:image.complete, naturalWidth:image.naturalWidth}, savedImage:player?.image };
+    });
+    throw new Error(`Fallback diagnostics: ${JSON.stringify(diagnostics)}; ${String(error)}`);
+  }
 });
 
 test('discarding a selected draft deletes the uncommitted blob', async ({page})=>{
@@ -219,28 +233,29 @@ test('responsive English and Arabic pages have no page overflow or critical brow
   const sizes=[{width:390,height:844},{width:768,height:1024},{width:1440,height:900}];
   const routes=['/','/login','/signup','/dashboard','/league','/create-league','/join-league','/market','/players/p1','/squad','/squad-builder','/transfers','/suggest','/fixtures','/match-center','/match-center/gw09','/head-to-head','/standings','/statistics','/points','/profile','/settings','/notifications'];
   for(const language of ['en','ar']){
-    await page.goto('/settings',{waitUntil:'networkidle'});
+    await page.goto('/settings',{waitUntil:'domcontentloaded'});
     if(language==='ar') await page.getByLabel('Language',{exact:true}).selectOption('ar');
     await expect(page.locator('html')).toHaveAttribute('dir',language==='ar'?'rtl':'ltr');
     for(const size of sizes){
       await page.setViewportSize(size);
       for(const route of routes){
-        await page.goto(route,{waitUntil:'networkidle'});
+        await page.goto(route,{waitUntil:'domcontentloaded'});
+        await expect(page.locator('#root')).not.toBeEmpty();
+        await page.evaluate(() => document.fonts.ready);
         const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,inner:window.innerWidth}));
         expect(dimensions.scroll,`${language} ${size.width}x${size.height} ${route}`).toBeLessThanOrEqual(dimensions.inner);
-        await expect(page.locator('#root')).not.toBeEmpty();
       }
-      await page.goto('/settings',{waitUntil:'networkidle'});
+      await page.goto('/settings',{waitUntil:'domcontentloaded'});
       await page.getByLabel(language==='ar'?'الدور التجريبي':'Demo role',{exact:true}).selectOption('leader');
-      await page.goto('/management',{waitUntil:'networkidle'});
+      await page.goto('/management',{waitUntil:'domcontentloaded'});
       await page.getByRole('button',{name:language==='ar'?'إنشاء لاعب':'Create player'}).click();
       await expect(page.locator('.form-panel')).toBeVisible();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth),`leader form ${language} ${size.width}`).toBeLessThanOrEqual(size.width);
-      await page.goto('/approvals',{waitUntil:'networkidle'});
+      await page.goto('/approvals',{waitUntil:'domcontentloaded'});
       await page.locator('.manage-row').filter({hasText:'Hady Wael'}).getByRole('button',{name:language==='ar'?'رفض':'Reject'}).click();
       await expect(page.locator('textarea')).toBeVisible();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth),`review form ${language} ${size.width}`).toBeLessThanOrEqual(size.width);
-      await page.goto('/settings',{waitUntil:'networkidle'});
+      await page.goto('/settings',{waitUntil:'domcontentloaded'});
       await page.getByLabel(language==='ar'?'الدور التجريبي':'Demo role',{exact:true}).selectOption('manager');
     }
   }

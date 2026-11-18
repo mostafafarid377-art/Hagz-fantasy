@@ -6,6 +6,9 @@ const prefix = 'local-image:';
 const drafts = new Set<string>();
 const DB = 'fantasy-friends-images';
 const STORE = 'images';
+// WebKit private/ephemeral contexts reject Blob/File values in IndexedDB.
+// Store bytes instead and keep reading blobs written by previous app versions.
+type StoredImage = { bytes: ArrayBuffer; type: string };
 export type ImageError = 'tooLarge' | 'invalid' | 'storage';
 export class ImageServiceError extends Error { constructor(public code: ImageError) { super(code); } }
 function openDatabase(): Promise<IDBDatabase> {
@@ -44,13 +47,30 @@ export async function validateImage(file: File): Promise<void> {
 }
 export async function saveLocalImage(blob: Blob): Promise<string> {
   const ref = prefix + crypto.randomUUID();
-  try { await transaction('readwrite', store => store.put(blob, ref)); }
+  try {
+    // Read before starting the transaction: an await inside it can make it inactive.
+    const bytes = typeof blob.arrayBuffer === 'function' ? await blob.arrayBuffer() : await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => reader.result instanceof ArrayBuffer ? resolve(reader.result) : reject(new Error('Invalid image data'));
+      reader.onerror = () => reject(reader.error ?? new Error('Could not read image'));
+      reader.onabort = () => reject(new Error('Image read aborted'));
+      reader.readAsArrayBuffer(blob);
+    });
+    const stored: StoredImage = { bytes, type: blob.type };
+    await transaction('readwrite', store => store.put(stored, ref));
+  }
   catch { throw new ImageServiceError('storage'); }
   drafts.add(ref); return ref;
 }
 export async function loadLocalImage(ref: string): Promise<Blob | undefined> {
   if (!isLocalImage(ref)) return undefined;
-  try { return await transaction('readonly', store => store.get(ref)); } catch { return undefined; }
+  try {
+    const stored: unknown = await transaction('readonly', store => store.get(ref));
+    if (stored instanceof Blob) return stored; // Existing user images stay readable.
+    if (stored && typeof stored === 'object' && 'bytes' in stored && stored.bytes instanceof ArrayBuffer
+        && 'type' in stored && typeof stored.type === 'string') return new Blob([stored.bytes], { type: stored.type });
+    return undefined;
+  } catch { return undefined; }
 }
 export async function deleteLocalImage(ref: string) {
   if (!isLocalImage(ref) || drafts.has(ref)) return;
